@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Uzay Çöpü ve Kessler Sendromu · SimLab</title>
+<meta name="description" content="Binlerce uydu ve enkaz: tek bir çarpışma zincirleme felakete dönüşebilir mi?">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body class="sim">
+<header class="topbar">
+  <a class="back" href="../../index.html" title="Tüm simülasyonlar">← SimLab</a>
+  <div class="title">🛰️ Uzay Çöpü ve Kessler Sendromu</div>
+  <span class="cat-chip">📰 Güncel Konular · #63</span>
+  <button class="icon-btn" id="info-btn" title="Nasıl çalışır?">ℹ️ Nasıl çalışır?</button>
+</header>
+<div class="layout">
+  <main id="stage"></main>
+  <aside id="panel"></aside>
+</div>
+<dialog class="modal" id="info-modal">
+  <div class="modal-head"><span>🛰️ Uzay Çöpü ve Kessler Sendromu</span><button class="modal-close" aria-label="Kapat">×</button></div>
+  <div class="modal-body"></div>
+</dialog>
+<script>
+window.SIM_META = {"id":"uzay-copu","title":"Uzay Çöpü ve Kessler Sendromu","desc":"Binlerce uydu ve enkaz: tek bir çarpışma zincirleme felakete dönüşebilir mi?","emoji":"🛰️","cat":"Güncel Konular"};
+window.addEventListener('error', function (e) {
+  if (document.querySelector('#stage canvas')) return;
+  var d = document.createElement('div'); d.className = 'fatal';
+  d.innerHTML = '<div><h2>😕 Simülasyon başlatılamadı</h2><p>Tarayıcınız WebGL desteklemiyor olabilir ya da bir hata oluştu.</p><p><small>' + String(e.message).replace(/</g, '&lt;') + '</small></p></div>';
+  document.getElementById('stage').appendChild(d);
+});
+</script>
+<script src="../../assets/simcore.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

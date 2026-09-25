@@ -1,0 +1,17 @@
+{
+  "name": "simlab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SimLab — Three.js tabanlı interaktif eğitim simülasyonları platformu",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:one": "node build.mjs --only",
+    "test": "node smoke.mjs",
+    "pack": "node build.mjs && node pack.mjs"
+  },
+  "dependencies": {
+    "esbuild": "0.28.2",
+    "three": "0.186.1"
+  }
+}
