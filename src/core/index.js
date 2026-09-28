@@ -51,14 +51,15 @@ export function createSim(o = {}) {
   const stage = document.getElementById('stage');
   const panelEl = document.getElementById('panel');
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: false });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const _mobile = matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, _mobile ? 1.5 : 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
   if (o.shadows) {
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
   }
   stage.appendChild(renderer.domElement);
 

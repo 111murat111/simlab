@@ -1,27 +1,8 @@
-// Görsel katman: ortam ışığı (IBL), degrade gökyüzü, otomatik yumuşak gölge ve son işlem (MSAA, GTAO, bloom, film).
-// Simülasyonlar hiçbir şey yapmadan yararlanır; createSim({ look: false }) ya da { look: { bloom: false } } ile kapatılır.
+// Görsel katman (Açık Deniz yaklaşımı): ortam ışığı (IBL), degrade gökyüzü, otomatik yumuşak gölge.
+// Post-processing YOK — ton eşleme (ACES) Three.js renderer'da, kenar yumuşatma tarayıcıda (native).
+// Sonuç: her kare TEK bir renderer.render() çağrısı. Ekstra tam-ekran geçiş sıfır.
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
-
-// GTAO: gökyüzü/okyanus gibi özel shader'lar ve saydam nesneler derinlik/normal geçişine katılmaz
-class SceneAOPass extends GTAOPass {
-  _overrideVisibility() {
-    const cache = this._visibilityCache;
-    this.scene.traverse((ob) => {
-      if (!ob.visible) return;
-      const m = ob.material, mats = Array.isArray(m) ? m : [m];
-      const skip = ob.isPoints || ob.isLine || ob.isLine2 || ob.isSprite || ob.userData.noAO ||
-        (m && mats.some((x) => x && (x.isShaderMaterial || x.transparent || x.depthWrite === false)));
-      if (skip && (ob.isMesh || ob.isPoints || ob.isLine || ob.isSprite)) { ob.visible = false; cache.push(ob); }
-    });
-  }
-}
 
 const LOW = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700;
 
@@ -47,30 +28,8 @@ void main() {
   gl_FragColor = vec4(c, 1.0);
 }`;
 
-// Son geçiş (sRGB, OutputPass'ten sonra): hafif S eğrisi, sıcak/soğuk ayrımı, kenarda renk sapması, vinyet, film greni.
-const GRADE = {
-  uniforms: { tDiffuse: { value: null }, uVig: { value: 0.26 }, uCA: { value: 0.0 }, uGrain: { value: 0.022 }, uTime: { value: 0 } },
-  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse; uniform float uVig, uCA, uGrain, uTime; varying vec2 vUv;
-    float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
-    void main() {
-      vec2 d = vUv - 0.5;
-      float r2 = dot(d, d);
-      vec2 off = d * r2 * uCA * 40.0;
-      vec3 c = vec3(texture2D(tDiffuse, vUv - off).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv + off).b);
-      c = mix(c, c * c * (3.0 - 2.0 * c), 0.16);
-      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-      c += (vec3(0.012, 0.004, -0.012) * smoothstep(0.35, 0.9, l)) + (vec3(-0.008, 0.0, 0.012) * (1.0 - smoothstep(0.0, 0.35, l)));
-      c *= 1.0 - uVig * smoothstep(0.2, 0.8, length(d * vec2(1.1, 1.0)));
-      float g = hash(gl_FragCoord.xy + fract(uTime) * 91.7) - 0.5;
-      c += g * uGrain * (1.0 - 0.6 * l);
-      gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
-    }`,
-};
-
 export function createLook(renderer, scene, camera, opt = {}) {
-  const o = { env: true, sky: true, shadows: true, bloom: true, grade: true, msaa: true, ao: true, ...opt };
+  const o = { env: true, sky: true, shadows: true, ...opt };
   const sun = scene.userData.sun, hemi = scene.userData.hemi;
   // Fiziksel gökyüzü varsa ortam ışığı, arka plan, güneş ve pozlama ondan gelir
   const phys = o.physSky || null;
@@ -129,7 +88,7 @@ export function createLook(renderer, scene, camera, opt = {}) {
   if (o.shadows && phys && phys.customLight) renderer.shadowMap.enabled = true;
   if (shadowsOn) {
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     sun.castShadow = true;
     const n = LOW ? 1024 : 2048;
     sun.shadow.mapSize.set(n, n);
@@ -140,7 +99,7 @@ export function createLook(renderer, scene, camera, opt = {}) {
   const sceneBox = new THREE.Box3(), tmpS = new THREE.Sphere(), sceneSphere = new THREE.Sphere();
   let lastScan = -1e9;
   function scan(now) {
-    if (now - lastScan < 1500) return;
+    if (now - lastScan < 2000) return;
     lastScan = now;
     sceneBox.makeEmpty();
     scene.traverse((obj) => {
@@ -177,33 +136,8 @@ export function createLook(renderer, scene, camera, opt = {}) {
   }
   function restoreSun() { sun.position.copy(saved.p); sun.target.position.copy(saved.t); sun.target.updateMatrixWorld(); sun.updateMatrixWorld(); }
 
-  // --- Son işlem ---
-  const size = renderer.getSize(new THREE.Vector2());
-  const rt = new THREE.WebGLRenderTarget(size.x || 1, size.y || 1, { type: THREE.HalfFloatType, samples: LOW || !o.msaa ? 0 : 4 });
-  const composer = new EffectComposer(renderer, rt);
-  composer.addPass(new RenderPass(scene, camera));
-  let ao = null;
-  if (o.ao && camera.isPerspectiveCamera) {
-    ao = new SceneAOPass(scene, camera, size.x || 1, size.y || 1);
-    ao.output = GTAOPass.OUTPUT.Default;
-    ao.blendIntensity = 0.85;
-    ao.updateGtaoMaterial({ radius: o.aoRadius ?? 0.5, distanceExponent: 1.5, thickness: 1, scale: 1, samples: LOW ? 8 : 16 });
-    ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 4, rings: 2, samples: LOW ? 8 : 16 });
-    composer.addPass(ao);
-  }
-  let bloom = null;
-  if (o.bloom) {
-    // Eşik pozlamaya göre: yalnız ekranda gerçekten patlayan (güneş, ışıltı, ışık kaynağı) parlar
-    bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), o.bloomStrength ?? 0.35, 0.6, 1.0);
-    composer.addPass(bloom);
-  }
-  composer.addPass(new OutputPass());
-  let grade = null;
-  if (o.grade) { grade = new ShaderPass(GRADE); composer.addPass(grade); }
-
   return {
-    composer, passes: { ao, bloom, grade },
-    setSize(w, h, pr) { composer.setPixelRatio(pr); composer.setSize(w, h); },
+    setSize() {},  // Tarayıcı native AA — ekstra render target yok
     render(target) {
       if (phys) {
         if (sun && phys.customLight) sun.intensity = 0;
@@ -212,13 +146,11 @@ export function createLook(renderer, scene, camera, opt = {}) {
         scene.environmentIntensity = 1;
         renderer.toneMappingExposure = phys.exposure() * (o.exposure ?? 0.6);
       }
-      if (bloom) bloom.threshold = 1.15 / Math.max(renderer.toneMappingExposure, 1e-3);
-      if (grade) grade.uniforms.uTime.value = performance.now() / 1000;
       if (envBase) scene.environmentIntensity = envBase * (hemi ? Math.min(1.3, hemi.intensity / 1.4) : 1);
       updateSky();
       if (shadowsOn) scan(performance.now());
       const moved = fitShadow(target);
-      composer.render();
+      renderer.render(scene, camera);
       if (moved) restoreSun();
     },
   };
