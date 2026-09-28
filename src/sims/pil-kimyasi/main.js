@@ -1,5 +1,6 @@
 // Pil Nasıl Çalışır? — galvanik hücre: standart indirgenme potansiyelleri, Nernst denklemi, deşarj, seri/paralel bağlama.
-import { createSim, THREE, RoundedBoxGeometry, fmt, clamp, rand, instanced } from '@core';
+import { createSim, THREE, RoundedBoxGeometry, fmt, clamp, rand, mat } from '@core';
+import { labRoom, glassGeometry, liquidGeometry, glassMesh, liquidMesh, reagentBottle } from './labkit.js';
 
 const F = 96485, R = 8.314;
 const R_INT = 5;            // hücre iç direnci (Ω) — temsili
@@ -21,10 +22,13 @@ const METALS = {
 const gcd = (a, b) => (b ? gcd(b, a % b) : a);
 const lcm = (a, b) => (a * b) / gcd(a, b);
 
+// Gerçek ölçek: 1 birim = 2,5 cm (U); 250 mL'lik beherler (Ø 7 cm), laboratuvar tezgâhında
+const U = 0.025, BENCH = 0.9;
 const sim = createSim({
-  background: 0x121826,
-  camera: { position: [0, 6.6, 14.5], target: [0, 3, -1], fov: 45 },
-  controls: { minDistance: 5, maxDistance: 34 },
+  studio: { color: 0xb9b4aa, mood: 'lab', warmth: 0.12, key: { el: 52, az: 155 }, radius: 22 },
+  look: { aoRadius: 0.02 },
+  camera: { position: [0, BENCH + 6.6 * U, 14.5 * U], target: [0, BENCH + 3 * U, -1 * U], fov: 45, near: 0.005, far: 100 },
+  controls: { minDistance: 5 * U, maxDistance: 34 * U },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>İki kaptan oluşan bir <b>galvanik hücre</b>. Soldaki metal (anot) elektron verir ve iyon olarak çözeltiye geçer
@@ -66,135 +70,248 @@ function nernst() {
   return E0() - ((R * T) / (n * F)) * lnQ;
 }
 
-// --- Sahne ---
-const bench = new THREE.Mesh(new RoundedBoxGeometry(16, 0.4, 9, 3, 0.08), new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 0.5 }));
-bench.position.set(0, -0.2, -2);
-sim.scene.add(bench);
-const wall = new THREE.Mesh(new THREE.PlaneGeometry(60, 30), new THREE.MeshStandardMaterial({ color: 0x1b2230, roughness: 0.9 }));
-wall.position.set(0, 10, -16);
-sim.scene.add(wall);
-const fillLight = new THREE.PointLight(0xfff1dd, 16, 30, 1.6);
-fillLight.position.set(-5, 9, 6);
-sim.scene.add(fillLight);
+// --- Sahne: laboratuvar tezgâhı; içerik grubu U ölçekli (birimler 2,5 cm) ---
+labRoom(sim.scene, { width: 3.2, depth: 0.75, benchH: BENCH, style: 'lab', wallZ: -0.36 });
+const content = new THREE.Group();
+content.position.set(0, BENCH, 0);
+content.scale.setScalar(U);
+sim.scene.add(content);
+{
+  const b1 = reagentBottle({ h: 0.16, r: 0.036, liquid: 0x2a6fd8, label: 'CuSO₄', stripe: '#27c' });
+  b1.position.set(-0.3, BENCH, -0.2); b1.rotation.y = 0.4; sim.scene.add(b1);
+  const b2 = reagentBottle({ h: 0.15, r: 0.034, liquid: 0xf2f4f6, label: 'ZnSO₄', stripe: '#777' });
+  b2.position.set(-0.22, BENCH, -0.27); b2.rotation.y = -0.3; sim.scene.add(b2);
+  const b3 = reagentBottle({ h: 0.13, r: 0.03, liquid: 0xf6f7f8, label: 'KNO₃', stripe: '#c63' });
+  b3.position.set(0.27, BENCH, -0.24); b3.rotation.y = 0.2; sim.scene.add(b3);
+}
 
-const glassMat = new THREE.MeshPhongMaterial({ color: 0xdff3ff, transparent: true, opacity: 0.22, shininess: 120, specular: 0xffffff, side: THREE.DoubleSide, depthWrite: false });
-const XL = -3.2, XR = 3.2, BR = 1.4, BH = 3.2, LIQ = 2.4;
+const XL = -3.2, XR = 3.2, BR = 1.4, BH = 3.2, LIQ = 2.4, GT = 0.08;
 const cell = new THREE.Group();
-sim.scene.add(cell);
+content.add(cell);
 
+// Beher dereceleri: beyaz emaye baskı (şeffaf doku)
+const gradTex = (() => {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(255,255,255,0.92)'; g.strokeStyle = g.fillStyle; g.lineWidth = 3;
+  g.font = '600 22px system-ui, sans-serif'; g.textBaseline = 'middle';
+  for (let i = 1; i <= 5; i++) {
+    const y = 256 - i * 40;
+    g.beginPath(); g.moveTo(40, y); g.lineTo(i % 2 ? 90 : 110, y); g.stroke();
+    if (i % 2 === 0 || i === 5) g.fillText(`${i * 50}`, 118, y);
+  }
+  g.font = '700 24px system-ui, sans-serif'; g.fillText('250 mL', 300, 60);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+})();
+const beakerGeo = glassGeometry([[0, 0], [BR - 0.12, 0], [BR, 0.1], [BR, BH]], GT, 72);
 function beaker(x) {
   const g = new THREE.Group();
   g.position.x = x;
-  const wallM = new THREE.Mesh(new THREE.CylinderGeometry(BR, BR, BH, 40, 1, true), glassMat);
-  wallM.position.y = BH / 2;
-  wallM.renderOrder = 3;
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(BR, 0.04, 8, 48), glassMat);
-  rim.rotation.x = Math.PI / 2;
-  rim.position.y = BH;
-  const liqMat = new THREE.MeshPhongMaterial({ color: 0xdbeafe, transparent: true, opacity: 0.3, shininess: 60, depthWrite: false });
-  const liq = new THREE.Mesh(new THREE.CylinderGeometry(BR - 0.05, BR - 0.05, LIQ, 40), liqMat);
-  liq.position.y = LIQ / 2 + 0.03;
-  liq.renderOrder = 1;
-  g.add(wallM, rim, liq);
+  const glass = glassMesh(beakerGeo, { thickness: 0.1 });
+  glass.material.depthWrite = false;
+  const grad = new THREE.Mesh(new THREE.CylinderGeometry(BR + 0.004, BR + 0.004, BH * 0.8, 48, 1, true, -0.7, 1.4),
+    new THREE.MeshStandardMaterial({ map: gradTex, transparent: true, alphaTest: 0.3, roughness: 0.4 }));
+  grad.position.y = BH * 0.42; grad.userData.noShadow = true;
+  const liq = liquidMesh(liquidGeometry(() => BR - GT - 0.01, GT + 0.005, LIQ, { meniscus: 0.0015 / U, segs: 64, steps: 4 }), 0xffffff, 10);
+  const liqMat = liq.material;
+  liqMat.thickness = BR * 2; liqMat.depthWrite = false;
+  g.add(liq, glass, grad);
   cell.add(g);
   return { g, liqMat };
 }
 const bL = beaker(XL), bR = beaker(XR);
 
-function electrode(x) {
-  const mat = new THREE.MeshStandardMaterial({ color: 0x999999, metalness: 0.75, roughness: 0.35 });
-  const top = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.9, 0.14), mat);
+// Elektrotlar: metal şeritler (renk metale göre), üstte timsah pens
+function electrode(x, wireColor) {
+  const m = mat.brushedMetal({ color: 0x999999, rough: 0.3, scale: U });
+  const top = new THREE.Mesh(new RoundedBoxGeometry(0.7, 1.9, 0.08, 2, 0.02), m);
   top.position.set(x, LIQ + 0.03 + 0.95, 0);
-  const low = new THREE.Mesh(new THREE.BoxGeometry(0.7, LIQ - 0.3, 0.14), mat);
+  const low = new THREE.Mesh(new RoundedBoxGeometry(0.7, LIQ - 0.3, 0.08, 2, 0.02), m);
   low.position.set(x, 0.3 + (LIQ - 0.3) / 2, 0);
-  const clip = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.22, 0.3), new THREE.MeshStandardMaterial({ color: 0x222222 }));
-  clip.position.set(x, LIQ + 1.9, 0);
-  cell.add(top, low, clip);
-  return { mat, low, top };
+  // Timsah pens: çelik çeneler + renkli PVC kılıf
+  const jawM = mat.brushedMetal({ color: 0xc9ccd0, scale: U });
+  for (const s of [-1, 1]) {
+    const jaw = new THREE.Mesh(new RoundedBoxGeometry(0.22, 0.9, 0.08, 2, 0.03), jawM);
+    jaw.position.set(x, LIQ + 2.05, s * 0.1); jaw.rotation.x = -s * 0.12; cell.add(jaw);
+  }
+  const boot = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.26, 1.1, 20), mat.rubber({ color: wireColor, scale: U }));
+  boot.position.set(x, LIQ + 2.95, 0); cell.add(boot);
+  cell.add(top, low);
+  return { mat: m, low, top };
 }
-const eL = electrode(XL), eR = electrode(XR);
+const eL = electrode(XL, 0x1b1c1e), eR = electrode(XR, 0xb3261e);
+const CLIP_Y = LIQ + 3.5;
 
-// Tuz köprüsü
+// Tuz köprüsü: KNO₃ jeli dolu cam U-boru, uçlarda pamuk tıkaç
 const bridgeCurve = new THREE.CatmullRomCurve3([
   [XL + 0.7, 0.9, -0.7], [XL + 0.7, 3.6, -0.7], [XL + 1.4, 4.4, -0.7], [XR - 1.4, 4.4, -0.7], [XR - 0.7, 3.6, -0.7], [XR - 0.7, 0.9, -0.7],
 ].map((p) => new THREE.Vector3(...p)));
-const bridge = new THREE.Mesh(new THREE.TubeGeometry(bridgeCurve, 80, 0.3, 14), new THREE.MeshPhongMaterial({ color: 0xf1f5f9, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }));
-bridge.renderOrder = 2;
-cell.add(bridge);
+const bridge = glassMesh(new THREE.TubeGeometry(bridgeCurve, 120, 0.3, 24), { thickness: 0.04 });
+bridge.material.depthWrite = false;
+const gel = liquidMesh(new THREE.TubeGeometry(bridgeCurve, 120, 0.24, 20), 0xf4f1e6, 0.03);
+gel.material.thickness = 0.5; gel.material.depthWrite = false; gel.material.roughness = 0.25;
+cell.add(gel, bridge);
+{
+  const cotton = procedural_cotton();
+  for (const u of [0.0, 1.0]) {
+    const pt = bridgeCurve.getPointAt(u);
+    const c = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.22, 0.3, 16), cotton);
+    c.position.copy(pt).add(new THREE.Vector3(0, -0.1, 0)); cell.add(c);
+  }
+}
+function procedural_cotton() { return mat.fabric({ color: 0xf3f1ea, scale: U }); }
 
-// Tel, voltmetre ve ampul
+// Ampul devresi: kırmızı/siyah PVC kablo → ahşap taban üzerinde E10 duy + ampul (seri); elektron yolu = kablo
 const wireCurve = new THREE.CatmullRomCurve3([
-  [XL, LIQ + 1.9, 0], [XL, 5.6, 0.2], [XL + 1.2, 6.5, 0.35], [-1.0, 6.6, 0.35], [1.0, 6.6, 0.35], [XR - 1.2, 6.5, 0.35], [XR, 5.6, 0.2], [XR, LIQ + 1.9, 0],
+  [XL, CLIP_Y, 0], [XL, CLIP_Y + 0.9, 0.3], [XL + 0.4, CLIP_Y + 0.6, 1.4], [-2.0, 1.2, 2.4], [-0.9, 0.55, 2.2], [-0.25, 0.55, 2.2],
+  [0.25, 0.55, 2.2], [0.9, 0.55, 2.2], [2.0, 1.2, 2.4], [XR - 0.4, CLIP_Y + 0.6, 1.4], [XR, CLIP_Y + 0.9, 0.3], [XR, CLIP_Y, 0],
 ].map((p) => new THREE.Vector3(...p)));
-sim.scene.add(new THREE.Mesh(new THREE.TubeGeometry(wireCurve, 120, 0.05, 8), new THREE.MeshStandardMaterial({ color: 0xd97706, metalness: 0.6, roughness: 0.4 })));
-const meter = new THREE.Mesh(new RoundedBoxGeometry(2.0, 1.2, 0.6, 3, 0.1), new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.5 }));
-meter.position.set(0, 6.6, 0.4);
-sim.scene.add(meter);
-const screen = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.7), new THREE.MeshBasicMaterial({ color: 0x9fe8b0 }));
-screen.position.set(0, 6.62, 0.71);
-sim.scene.add(screen);
-const bulbMat = new THREE.MeshStandardMaterial({ color: 0xfff7d6, emissive: 0xffc94d, emissiveIntensity: 0, transparent: true, opacity: 0.85 });
-const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.42, 24, 16), bulbMat);
-bulb.position.set(0, 7.75, 0.4);
-const bulbBase = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.35, 16), new THREE.MeshStandardMaterial({ color: 0x9ca3af, metalness: 0.7, roughness: 0.3 }));
-bulbBase.position.set(0, 7.3, 0.4);
-const bulbLight = new THREE.PointLight(0xffd27a, 0, 12, 1.5);
-bulbLight.position.copy(bulb.position);
-sim.scene.add(bulb, bulbBase, bulbLight);
+{
+  const pts = wireCurve.getSpacedPoints(200);
+  const half = (a, b, color) => {
+    const c = new THREE.CatmullRomCurve3(pts.slice(a, b));
+    content.add(new THREE.Mesh(new THREE.TubeGeometry(c, 100, 0.07, 10), mat.plastic({ color, gloss: 0.5, scale: U })));
+  };
+  half(0, 94, 0x1b1c1e); half(107, 201, 0xb3261e);
+}
+const holder = new THREE.Group();
+holder.position.set(0, 0, 2.2);
+content.add(holder);
+{
+  const base = new THREE.Mesh(new RoundedBoxGeometry(2.6, 0.4, 1.2, 3, 0.06), mat.wood({ color: 0xb58b5a, scale: U }));
+  base.position.y = 0.2; holder.add(base);
+  const sock = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.38, 0.55, 28), mat.plastic({ color: 0x17181a, gloss: 0.4, scale: U }));
+  sock.position.y = 0.67; holder.add(sock);
+  for (const x of [-0.9, 0.9]) {
+    const t = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.22, 16), mat.brushedMetal({ color: 0xd8b56a, scale: U }));
+    t.position.set(x, 0.51, 0); holder.add(t);
+  }
+}
+const bulbGlass = glassMesh(new THREE.SphereGeometry(0.5, 32, 20), { thickness: 0.02 });
+bulbGlass.position.set(0, 1.4, 2.2);
+content.add(bulbGlass);
+const bulbMat = mat.glow({ color: 0xffc46b, intensity: 0 });
+const filament = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.018, 6, 20, Math.PI), bulbMat);
+filament.position.set(0, 1.4, 2.2);
+content.add(filament);
+const bulbLight = new THREE.PointLight(0xffc98a, 0, 0.5, 2);
+bulbLight.position.set(0, 1.45 * U + BENCH, 2.2 * U);
+sim.scene.add(bulbLight);
 
-// Parçacıklar
+// Dijital multimetre: sarı kauçuk kılıf, LCD ekran; ince probları elektrot penslerine
+const meterG = new THREE.Group();
+meterG.position.set(0, 0, -3.4);
+meterG.rotation.x = -1.0;
+content.add(meterG);
+const lcdCanvas = document.createElement('canvas'); lcdCanvas.width = 256; lcdCanvas.height = 110;
+const lcdTex = new THREE.CanvasTexture(lcdCanvas); lcdTex.colorSpace = THREE.SRGBColorSpace;
+{
+  const holster = new THREE.Mesh(new RoundedBoxGeometry(3.2, 6.2, 1.2, 4, 0.3), mat.rubber({ color: 0xe0b31e, scale: U }));
+  holster.position.y = 3.1; meterG.add(holster);
+  const face = new THREE.Mesh(new RoundedBoxGeometry(2.7, 5.6, 0.2, 3, 0.08), mat.plastic({ color: 0x24282d, gloss: 0.4, scale: U }));
+  face.position.set(0, 3.1, 0.55); meterG.add(face);
+  const lcd = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 0.95), new THREE.MeshStandardMaterial({ color: 0x000000, emissive: 0xffffff, emissiveMap: lcdTex, emissiveIntensity: 1.1, roughness: 0.25 }));
+  lcd.position.set(0, 4.9, 0.66); meterG.add(lcd);
+  const dial = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.76, 0.24, 36), mat.plastic({ color: 0x3a3f45, gloss: 0.3, scale: U }));
+  dial.rotation.x = Math.PI / 2; dial.position.set(0, 2.9, 0.72); meterG.add(dial);
+  const knob = new THREE.Mesh(new RoundedBoxGeometry(0.22, 1.2, 0.2, 2, 0.06), mat.plastic({ color: 0x1a1c1f, gloss: 0.3, scale: U }));
+  knob.position.set(0, 2.9, 0.88); knob.rotation.z = 0.5; meterG.add(knob);
+  [[-0.8, 0x1b1c1e], [0.8, 0xb3261e]].forEach(([x, c]) => {
+    const j = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.2, 20), mat.plastic({ color: c, gloss: 0.5, scale: U }));
+    j.rotation.x = Math.PI / 2; j.position.set(x, 1.0, 0.72); meterG.add(j);
+  });
+}
+function drawLCD(v) {
+  const g = lcdCanvas.getContext('2d');
+  g.fillStyle = '#9fb49a'; g.fillRect(0, 0, 256, 110);
+  g.fillStyle = '#18221a'; g.font = '700 64px ui-monospace, Menlo, monospace'; g.textAlign = 'right'; g.textBaseline = 'middle';
+  g.fillText(v, 214, 60);
+  g.font = '700 26px system-ui, sans-serif'; g.fillText('V', 246, 72);
+  g.font = '600 16px system-ui, sans-serif'; g.textAlign = 'left'; g.fillText('DC', 10, 18);
+  lcdTex.needsUpdate = true;
+}
+// Multimetre probları: jaklardan pens üstlerine ince kablolar
+{
+  meterG.updateMatrix();
+  const jack = (x) => new THREE.Vector3(x, 1.0, 0.8).applyMatrix4(meterG.matrix);
+  [[-0.8, XL, 0x1b1c1e], [0.8, XR, 0xb3261e]].forEach(([jx, ex, c]) => {
+    const a = jack(jx);
+    const curve = new THREE.CatmullRomCurve3([a, a.clone().add(new THREE.Vector3(jx * 0.6, 0.4, 0.9)), new THREE.Vector3(ex * 0.7, CLIP_Y + 1.6, -1.2), new THREE.Vector3(ex, CLIP_Y + 0.4, -0.05)]);
+    content.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 80, 0.045, 8), mat.plastic({ color: c, gloss: 0.5, scale: U })));
+  });
+}
+
+// Parçacıklar: yumuşak ışıklı nokta sprite'ları (elektron, köprü iyonları, çözelti iyonları)
 const NE = 36, NB = 24, NS = 22;
-const dummy = new THREE.Object3D();
-const electrons = instanced(new THREE.SphereGeometry(0.08, 8, 6), new THREE.MeshBasicMaterial({ color: 0xfde047 }), NE);
-sim.scene.add(electrons);
+const glowPts = (n, size) => {
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+  const m = new THREE.ShaderMaterial({
+    uniforms: { uScale: ptScale, uSize: { value: size * U } },
+    vertexShader: `attribute vec3 aColor; uniform float uScale, uSize; varying vec3 vC;
+      void main(){ vC = aColor; vec4 mv = modelViewMatrix*vec4(position, 1.0); gl_PointSize = uSize*uScale/max(-mv.z, 0.001); gl_Position = projectionMatrix*mv; }`,
+    fragmentShader: `varying vec3 vC; void main(){ float r = length(gl_PointCoord - 0.5)*2.0; if (r > 1.0) discard;
+      float core = smoothstep(0.55, 0.35, r), halo = exp(-r*r*4.0); gl_FragColor = vec4(vC*(core*1.4 + halo*0.6), max(core, halo*0.7)); }`,
+    transparent: true, depthWrite: false,
+  });
+  const p = new THREE.Points(g, m);
+  p.frustumCulled = false; p.renderOrder = 4;
+  return { p, pos, col, g, setColor(i, hex, k = 1) { cTmp.setHex(hex); col[i * 3] = cTmp.r * k; col[i * 3 + 1] = cTmp.g * k; col[i * 3 + 2] = cTmp.b * k; g.attributes.aColor.needsUpdate = true; },
+    set(i, v) { pos[i * 3] = v.x; pos[i * 3 + 1] = v.y; pos[i * 3 + 2] = v.z; } };
+};
+const ptScale = { value: 400 };
+const cTmp = new THREE.Color();
+const electrons = glowPts(NE, 0.32);
+for (let i = 0; i < NE; i++) electrons.setColor(i, 0xffd84a, 3);
+content.add(electrons.p);
 const eU = Array.from({ length: NE }, (_, i) => i / NE);
-const bridgeIons = instanced(new THREE.SphereGeometry(0.1, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }), NB);
+const bridgeIons = glowPts(NB, 0.3);
 const bU = Array.from({ length: NB }, () => rand(0.05, 0.95));
-const bCol = new THREE.Color();
-for (let i = 0; i < NB; i++) bridgeIons.setColorAt(i, bCol.setHex(i % 2 ? 0xa855f7 : 0xf87171));
-cell.add(bridgeIons);
+for (let i = 0; i < NB; i++) bridgeIons.setColor(i, i % 2 ? 0xa855f7 : 0xf87171, 1.6);
+cell.add(bridgeIons.p);
 function solIons(x) {
-  const m = instanced(new THREE.SphereGeometry(0.09, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }), NS);
-  cell.add(m);
+  const m = glowPts(NS, 0.26);
+  cell.add(m.p);
   return { m, x, p: Array.from({ length: NS }, () => ({ r: rand(0.3, 1.2), a: rand(0, Math.PI * 2), y: rand(0.4, LIQ - 0.2) })) };
 }
 const sL = solIons(XL), sR = solIons(XR);
 
-// Seri/paralel için ek hücre kopyaları (arka planda)
+// Seri/paralel için ek hücre kopyaları (arka planda, küçültülmüş temsil)
 const clones = [];
 for (let k = 1; k <= 3; k++) {
   const c = cell.clone();
   c.scale.setScalar(0.42);
   c.position.set((k - 2) * 4.2, 0, -5.4);
   c.visible = false;
-  sim.scene.add(c);
+  content.add(c);
   clones.push(c);
 }
 
 // Etiketler
-const lblA = sim.label('', { position: [XL, -0.1, 1.9], className: 'plain' });
-const lblC = sim.label('', { position: [XR, -0.1, 1.9], className: 'plain' });
-sim.label('Tuz köprüsü (KNO₃)', { position: [0, 5.0, -0.7], className: 'plain' });
-const lblMeter = sim.label('', { position: [0, 6.62, 0.75], className: 'big' });
-const lblE = sim.label('', { position: [-2.3, 7.2, 0.4], className: 'plain' });
-const lblPack = sim.label('', { position: [0, 2.2, -5.4], className: 'plain' });
+const lblA = sim.label('', { parent: content, position: [XL, -0.1, 1.9], className: 'plain' });
+const lblC = sim.label('', { parent: content, position: [XR, -0.1, 1.9], className: 'plain' });
+sim.label('Tuz köprüsü (KNO₃)', { parent: content, position: [0, 5.0, -0.7], className: 'plain' });
+const lblMeter = sim.label('', { parent: content, position: [0, 6.2, -4.4], className: 'big' });
+const lblE = sim.label('', { parent: content, position: [-2.3, 2.6, 2.6], className: 'plain' });
+const lblPack = sim.label('', { parent: content, position: [0, 2.2, -5.4], className: 'plain' });
 
 // --- Görsel güncelleme ---
-const cTmp = new THREE.Color();
 function applyLook() {
   const a = METALS[st.A], c = METALS[st.C];
   eL.mat.color.setHex(a.color); eR.mat.color.setHex(c.color);
+  // Renkli iyonlar (Cu²⁺ mavi, Ni²⁺ yeşil, Fe²⁺ açık yeşil, Au³⁺ sarı) derişimle artan soğurma; diğerleri renksiz
   const tint = (b, m, conc) => {
-    if (m.sol) { b.liqMat.color.setHex(0xdbeafe).lerp(cTmp.setHex(m.sol), clamp(0.25 + 0.55 * Math.sqrt(conc), 0, 0.95)); b.liqMat.opacity = 0.3 + 0.3 * clamp(Math.sqrt(conc), 0, 1); }
-    else { b.liqMat.color.setHex(0xdbeafe); b.liqMat.opacity = 0.28; }
+    if (m.sol) { b.liqMat.attenuationColor.setHex(m.sol); b.liqMat.attenuationDistance = 0.022 / Math.max(Math.sqrt(conc), 0.02); }
+    else { b.liqMat.attenuationColor.setHex(0xf4f8ff); b.liqMat.attenuationDistance = 5; }
   };
   tint(bL, a, st.cA); tint(bR, c, st.cC);
   const s = (m) => Math.sqrt(clamp(m / M0, 0.02, 3));
   eL.low.scale.set(s(st.mA), 1, s(st.mA) * 1.6 - 0.6);
   eR.low.scale.set(s(st.mC), 1, s(st.mC) * 1.6 - 0.6);
   eL.low.visible = st.mA > M0 * 0.01; eR.low.visible = st.mC > M0 * 0.01;
-  for (let i = 0; i < NS; i++) { sL.m.setColorAt(i, cTmp.setHex(a.sol || 0xcbd5e1)); sR.m.setColorAt(i, cTmp.setHex(c.sol || 0xcbd5e1)); }
-  sL.m.instanceColor.needsUpdate = sR.m.instanceColor.needsUpdate = true;
+  for (let i = 0; i < NS; i++) { sL.m.setColor(i, a.sol || 0xcbd5e1, 1.5); sR.m.setColor(i, c.sol || 0xcbd5e1, 1.5); }
 }
 
 function labels() {
@@ -353,6 +470,7 @@ function refreshPanel() {
 
 // --- Döngü ---
 let chartT = 0, uiT = 0;
+const tmpV2 = new THREE.Vector2(), tmpV3 = new THREE.Vector3();
 sim.onUpdate((dt) => {
   discharge(dt * timeScale.value * 3600);
   circuit();
@@ -371,25 +489,22 @@ sim.onRender((rdt) => {
   const speed = load ? clamp(0.03 + Imag * 6, 0.03, 0.6) * dir : 0;
   const t = sim.paused ? 0 : rdt;
   // Elektronlar: tel boyunca anottan katoda
+  const vp = sim.renderer.getDrawingBufferSize(tmpV2);
+  ptScale.value = vp.y / (2 * Math.tan(THREE.MathUtils.degToRad(sim.camera.fov / 2)));
+  electrons.p.visible = load;
   for (let i = 0; i < NE; i++) {
     eU[i] = (eU[i] + speed * t + 1) % 1;
-    dummy.position.copy(wireCurve.getPointAt(eU[i]));
-    dummy.scale.setScalar(load ? 1 : 0.001);
-    dummy.updateMatrix();
-    electrons.setMatrixAt(i, dummy.matrix);
+    electrons.set(i, wireCurve.getPointAt(eU[i], tmpV3));
   }
-  electrons.instanceMatrix.needsUpdate = true;
+  electrons.g.attributes.position.needsUpdate = true;
   // Tuz köprüsü: anyonlar anoda (sola), katyonlar katoda (sağa)
   for (let i = 0; i < NB; i++) {
     const s = i % 2 ? 1 : -1;
     bU[i] += s * speed * 0.35 * t;
     if (bU[i] > 0.97) bU[i] = 0.03; if (bU[i] < 0.03) bU[i] = 0.97;
-    dummy.position.copy(bridgeCurve.getPointAt(bU[i]));
-    dummy.scale.setScalar(1);
-    dummy.updateMatrix();
-    bridgeIons.setMatrixAt(i, dummy.matrix);
+    bridgeIons.set(i, bridgeCurve.getPointAt(bU[i], tmpV3));
   }
-  bridgeIons.instanceMatrix.needsUpdate = true;
+  bridgeIons.g.attributes.position.needsUpdate = true;
   // Çözeltideki iyonlar: anottan uzaklaşır, katoda yaklaşır
   const moveIons = (s, out) => {
     for (let i = 0; i < NS; i++) {
@@ -398,25 +513,23 @@ sim.onRender((rdt) => {
       p.a += 0.2 * t;
       if (p.r > 1.25) { p.r = out ? 0.2 : 1.2; p.y = rand(0.4, LIQ - 0.2); }
       if (p.r < 0.18) { p.r = out ? 0.2 : 1.2; p.y = rand(0.4, LIQ - 0.2); }
-      dummy.position.set(s.x + Math.cos(p.a) * p.r, p.y + Math.sin(p.a * 3) * 0.05, Math.sin(p.a) * p.r);
-      dummy.scale.setScalar(1);
-      dummy.updateMatrix();
-      s.m.setMatrixAt(i, dummy.matrix);
+      s.m.set(i, tmpV3.set(s.x + Math.cos(p.a) * p.r, p.y + Math.sin(p.a * 3) * 0.05, Math.sin(p.a) * p.r));
     }
-    s.m.instanceMatrix.needsUpdate = true;
+    s.m.g.attributes.position.needsUpdate = true;
   };
   moveIons(sL, dir > 0); moveIons(sR, dir < 0);
   // Ampul
   const P = load ? Math.abs(st.V * st.Iload) : 0;
   const glow = clamp(Math.sqrt(P / 0.05), 0, 1.6);
-  bulbMat.emissiveIntensity = glow * 2.2;
-  bulbLight.intensity = glow * 14;
+  bulbMat.emissiveIntensity = glow * 9;
+  bulbLight.intensity = glow * 0.25;
   uiT += rdt;
   if (uiT > 0.2) {
     uiT = 0;
     applyLook(); labels(); refreshPanel();
     const shown = mode.value === 'ampul' ? st.V : (st.Etot ?? st.E);
     lblMeter.setText(`<b style="color:#0b3d1a">${shown >= 0 ? '' : '−'}${fmt(Math.abs(shown), 2)} V</b>`);
+    drawLCD(`${shown >= 0 ? '' : '-'}${Math.abs(shown).toFixed(Math.abs(shown) >= 10 ? 1 : 2)}`);
     lblE.setText(load ? `e⁻ ${dir > 0 ? '→' : '←'} ${fmt(Math.abs(st.Iload) * 1000, 1)} mA` : mode.value === 'volt' ? 'açık devre: akım yok' : '');
   }
 });

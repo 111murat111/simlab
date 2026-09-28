@@ -1,15 +1,16 @@
 // Dil Evrimi — köyler arasında düzenli ses değişimleri, ödünçleme ve dalga yayılımı; UPGMA soy ağacı.
-import { createSim, THREE, ImprovedNoise, clamp, smoothstep, fmt, pick } from '@core';
+import { createSim, THREE, ImprovedNoise, clamp, smoothstep, fmt, pick, mat, procedural, landscape, createTerrain, terrainSkirt, createVegetation, depthTexture, BufferGeometryUtils, populateCity } from '@core';
 import { VOCAB, RULES, metathesis, similarity, upgma, cutTree } from './lang.js';
 
 const GEN_PER_SEC = 1.25;
 const MAX_GEN = 200;
 
 const sim = createSim({
-  background: 0x8fbfe0,
-  camera: { position: [1, 25, 23], target: [-1, 0, -0.5], fov: 50 },
-  controls: { minDistance: 8, maxDistance: 70 },
-  fog: [55, 110],
+  sky: { elevation: 30, azimuth: 222, clouds: 0.3, haze: 0.55, visibility: 26000, wind: [5, 2] },
+  ocean: { wind: 5, windDir: 250, fetch: 40, foam: 0.3 },
+  camera: { position: [-1150, 360, 760], target: [-60, 20, -50], fov: 40, near: 1, far: 80000 },
+  controls: { minDistance: 120, maxDistance: 4500, maxPolarAngle: 1.45 },
+  look: { aoRadius: 3, exposure: 0.66 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Altı köy aynı <b>ata dili</b> konuşarak başlar (14 temel sözcük: su, göz, taş, ev, yol, ekmek…). Her nesilde (~25 yıl)
@@ -33,7 +34,9 @@ const sim = createSim({
     kavramları göstermek içindir.</small></p>`,
 });
 
-// --- Arazi ---
+// --- Arazi (metre): kıyı, ada, iki sıradağ ve geçitler; batıda gerçek (FFT) deniz ---
+// Model birimleri korunur (köy/yol koordinatları); 1 birim = S metre.
+const S = 45, VZ = 0.85;
 const noise = new ImprovedNoise();
 function ridge(x, z, x0, z0, z1, h, w, passZ) {
   const fade = smoothstep(z0 - 1, z0 + 2, z) * smoothstep(z1 + 1, z1 - 2, z);
@@ -50,27 +53,25 @@ function height(x, z) {
   h += 1.1 * Math.exp(-((x - 9.5) ** 2 + (z - 6) ** 2) / 12);
   return h;
 }
-{
-  const g = new THREE.PlaneGeometry(48, 36, 140, 105);
-  g.rotateX(-Math.PI / 2);
-  const p = g.attributes.position, col = new Float32Array(p.count * 3), c = new THREE.Color();
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i), z = p.getZ(i), y = height(x, z);
-    p.setY(i, y);
-    if (y < 0.25) c.setHex(0xd9c690); else if (y < 1.6) c.setHex(0x6aa84f).lerp(new THREE.Color(0x8cbf5f), noise.noise(x, 1, z) * 0.5 + 0.5);
-    else if (y < 3.2) c.setHex(0x8a7a64); else c.setHex(0xf1f5f9);
-    col.set([c.r, c.g, c.b], i * 3);
-  }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  g.computeVertexNormals();
-  sim.scene.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, flatShading: true })));
-  const sea = new THREE.Mesh(new THREE.PlaneGeometry(120, 90), new THREE.MeshStandardMaterial({ color: 0x2f7fc1, roughness: 0.3, metalness: 0.1, transparent: true, opacity: 0.88 }));
-  sea.rotation.x = -Math.PI / 2;
-  sea.position.y = 0.08;
-  sim.scene.add(sea);
+const farHills = landscape({ seed: 41, size: 1500, height: 520, base: -40 });
+const detail = landscape({ seed: 9, size: 260, height: 14, octaves: 5 });
+function hf(X, Z) {
+  const x = X / S, z = Z / S;
+  let h = (height(x, z) - 0.1) * S * VZ + (h0(x, z) > 0 ? detail(X, Z) * 0.6 : 0);
+  // uzak doğu/kuzey/güney: tepeler ufku kapatır (denizde değil)
+  const w = smoothstep(0, 1400, Math.max(X - 900, Math.abs(Z) - 1000)) * smoothstep(-1200, -300, X);
+  return h + w * Math.max(0, farHills(X, Z) + 180);
 }
-sim.label('⛰️ Dağlar', { position: [4.8, 5.2, 10], className: 'plain' });
-sim.label('🌊 Deniz', { position: [-13, 0.6, 8], className: 'plain' });
+const h0 = (x, z) => height(x, z) - 0.25;
+const scene = sim.scene;
+{
+  scene.add(createTerrain(hf, { size: [9000, 9000], res: [260, 260], materialOptions: { water: 0, grass: 0x4f6e27, dry: 0x93844f, soil: 0x6a5134, forest: 1.1, forestCol: 0x2f4420, rock: 0x7a746b, snow: 290 } }));
+  scene.add(terrainSkirt(hf, { inner: 4500, outer: 60000 }));
+  const rect = [-3000, -3000, 3000, 3000];
+  sim.ocean?.setDepth(depthTexture(hf, rect, 256), rect);
+}
+sim.label('⛰️ Dağlar', { position: [4.8 * S, 250, 10 * S], className: 'plain' });
+sim.label('🌊 Deniz', { position: [-13 * S, 30, 8 * S], className: 'plain' });
 
 // --- Köyler ---
 const VILLAGES = [
@@ -88,66 +89,248 @@ const ROADS = [
   { a: 2, b: 4, name: 'Dereköy – Uzakyurt (dağ geçidi)', s: 0.25 },
   { a: 0, b: 5, name: 'Kıyıköy – Adaköy (deniz yolu)', s: 0.2, sea: true },
 ];
-const houseG = new THREE.BoxGeometry(0.5, 0.4, 0.5); houseG.translate(0, 0.2, 0);
-const roofG = new THREE.ConeGeometry(0.42, 0.35, 4); roofG.rotateY(Math.PI / 4); roofG.translate(0, 0.57, 0);
-const houses = new THREE.InstancedMesh(houseG, new THREE.MeshStandardMaterial({ color: 0xf5f0e6 }), 60);
-const roofs = new THREE.InstancedMesh(roofG, new THREE.MeshStandardMaterial({ color: 0xb4532a }), 60);
-sim.scene.add(houses, roofs);
-const markers = [];
+const overlay = { on: true };
+const overlayGroup = new THREE.Group();
+scene.add(overlayGroup);
+const slope = (x, z) => Math.hypot(hf(x + 3, z) - hf(x - 3, z), hf(x, z + 3) - hf(x, z - 3)) / 6;
+
+// Köy evleri: gerçek bina geometrisi (kırma/beşik kiremit çatı, girintili pencere, söve, kapı saçağı); meydana bakar
 {
-  const d = new THREE.Object3D();
-  let k = 0;
+  const lots = [];
+  let seedN = 11;
+  const rr = () => { seedN = (seedN * 16807) % 2147483647; return seedN / 2147483647; };
   VILLAGES.forEach((v, vi) => {
-    v.y = Math.max(0.1, height(v.x, v.z));
-    for (let i = 0; i < 9; i++) {
-      const a = i * 2.4 + vi, r = 0.5 + (i % 3) * 0.55;
-      const x = v.x + Math.cos(a) * r, z = v.z + Math.sin(a) * r;
-      d.position.set(x, Math.max(0.1, height(x, z)) - 0.05, z);
-      d.rotation.y = a;
-      d.scale.setScalar(0.8 + (i % 2) * 0.35);
-      d.updateMatrix();
-      houses.setMatrixAt(k, d.matrix); roofs.setMatrixAt(k, d.matrix); k++;
+    const cx = v.x * S, cz = v.z * S;
+    let n = 0;
+    for (let i = 0; i < 70 && n < 17; i++) {
+      const a = i * 2.39996 + vi * 0.7, r = 24 + Math.sqrt(i) * 15;
+      const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+      const w = 8 + rr() * 4, d = 7 + rr() * 3;
+      const ys = [[-1, -1], [1, -1], [-1, 1], [1, 1], [0, 0]].map(([u, k]) => hf(x + u * w * 0.6, z + k * d * 0.6));
+      const lo = Math.min(...ys), hi = Math.max(...ys);
+      if (lo < 1.6 || hi - lo > 3.2) continue;
+      lots.push({ x, z, rot: Math.atan2(cx - x, cz - z) + (rr() - 0.5) * 0.4, y0: lo - 0.35, type: 'house', width: w, depth: d,
+        floors: rr() < 0.7 ? 1 : 2, roof: rr() < 0.55 ? 'gable' : 'hip', seed: vi * 100 + i, age: 0.5 + rr() * 0.4,
+        colors: { wall: [0xe9e1cf, 0xefe6d2, 0xd9c7a4, 0xe6d8bc, 0xf1ece0][Math.floor(rr() * 5)] } });
+      n++;
     }
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(1.9, 0.12, 8, 40), new THREE.MeshBasicMaterial({ color: v.color }));
-    ring.rotation.x = Math.PI / 2;
-    ring.position.set(v.x, v.y + 0.1, v.z);
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.6, 6), new THREE.MeshStandardMaterial({ color: 0x57534e }));
-    pole.position.set(v.x, v.y + 0.8, v.z);
-    const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.45), new THREE.MeshStandardMaterial({ color: v.color, side: THREE.DoubleSide }));
-    flag.position.set(v.x + 0.36, v.y + 1.35, v.z);
-    const hit = new THREE.Mesh(new THREE.CylinderGeometry(2, 2, 2, 12), new THREE.MeshBasicMaterial({ visible: false }));
-    hit.position.set(v.x, v.y + 0.8, v.z);
-    hit.userData.vi = vi;
-    sim.scene.add(ring, pole, flag, hit);
-    markers.push(hit);
-    v.ring = ring; v.flag = flag;
-    v.label = sim.label('', { position: [v.x, v.y + 2.2, v.z], className: 'clickable' });
-    v.label.el.addEventListener('click', () => selectVillage(vi));
   });
-  houses.count = roofs.count = k;
+  const town = populateCity({ lots, tile: 120, noRaycast: true, camera: sim.camera });
+  town.group.traverse((o) => { o.userData.noFit = true; });
+  scene.add(town.group);
 }
 
-// Yollar: tüp + üzerinde gezgin noktalar
-const travelerG = new THREE.SphereGeometry(0.13, 8, 6);
+// Tarlalar: köylerin çevresinde araziye oturan ekili parseller (buğday, yeşil ekin, sürülmüş toprak)
+{
+  const fieldMat = procedural({
+    key: 'dil-field', bump: 0.05, params: { color: 0xffffff, roughness: 0.95, vertexColors: true },
+    pattern: `
+      float rows = sin((p.x*0.8 + p.z*0.6)*2.2);
+      float n = fbm3(p*0.05, 4), m = vn3(p*1.7);
+      col *= (0.8 + 0.35*n)*(0.85 + 0.15*rows*aaW(p*0.35)) + 0.05*(m - 0.5);
+      h = rows*0.5 + m*0.3;`,
+  });
+  const CROPS = [0xb8a15a, 0x7c8a3a, 0x6b5238, 0xa99552, 0x5f7a2e];
+  const geos = [];
+  let seedN = 3;
+  const rr = () => { seedN = (seedN * 16807) % 2147483647; return seedN / 2147483647; };
+  VILLAGES.forEach((v) => {
+    for (let f = 0; f < 9; f++) {
+      const a = rr() * Math.PI * 2, rad = 120 + rr() * 110;
+      const cx = v.x * S + Math.cos(a) * rad, cz = v.z * S + Math.sin(a) * rad;
+      if (hf(cx, cz) < 2 || slope(cx, cz) > 0.22) continue;
+      const w = 50 + rr() * 45, l = 60 + rr() * 50, rot = rr() * Math.PI;
+      const g = new THREE.PlaneGeometry(w, l, 8, 8); g.rotateX(-Math.PI / 2); g.rotateY(rot);
+      const p = g.attributes.position, c = new THREE.Color(CROPS[Math.floor(rr() * CROPS.length)]);
+      const col = new Float32Array(p.count * 3);
+      let ok = true;
+      for (let i = 0; i < p.count; i++) {
+        const x = p.getX(i) + cx, z = p.getZ(i) + cz, y = hf(x, z);
+        if (y < 1) ok = false;
+        p.setXYZ(i, x, y + 0.35, z);
+        col.set([c.r, c.g, c.b], i * 3);
+      }
+      if (!ok) { g.dispose(); continue; }
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      g.deleteAttribute('uv');
+      g.computeVertexNormals();
+      geos.push(g);
+    }
+  });
+  const fields = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(geos), fieldMat);
+  fields.receiveShadow = true; fields.userData.noFit = true; fields.userData.noCast = true;
+  scene.add(fields);
+}
+
+// Veri katmanı dokuları: topluluk alanı (yumuşak kenarlı disk) ve ışık sütunu (yukarı doğru sönen)
+const TERR_TEX = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const x = c.getContext('2d'), g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(255,255,255,0.55)'); g.addColorStop(0.72, 'rgba(255,255,255,0.4)');
+  g.addColorStop(0.9, 'rgba(255,255,255,0.85)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+const BEAM_TEX = (() => {
+  const c = document.createElement('canvas'); c.width = 4; c.height = 128;
+  const x = c.getContext('2d'), g = x.createLinearGradient(0, 0, 0, 128);
+  g.addColorStop(0, 'rgba(255,255,255,0.05)'); g.addColorStop(0.7, 'rgba(255,255,255,0.45)'); g.addColorStop(1, 'rgba(255,255,255,0.9)');
+  x.fillStyle = g; x.fillRect(0, 0, 4, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+function terrDisc(X, Z, R) {
+  const NR = 14, NA = 72, pos = [], uv = [], idx = [];
+  for (let i = 0; i <= NR; i++) for (let j = 0; j < NA; j++) {
+    const r = (i / NR) * R, a = (j / NA) * Math.PI * 2;
+    const x = X + Math.cos(a) * r, z = Z + Math.sin(a) * r;
+    pos.push(x, Math.max(0.3, hf(x, z)) + 1.2, z);
+    uv.push(0.5 + (0.5 * r / R) * Math.cos(a), 0.5 + (0.5 * r / R) * Math.sin(a));
+  }
+  for (let i = 0; i < NR; i++) for (let j = 0; j < NA; j++) {
+    const a = i * NA + j, b = i * NA + ((j + 1) % NA), c = a + NA, d = b + NA;
+    idx.push(a, c, b, b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
+}
+const LANG_C = ['#f59e0b', '#0ea5e9', '#ec4899', '#22c55e', '#8b5cf6', '#ef4444'];
+const markers = [];
+VILLAGES.forEach((v, vi) => {
+  const X = v.x * S, Z = v.z * S;
+  v.y = Math.max(1, hf(X, Z));
+  // köy halkası (veri katmanı): araziyi izleyen parlak halka
+  const pts = [];
+  for (let i = 0; i < 64; i++) {
+    const a = (i / 64) * Math.PI * 2, x = X + Math.cos(a) * 1.9 * S, z = Z + Math.sin(a) * 1.9 * S;
+    pts.push(new THREE.Vector3(x, Math.max(0.6, hf(x, z)) + 2.5, z));
+  }
+  v.ringMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(v.color).multiplyScalar(1.3), transparent: true, opacity: 0.85, depthWrite: false });
+  const ring = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 128, 2.2, 6, true), v.ringMat);
+  ring.userData.noFit = true; ring.userData.noCast = true;
+  overlayGroup.add(ring);
+  // dil topluluğu alanı: araziyi örten yumuşak renk lekesi (rengi = hangi dil kümesinde olduğu)
+  v.terrMat = new THREE.MeshBasicMaterial({ map: TERR_TEX, color: 0xffffff, transparent: true, opacity: 0.55, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+  const terr = new THREE.Mesh(terrDisc(X, Z, 3.4 * S), v.terrMat);
+  terr.userData.noFit = true; terr.userData.noCast = true; terr.renderOrder = 2;
+  overlayGroup.add(terr);
+  // işaret ışığı: dağların ardından da görünen ince ışık sütunu (köy rengi)
+  v.beaconMat = new THREE.MeshBasicMaterial({ map: BEAM_TEX, color: new THREE.Color(v.color).multiplyScalar(1.6), transparent: true,
+    depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(2.6, 5, 190, 16, 1, true).translate(0, 95, 0), v.beaconMat);
+  beam.position.set(X, v.y, Z); beam.userData.noFit = true; beam.userData.noCast = true;
+  overlayGroup.add(beam);
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(4.5, 16, 12), mat.glow({ color: new THREE.Color(v.color).getHex(), intensity: 4 }));
+  cap.position.set(X, v.y + 192, Z); cap.userData.noFit = true; cap.userData.noCast = true;
+  overlayGroup.add(cap);
+  // köy meydanı: bayrak direği ve bez bayrak
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.22, 16, 10), mat.paintedMetal({ color: 0xd7d7d2, wear: 0.2 }));
+  pole.position.set(X, v.y + 7, Z);
+  const flagG = new THREE.PlaneGeometry(5, 3.2, 8, 4); flagG.translate(2.5, 0, 0);
+  const flag = new THREE.Mesh(flagG, mat.fabric({ color: new THREE.Color(v.color).getHex() }));
+  flag.material.side = THREE.DoubleSide;
+  flag.position.set(X + 0.15, v.y + 12.2, Z);
+  const hit = new THREE.Mesh(new THREE.CylinderGeometry(90, 90, 80, 12), new THREE.MeshBasicMaterial({ visible: false }));
+  hit.position.set(X, v.y + 30, Z);
+  hit.userData.vi = vi; hit.userData.noFit = true; hit.userData.noCast = true;
+  scene.add(pole, flag, hit);
+  markers.push(hit);
+  v.flag = flag;
+  v.label = sim.label('', { position: [X, v.y + 70, Z], className: 'clickable' });
+  v.label.el.addEventListener('click', () => selectVillage(vi));
+});
+
+// Yollar: araziye oturan toprak yol şeridi + veri katmanında parlak temas çizgisi; deniz yolunda tekne
+const RED = new THREE.Color(3, 0.35, 0.3), SEA_C = new THREE.Color(1.6, 2.0, 2.4), ROAD_C = new THREE.Color(2.6, 1.9, 0.9);
+const dirtMat = procedural({
+  key: 'dil-dirt', bump: 0.04, params: { color: 0x8a7556, roughness: 0.95 },
+  pattern: `
+    float n = fbm3(p*0.3, 4), g = vn3(p*4.0);
+    col *= 0.78 + 0.35*n + 0.1*(g - 0.5);
+    h = n*0.6 + g*0.3;`,
+});
+const roadPts = [];
 ROADS.forEach((r) => {
   const A = VILLAGES[r.a], B = VILLAGES[r.b];
   const pts = [];
-  for (let i = 0; i <= 40; i++) {
-    const t = i / 40;
-    const x = A.x + (B.x - A.x) * t, z = A.z + (B.z - A.z) * t + Math.sin(t * Math.PI) * (r.sea ? 1.5 : 0.8);
-    pts.push(new THREE.Vector3(x, r.sea ? 0.2 : Math.max(0.15, height(x, z)) + 0.12, z));
+  for (let i = 0; i <= 60; i++) {
+    const t = i / 60;
+    const x = (A.x + (B.x - A.x) * t) * S, z = (A.z + (B.z - A.z) * t + Math.sin(t * Math.PI) * (r.sea ? 1.5 : 0.8)) * S;
+    pts.push(new THREE.Vector3(x, r.sea ? 1.2 : Math.max(1, hf(x, z)) + 0.5, z));
+    if (!r.sea) roadPts.push([x, z]);
   }
   r.curve = new THREE.CatmullRomCurve3(pts);
-  r.mat = new THREE.MeshStandardMaterial({ color: r.sea ? 0xe0f2fe : 0xa16207, transparent: true });
-  r.mesh = new THREE.Mesh(new THREE.TubeGeometry(r.curve, 80, 0.11, 6), r.mat);
-  sim.scene.add(r.mesh);
-  r.trav = [0, 1, 2].map((i) => {
-    const m = new THREE.Mesh(travelerG, new THREE.MeshBasicMaterial({ color: r.sea ? 0xffffff : 0xfef08a }));
-    m.userData.ph = i / 3;
-    sim.scene.add(m);
-    return m;
-  });
+  if (!r.sea) {
+    // şerit
+    const N = 240, W = 3.2, pos = [], idx = [];
+    for (let i = 0; i <= N; i++) {
+      const q = r.curve.getPointAt(i / N), tg = r.curve.getTangentAt(i / N);
+      const nx = -tg.z, nz = tg.x, l = Math.hypot(nx, nz) || 1;
+      for (const s of [-1, 1]) {
+        const x = q.x + (nx / l) * W * s, z = q.z + (nz / l) * W * s;
+        pos.push(x, hf(x, z) + 0.3, z);
+      }
+      if (i < N) { const b = i * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
+    const band = new THREE.Mesh(g, dirtMat);
+    band.receiveShadow = true; band.userData.noFit = true; band.userData.noCast = true;
+    scene.add(band);
+  } else {
+    // tekne: ahşap gövde, direk, yelken
+    const boat = new THREE.Group();
+    const hullS = new THREE.Shape();
+    hullS.moveTo(0, -7); hullS.quadraticCurveTo(2.4, -3, 2.1, 5); hullS.lineTo(-2.1, 5); hullS.quadraticCurveTo(-2.4, -3, 0, -7);
+    const hull = new THREE.Mesh(new THREE.ExtrudeGeometry(hullS, { depth: 1.6, bevelEnabled: true, bevelSize: 0.3, bevelThickness: 0.3, bevelSegments: 2 }).rotateX(Math.PI / 2).translate(0, 1.2, 0),
+      mat.wood({ color: 0x7a5236, varnish: 0.5 }));
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.14, 9, 6).translate(0, 5.5, -1), mat.wood({ color: 0x8a6a48 }));
+    const sailS = new THREE.Shape(); sailS.moveTo(0, 0); sailS.lineTo(0, 7.5); sailS.lineTo(4.5, 0.4); sailS.closePath();
+    const sail = new THREE.Mesh(new THREE.ShapeGeometry(sailS).rotateY(Math.PI / 2).translate(0.05, 1.6, -1), mat.fabric({ color: 0xece4d2 }));
+    sail.material.side = THREE.DoubleSide;
+    boat.add(hull, mast, sail);
+    boat.userData.noFit = true;
+    scene.add(boat);
+    r.boat = boat;
+  }
+  // temas çizgisi (veri katmanı)
+  r.glow = new THREE.MeshBasicMaterial({ color: r.sea ? SEA_C : ROAD_C, transparent: true, opacity: 0.8, depthWrite: false });
+  const lift = r.curve.points.map((q) => new THREE.Vector3(q.x, q.y + 4, q.z));
+  const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(lift), 120, 0.9, 5), r.glow);
+  tube.userData.noFit = true; tube.userData.noCast = true;
+  overlayGroup.add(tube);
 });
+
+// Gezginler: yollar üzerinde ilerleyen yumuşak ışıklar (temas ne kadar güçlüyse o kadar çok)
+const travGeo = new THREE.BufferGeometry();
+const travPos = new Float32Array(ROADS.length * 3 * 3);
+travGeo.setAttribute('position', new THREE.BufferAttribute(travPos, 3));
+{
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const x = c.getContext('2d'), gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.3, 'rgba(255,255,255,0.7)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const pts = new THREE.Points(travGeo, new THREE.PointsMaterial({ size: 26, map: tex, color: new THREE.Color(3.2, 2.8, 1.6), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  pts.frustumCulled = false; pts.userData.noFit = true;
+  overlayGroup.add(pts);
+}
+
+// Orman: tepelerde ve dağ yamaçlarında; köy, tarla ve yol çevresi açık
+const veg = createVegetation(hf, {
+  rect: [-1400, -1300, 1600, 1300], trees: 4000, shrubs: 1200, rocks: 300, grass: 0, seed: 5, water: 0, maxSlope: 0.9,
+  kinds: { pine: 0.5, broad: 0.35, cypress: 0.15 },
+  forest: (x, z) => {
+    for (const v of VILLAGES) { const d = Math.hypot(x - v.x * S, z - v.z * S); if (d < 250) return d < 120 ? 0 : 0.2; }
+    for (const [px, pz] of roadPts) if (Math.abs(x - px) < 14 && Math.abs(z - pz) < 14) return 0;
+    const f = 0.5 + 0.3 * Math.sin(x * 0.007 + 1.3) * Math.cos(z * 0.009) + 0.2 * Math.sin(x * 0.021 + z * 0.013);
+    return f + Math.min(0.35, hf(x, z) / 300);
+  },
+});
+scene.add(veg.group);
 
 // --- Dil durumu ---
 let lex, gen, logs, pending, selected = 1, history, finished;
@@ -245,17 +428,28 @@ sim.onUpdate((dt) => {
 let travT = 0;
 sim.onRender((real) => {
   if (!sim.paused) travT += real * Math.min(sim.speed, 3) * 0.25;
+  let k = 0;
   for (const r of ROADS) {
-    r.mat.opacity = 0.25 + 0.75 * r.s;
-    r.mat.color.setHex(r.s <= 0.001 ? 0xdc2626 : r.sea ? 0xe0f2fe : 0xa16207);
-    r.trav.forEach((m, i) => {
-      m.visible = r.s > i * 0.3 + 0.01;
-      const t = (travT * (0.6 + r.s) + m.userData.ph) % 1;
-      m.position.copy(r.curve.getPointAt(i % 2 ? 1 - t : t));
-      m.position.y += 0.12;
-    });
+    r.glow.opacity = r.s <= 0.001 ? 0.9 : 0.15 + 0.75 * r.s;
+    r.glow.color.copy(r.s <= 0.001 ? RED : r.sea ? SEA_C : ROAD_C);
+    for (let i = 0; i < 3; i++) {
+      const on = overlay.on && r.s > i * 0.3 + 0.01;
+      const t = (travT * (0.6 + r.s) + i / 3) % 1;
+      const q = r.curve.getPointAt(i % 2 ? 1 - t : t);
+      travPos[k * 3] = q.x; travPos[k * 3 + 1] = on ? q.y + 6 : -1e4; travPos[k * 3 + 2] = q.z;
+      k++;
+    }
+    if (r.boat) {
+      const t = (travT * 0.35 * (0.6 + r.s)) % 2, u = t < 1 ? t : 2 - t;
+      const q = r.curve.getPointAt(Math.min(0.99, u)), q2 = r.curve.getPointAt(Math.min(0.999, u + 0.009));
+      r.boat.position.set(q.x, 0.2, q.z);
+      r.boat.rotation.y = Math.atan2(q2.x - q.x, q2.z - q.z) + (t < 1 ? Math.PI : 0);
+      r.boat.visible = r.s > 0.001;
+    }
   }
+  travGeo.attributes.position.needsUpdate = true;
   VILLAGES.forEach((v, i) => { v.flag.rotation.y = Math.sin(travT * 8 + i) * 0.3; });
+  veg.update(performance.now() / 1000, 0.8);
 });
 
 // --- Panel ---
@@ -288,6 +482,11 @@ ui.button({ label: '🚶 Göç: nüfusları karıştır', variant: 'primary', on
   refresh();
 } });
 ui.section('Görünüm');
+ui.buttons([
+  { label: '🌊 Kıyıdan', onClick: () => sim.moveCamera([-1150, 360, 760], [-60, 20, -50]) },
+  { label: '🗺️ Kuşbakışı', onClick: () => sim.moveCamera([60, 2100, 900], [-40, 0, -30]) },
+]);
+ui.toggle({ label: 'Köy halkaları, temas çizgileri, gezginler', value: true, onChange: (v) => { overlay.on = v; overlayGroup.visible = v; } });
 ui.select({ label: 'Etiketlerde gösterilen', options: [{ value: '3', label: '3 sözcük (taş · yol · ekmek)' }, ...VOCAB.map((w, i) => ({ value: 'w' + i, label: `"${w}" sözcüğü` }))], value: '3', onChange: (v) => { P.showWord = v; refresh(); } });
 
 ui.section('Sonuç');
@@ -326,7 +525,8 @@ function refresh() {
     const sim100 = Math.round(similarity(lex[i], VOCAB) * 100);
     v.label.setText(`<b style="color:${v.color}">${v.name}</b> <small style="color:${CL[s.labels[i] % CL.length]}">● dil ${s.labels[i] + 1}</small><br><span style="font-size:14px">${words}</span><br><small>ata dile %${sim100}</small>`);
     v.label.el.style.outline = i === selected ? `2px solid ${v.color}` : '';
-    v.ring.scale.setScalar(i === selected ? 1.25 : 1);
+    v.ringMat.color.set(v.color).multiplyScalar(i === selected ? 3.2 : 1.3);
+    v.terrMat.color.set(LANG_C[s.labels[i] % LANG_C.length]);
   });
   // Seçili köy sözlüğü
   const L = lex[selected];

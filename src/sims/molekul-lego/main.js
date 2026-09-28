@@ -1,5 +1,5 @@
 // Molekül Lego — merkez atoma atom tak; VSEPR geometrisi, bağ açıları, ortaklanmamış çiftler ve dipol anında güncellenir.
-import { createSim, THREE, fmt, clamp, pick } from '@core';
+import { createSim, THREE, fmt, clamp, pick, mat as M, RoundedBoxGeometry } from '@core';
 import { ATOMS, CENTRALS, LIGANDS, PRESETS, PRESET_BY_KEY, GEOMETRIES, analyze, canAdd, formula, keyOf, sub, bondType } from './chem.js';
 
 const UNIT = 1.45;          // 1 Å → sahne birimi
@@ -7,9 +7,10 @@ const LP_W = 0.8;           // ortaklanmamış çiftin dipole katkısı (göreli
 const hex = (c) => '#' + c.toString(16).padStart(6, '0');
 
 const sim = createSim({
-  background: 0x0a0f1e,
-  camera: { position: [0, 2.2, 11.5], target: [0, 0, 0], fov: 45 },
-  controls: { minDistance: 5, maxDistance: 24, maxPolarAngle: Math.PI },
+  studio: { mood: 'day', color: 0xa8a39b, warmth: 0.2, key: { el: 55, az: 30, power: 1.2 }, radius: 9, height: 5 },
+  look: { aoRadius: 0.02 },
+  camera: { position: [0, 0.198, 0.345], target: [0, 0.132, 0], fov: 45, near: 0.01, far: 40 },
+  controls: { minDistance: 0.15, maxDistance: 0.72, maxPolarAngle: Math.PI },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Ortadaki <b>merkez atoma</b> taktığın her atom bir bağ, bağlanmamış elektron çiftleri ise mor
@@ -36,30 +37,96 @@ const sim = createSim({
     özel durumlar çift bağla gösterilir.</small></p>`,
 });
 
-// --- Sahne süsleri ---
-const grid = new THREE.PolarGridHelper(6, 12, 5, 72, 0x1e3a5f, 0x14233d);
-grid.position.y = -4.4;
-grid.material.transparent = true;
-grid.material.opacity = 0.55;
-sim.scene.add(grid);
-sim.scene.add(new THREE.PointLight(0x93c5fd, 18, 30, 1.6).translateX(-6).translateY(3).translateZ(4));
+// --- Sahne: masada molekül modeli seti (1 birim = 3 cm; kök grup metreye ölçekler) ---
+const LOWQ = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+const K = 0.03, FLOOR_U = -4.4;
+const root = new THREE.Group();
+root.scale.setScalar(K);
+root.position.y = -FLOOR_U * K;
+sim.scene.add(root);
+sim.sky.mesh.position.y = -0.75;
+const rnd = (a, b) => a + Math.random() * (b - a);
+{
+  // Masa: vernikli meşe tabla ve ayaklar (metre)
+  const top = new THREE.Mesh(new RoundedBoxGeometry(1.6, 0.035, 0.9, 3, 0.008), M.wood({ color: 0xa47a4e, varnish: true, scale: 1.2 }));
+  top.position.set(0, -0.0175, -0.12);
+  sim.scene.add(top);
+  for (const [x, z] of [[-0.74, -0.52], [0.74, -0.52], [-0.74, 0.28], [0.74, 0.28]]) {
+    const l = new THREE.Mesh(new RoundedBoxGeometry(0.05, 0.715, 0.05, 2, 0.008), M.wood({ color: 0x8a6440, varnish: true }));
+    l.position.set(x, -0.3925, z);
+    sim.scene.add(l);
+  }
+  // Döner sergi altlığı (molekülün altında), keçe kaplı
+  const lathe = (pts, seg = 64) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg);
+  const base = new THREE.Mesh(lathe([[0, 0], [3.4, 0], [3.5, 0.08], [3.5, 0.32], [3.35, 0.4], [0, 0.4]]), M.wood({ color: 0x3b2a1d, varnish: true, scale: K * 1.5 }));
+  base.position.y = FLOOR_U;
+  const felt = new THREE.Mesh(new THREE.CylinderGeometry(3.2, 3.2, 0.03, 64), M.fabric({ color: 0x1f3a5a, scale: K * 3 }));
+  felt.position.y = FLOOR_U + 0.415;
+  root.add(base, felt);
+  // Yedek parça kutusu: bölmeli plastik tepsi, içinde renkli atomlar ve bağ çubukları
+  const tray = new THREE.Group();
+  tray.position.set(-9.5, FLOOR_U, -6);
+  tray.rotation.y = 0.35;
+  root.add(tray);
+  const trayMat = M.plastic({ color: 0xe8ecef, gloss: 0.6 });
+  const floorT = new THREE.Mesh(new RoundedBoxGeometry(9, 0.2, 5.4, 3, 0.08), trayMat);
+  floorT.position.y = 0.1;
+  tray.add(floorT);
+  for (const [w, d, x, z] of [[9, 0.14, 0, -2.63], [9, 0.14, 0, 2.63], [0.14, 5.4, -4.43, 0], [0.14, 5.4, 4.43, 0], [0.1, 5.2, -1.5, 0], [0.1, 5.2, 1.5, 0]]) {
+    const wall = new THREE.Mesh(new RoundedBoxGeometry(w, 1.1, d, 2, 0.04), trayMat);
+    wall.position.set(x, 0.65, z);
+    tray.add(wall);
+  }
+  const bin = [[0xef2b2b, 0.33, -3], [0xf1f5f9, 0.25, 0], [0x3b3f45, 0.36, 3]];
+  const sph = new THREE.SphereGeometry(1, 28, 20);
+  for (const [c, r, bx] of bin) {
+    const n = LOWQ ? 10 : 16;
+    const im = new THREE.InstancedMesh(sph, M.plastic({ color: c, gloss: 0.95 }), n);
+    const mt = new THREE.Matrix4(), q = new THREE.Quaternion();
+    for (let i = 0; i < n; i++) {
+      const p = new THREE.Vector3(bx + rnd(-1.0, 1.0), 0.2 + r + (i > 9 ? 2 * r * 0.8 : 0), rnd(-2.1, 2.1));
+      im.setMatrixAt(i, mt.compose(p, q.setFromEuler(new THREE.Euler(rnd(0, 6), rnd(0, 6), 0)), new THREE.Vector3(r, r, r)));
+    }
+    tray.add(im);
+  }
+  // Masada dağınık birkaç bağ çubuğu ve iki atom
+  const rodGeo = new THREE.LatheGeometry([[0, -0.5], [0.8, -0.5], [1, -0.44], [1, 0.44], [0.8, 0.5], [0, 0.5]].map(([r, y]) => new THREE.Vector2(r, y)), 20);
+  const rodMat = M.plastic({ color: 0xd9dde2, gloss: 0.8 });
+  for (let i = 0; i < 5; i++) {
+    const r = new THREE.Mesh(rodGeo, rodMat);
+    r.scale.set(0.09, 1.3, 0.09);
+    r.rotation.set(Math.PI / 2, 0, rnd(0, 3.14));
+    r.position.set(rnd(-6, -3), FLOOR_U + 0.09, rnd(1, 4));
+    root.add(r);
+  }
+  for (const [c, x, z, r] of [[0xef2b2b, 5.5, 3.2, 0.33], [0x3b63f8, 6.4, 1.9, 0.34]]) {
+    const a = new THREE.Mesh(sph, M.plastic({ color: c, gloss: 0.95 }));
+    a.scale.setScalar(r); a.position.set(x, FLOOR_U + r, z);
+    root.add(a);
+  }
+}
 
 const mol = new THREE.Group();
-sim.scene.add(mol);
+root.add(mol);
 
 // --- Paylaşılan geometri ve malzemeler ---
-const SPHERE = new THREE.SphereGeometry(1, 40, 28);
-const CYL = new THREE.CylinderGeometry(1, 1, 1, 18, 1);
+const SPHERE = new THREE.SphereGeometry(1, 48, 32);
+// Bağ çubuğu: uçları pahlı, y ekseninde 1 birim (ölçek: r, uzunluk, r)
+const CYL = new THREE.LatheGeometry([[0, -0.5], [0.78, -0.5], [0.95, -0.485], [1, -0.46], [1, 0.46], [0.95, 0.485], [0.78, 0.5], [0, 0.5]]
+  .map(([r, y]) => new THREE.Vector2(r, y)), 24);
 const matCache = {};
 function mat(el) {
   if (!matCache[el]) {
     const c = ATOMS[el].color;
-    matCache[el] = new THREE.MeshStandardMaterial({ color: c, roughness: 0.32, metalness: 0.06, emissive: c, emissiveIntensity: el === 'C' ? 0.12 : 0.05 });
+    const m = M.plastic({ color: c, gloss: 0.95 });
+    m.clearcoat = 1; m.clearcoatRoughness = 0.06;
+    m.emissive = new THREE.Color(c); m.emissiveIntensity = el === 'C' ? 0.06 : 0.02;
+    matCache[el] = m;
   }
   return matCache[el];
 }
-const lpMat = new THREE.MeshStandardMaterial({ color: 0xc4b5fd, transparent: true, opacity: 0.42, roughness: 0.4, depthWrite: false, emissive: 0x6d28d9, emissiveIntensity: 0.35 });
-const eMat = new THREE.MeshBasicMaterial({ color: 0xf5f3ff });
+const lpMat = new THREE.MeshPhysicalMaterial({ color: 0xc4b5fd, transparent: true, opacity: 0.4, roughness: 0.15, clearcoat: 1, depthWrite: false, emissive: 0x6d28d9, emissiveIntensity: 0.45 });
+const eMat = M.glow({ color: 0xf5f3ff, intensity: 2.5 });
 const arcMat = new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false, transparent: true });
 const dipMat = new THREE.MeshBasicMaterial({ color: 0xf472b6, depthTest: false, transparent: true, opacity: 0.95 });
 
@@ -523,3 +590,20 @@ sim.onReset(() => {
 });
 presetSel.value = 'H2O';
 loadPreset('H2O');
+
+// Ölçekli gruplar: prosedürel kabartma gücü görünüm (dünya) birimindedir → nesnenin dünya ölçeğine uyarlanır (benekli görünüm olmasın)
+{
+  const done = new WeakSet(), ws = new THREE.Vector3();
+  const fixBump = () => sim.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material || [])) {
+      const u = m.userData?.uniforms?.pBump;
+      if (!u || done.has(m)) continue;
+      done.add(m);
+      o.getWorldScale(ws);
+      u.value *= Math.max(ws.x, 1e-4) < 0.999 ? ws.x : 1;
+    }
+  });
+  let nb = 0;
+  sim.onRender(() => { if (nb++ % 30 === 0) fixBump(); });
+}

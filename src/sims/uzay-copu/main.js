@@ -1,6 +1,8 @@
 // Uzay Çöpü ve Kessler Sendromu — alçak yörüngede irtifa bantlarına göre nesne nüfusu, çarpışma zinciri ve önlemler.
-import { createSim, THREE, fmt, clamp, rand, pick, heatColor, ImprovedNoise, instanced, TAU } from '@core';
+import { createSim, THREE, fmt, clamp, rand, pick, heatColor, TAU } from '@core';
+import { createPlanet, createStar, starUniform } from './planets.js';
 import * as M from './model.js';
+import { createCraft } from './craft.js';
 
 const R_VIS = 6.371;       // Dünya yarıçapı (1 birim = 1000 km)
 const ALT_X = 3;           // irtifa görsel olarak 3× abartılı
@@ -9,22 +11,23 @@ const YEAR_SEC = 1.5;      // 1× hızda bir yıl kaç saniye
 const MAXI = 9000;         // en çok nokta
 const TIERS = [4, 10, 25, 100, 250, 1000, 2500, 10000];
 const CATS = [
-  { key: 'S', name: 'Aktif uydu', color: 0x4ade80 },
-  { key: 'D', name: 'Ölü uydu / roket gövdesi', color: 0xfbbf24 },
-  { key: 'Z', name: 'Görev sonu inişte', color: 0x93c5fd },
-  { key: 'F', name: 'Parça', color: 0xf87171 },
+  { key: 'S', name: 'Aktif uydu', color: 0xb9e3c4 },
+  { key: 'D', name: 'Ölü uydu / roket gövdesi', color: 0xe3cfa4 },
+  { key: 'Z', name: 'Görev sonu inişte', color: 0xbfd3ee },
+  { key: 'F', name: 'Parça', color: 0xd6d4d2 },
 ];
 
 const sim = createSim({
-  background: 0x02040b,
-  camera: { position: [0, 13, 30], target: [0, 0, 0], fov: 50, far: 3000 },
+  space: { star: [360, 70, 150], power: 1.05, milky: 0.9, nebula: 0.6, stars: 0.5, galaxyTilt: 70 },
+  look: { bloomStrength: 0.4 },
+  camera: { position: [-9, 7.5, 24], target: [1.5, 0.5, 0], fov: 45, near: 0.05, far: 3000 },
   controls: { maxDistance: 120, minDistance: 9, maxPolarAngle: Math.PI, enablePan: false },
-  lights: false,
   info: `
     <h3>Ne görüyorsun?</h3>
-    <p>Dünya ve alçak yörüngedeki (LEO, 200–2.000 km) ≥ 10 cm nesneler: <b style="color:#4ade80">aktif uydular</b>,
-    <b style="color:#fbbf24">ölü uydular ve roket gövdeleri</b>, görev sonu kuralına uyup <b style="color:#93c5fd">alçalmakta olan uydular</b>, <b style="color:#f87171">çarpışma ve patlama parçaları</b>.
-    Her nokta birkaç nesneyi temsil eder; irtifa görünürlük için 3 kat abartılmıştır. Ekvator düzlemindeki halkalar
+    <p>Dünya ve alçak yörüngedeki (LEO, 200–2.000 km) ≥ 10 cm nesneler: <b style="color:#6fae80">aktif uydular</b>,
+    <b style="color:#b8955a">ölü uydular ve roket gövdeleri</b>, görev sonu kuralına uyup <b style="color:#7d9cc4">alçalmakta olan uydular</b>, <b style="color:#8f8a86">çarpışma ve patlama parçaları</b>.
+    Her nokta birkaç nesneyi temsil eder; irtifa görünürlük için 3 kat abartılmıştır. Ön plandaki istasyon, küp uydular ve boş roket kademesi
+    ölçeksiz örnek modellerdir (gerçekte bu ölçekte bir pikselden çok küçüktürler). Ekvator düzlemindeki halkalar
     irtifa bantlarıdır: renkleri o banttaki parça nüfusunun <b>çarpışma üretimi − atmosfer temizliği</b> ile net büyüme hızını gösterir
     (mavi: atmosfer temizliyor, sarı: denge, kırmızı: çarpışmalarla kendi kendini besliyor).</p>
     <h3>Model</h3>
@@ -61,63 +64,35 @@ const sim = createSim({
     Kaynaklar: ESA Space Environment Report 2025; NASA Orbital Debris Program Office (SBM; ODQN); Kessler & Cour-Palais (1978).</small></p>`,
 });
 
-// --- Yıldızlar, Dünya ---
-{
-  const n = 2500, pos = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) pos.set(new THREE.Vector3().randomDirection().multiplyScalar(rand(700, 1200)).toArray(), i * 3);
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  sim.scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xbfd4ff, size: 1.3, sizeAttenuation: false })));
-}
-sim.scene.add(new THREE.AmbientLight(0x6b7fa8, 1.1));
-const sunL = new THREE.DirectionalLight(0xffffff, 2.6);
-sunL.position.set(30, 12, 18);
-sim.scene.add(sunL);
-
-function earthTexture() {
-  const W = 512, H = 256;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = H;
-  const g = c.getContext('2d');
-  const img = g.createImageData(W, H);
-  const nz = new ImprovedNoise();
-  for (let y = 0; y < H; y++) {
-    const lat = (0.5 - y / H) * Math.PI;
-    for (let x = 0; x < W; x++) {
-      const lon = (x / W) * TAU;
-      const px = Math.cos(lat) * Math.cos(lon), py = Math.sin(lat), pz = Math.cos(lat) * Math.sin(lon);
-      const n = nz.noise(px * 1.6, py * 1.6, pz * 1.6) + 0.5 * nz.noise(px * 4, py * 4, pz * 4) + 0.2 * nz.noise(px * 9, py * 9, pz * 9);
-      const ice = Math.abs(lat) > 1.25;
-      let r, gg, b;
-      if (ice) { r = 235; gg = 240; b = 248; }
-      else if (n > 0.12) { const t = clamp((n - 0.12) * 2, 0, 1); r = 60 + t * 90; gg = 120 - t * 20 + (Math.abs(lat) < 0.4 ? 20 : 0); b = 50 + t * 30; }
-      else { const t = clamp(-n, 0, 0.6); r = 18; gg = 70 - t * 50; b = 150 - t * 60; }
-      const k = (y * W + x) * 4;
-      img.data.set([r, gg, b, 255], k);
-    }
-  }
-  g.putImageData(img, 0, 0);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-const earth = new THREE.Mesh(new THREE.SphereGeometry(R_VIS, 64, 40), new THREE.MeshStandardMaterial({ map: earthTexture(), roughness: 0.85 }));
-earth.rotation.z = 0.41;
+// --- Güneş ve Dünya (yerel gezegen shader'ı: okyanus, kıtalar, bulutlar, gece ışıkları, atmosfer) ---
+const SUN_POS = new THREE.Vector3(360, 70, 150);
+starUniform.value.copy(SUN_POS);
+const sunVis = createStar(3.4, { color: 0xfff1de, intensity: 4.5 });
+sunVis.group.position.copy(SUN_POS);
+sim.scene.add(sunVis.group);
+const earthVis = createPlanet(R_VIS, 'dunya', 0.31);
+const earth = earthVis.group;
 sim.scene.add(earth);
-const atmo = new THREE.Mesh(new THREE.SphereGeometry(R_VIS * 1.025, 48, 32), new THREE.MeshBasicMaterial({ color: 0x60a5fa, transparent: true, opacity: 0.16, side: THREE.BackSide, depthWrite: false }));
-sim.scene.add(atmo);
 
 // --- İrtifa bantları (ekvator halkaları) ---
 const rings = [];
 const ringGroup = new THREE.Group();
+const neutralCol = new THREE.Color(0xb8c2cc);
 sim.scene.add(ringGroup);
+// Her bant: çok ince, yarı saydam yörünge kabuğu (dış kenarda ince çizgi + neredeyse görünmez dolgu; tıklama için)
 for (let i = 0; i < M.NB; i++) {
+  const r0 = rOf(M.EDGES[i]), r1 = rOf(M.EDGES[i + 1]);
   const m = new THREE.Mesh(
-    new THREE.RingGeometry(rOf(M.EDGES[i]) + 0.02, rOf(M.EDGES[i + 1]) - 0.02, 128, 1),
-    new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }),
+    new THREE.RingGeometry(r0 + 0.01, r1 - 0.01, 160, 1),
+    new THREE.MeshBasicMaterial({ color: 0x9fb4cc, transparent: true, opacity: 0.01, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }),
   );
   m.rotation.x = -Math.PI / 2;
   m.userData.band = i;
+  const edge = new THREE.Mesh(new THREE.TorusGeometry((r0 + r1) / 2, 0.006, 6, 256),
+    new THREE.MeshBasicMaterial({ color: 0x9fb4cc, transparent: true, opacity: 0.1, depthWrite: false, blending: THREE.AdditiveBlending }));
+  edge.raycast = () => {};
+  m.add(edge);
+  m.userData.edge = edge;
   ringGroup.add(m);
   rings.push(m);
 }
@@ -126,14 +101,58 @@ for (const [h, a] of [[400, 0.6], [1000, Math.PI - 0.6], [2000, 0.6]]) {
   sim.label(`${fmt(h, 0)} km`, { parent: ringGroup, position: [r * Math.cos(a), 0.3, r * Math.sin(a)], className: 'plain' });
 }
 
-// --- Nesne noktaları (InstancedMesh) ---
-const dots = instanced(new THREE.OctahedronGeometry(0.06, 0), new THREE.MeshBasicMaterial({ color: 0xffffff }), MAXI);
+// --- Nesne noktaları: yumuşak yuvarlak parçacıklar (Dünya arkasındakiler gizlenir) ---
+const dotTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,.75)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 32, 32);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+const dPos = new Float32Array(MAXI * 3), dCol = new Float32Array(MAXI * 3);
+const dGeo = new THREE.BufferGeometry();
+dGeo.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
+dGeo.setAttribute('color', new THREE.BufferAttribute(dCol, 3));
+// Nokta gölgelendiricisi: uzaklıkla küçülen yumuşak disk; Dünya'nın gölgesindeki (gece tarafı arkasındaki) nesneler
+// güneş almadığı için sönük; metal yüzeyler ara sıra güneşi yansıtıp kısa süre parlar (gerçek uydu parıltısı gibi)
+const dotU = { uTex: { value: dotTex }, uSun: { value: new THREE.Vector3(360, 70, 150).normalize() }, uR: { value: R_VIS }, uTime: { value: 0 }, uPix: { value: 600 }, uSize: { value: 0.095 } };
+const dots = new THREE.Points(dGeo, new THREE.ShaderMaterial({
+  uniforms: dotU, transparent: true, depthWrite: false,
+  vertexShader: `
+    uniform vec3 uSun; uniform float uR, uTime, uPix, uSize; attribute vec3 color; varying vec3 vCol; varying float vA;
+    float hh(float n){ return fract(sin(n*12.9898)*43758.5453); }
+    void main(){
+      vec4 mv = modelViewMatrix*vec4(position, 1.0);
+      gl_Position = projectionMatrix*mv;
+      float id = float(gl_VertexID), s1 = hh(id), s2 = hh(id + 71.3);
+      float along = dot(position, uSun), perp = length(position - along*uSun);
+      float lit = along > 0.0 ? 1.0 : smoothstep(uR*0.97, uR*1.04, perp);
+      float glint = pow(max(0.0, sin(uTime*(0.4 + s1) + s2*60.0)), 80.0)*step(0.94, s2)*lit;
+      vCol = color*(0.18 + 0.82*lit)*(0.75 + 0.5*s1) + vec3(3.2, 3.0, 2.8)*glint;
+      vA = 0.55 + 0.4*lit;
+      gl_PointSize = clamp(uSize*uPix/max(-mv.z, 0.1)*(0.8 + 0.5*s1)*(1.0 + glint), 1.2, 7.0);
+    }`,
+  fragmentShader: `
+    uniform sampler2D uTex; varying vec3 vCol; varying float vA;
+    void main(){ float a = texture2D(uTex, gl_PointCoord).a*vA; if (a < 0.01) discard; gl_FragColor = vec4(vCol, a); }`,
+}));
 dots.frustumCulled = false;
-{
-  const m = new THREE.Matrix4(), c = new THREE.Color(0xffffff);
-  for (let i = 0; i < MAXI; i++) { dots.setMatrixAt(i, m); dots.setColorAt(i, c); }
-}
 sim.scene.add(dots);
+
+// --- Yakındaki örnek nesneler (ölçeksiz): gerçek irtifalarında, kameraya bakan gündüz tarafında ---
+const craft = (() => {
+  const cam = new THREE.Vector3(-9, 7.5, 24), c = cam.clone().normalize();
+  const fw = new THREE.Vector3(1.5, 0.5, 0).sub(cam).normalize();
+  const right = new THREE.Vector3().crossVectors(fw, new THREE.Vector3(0, 1, 0)).normalize();
+  const up = new THREE.Vector3().crossVectors(right, fw).normalize();
+  const d = (a, b, e) => c.clone().multiplyScalar(a).addScaledVector(right, b).addScaledVector(up, e);
+  return createCraft(sim.scene, { spots: [
+    { dir: d(0.5, 0.88, 0.22), r: rOf(420) },          // ISS benzeri istasyon, ≈ 420 km
+    { dir: d(0.62, 0.62, -0.58), r: rOf(550) },        // küp uydu, 550 km
+    { dir: d(0.45, -0.05, 0.95), r: rOf(530) },        // küp uydu
+    { dir: d(0.55, 0.8, -0.3), r: rOf(820) },          // boş roket kademesi, ≈ 820 km
+  ] });
+})();
 
 // Her (bant, tür) için sabit yörünge parametreleri: e1(3), e2(3), r, θ0, ω
 const INCL = { S: [53, 53, 97.6, 70, 43, 87.9], Z: [53, 53, 97.6, 70, 87.9], D: [97.6, 82, 74, 71, 65, 99], F: [98.6, 86.4, 74, 82, 65, 97] };
@@ -176,19 +195,19 @@ function layout() {
       n = Math.min(n, MAXI - idx);
       counts[b][ci] = n;
       ensure(b, ci, n);
-      col.setHex(CATS[ci].color);
-      for (let j = 0; j < n; j++) dots.setColorAt(idx + j, col);
+      col.setHex(CATS[ci].color).multiplyScalar(0.95);
+      for (let j = 0; j < n; j++) col.toArray(dCol, (idx + j) * 3);
       idx += n;
     }
   }
-  dots.count = idx;
-  if (dots.instanceColor) dots.instanceColor.needsUpdate = true;
+  dGeo.setDrawRange(0, idx);
+  dGeo.attributes.color.needsUpdate = true;
 }
 
 let visT = 0;
 function moveDots(dt) {
   visT += dt;
-  const arr = dots.instanceMatrix.array;
+  const arr = dPos;
   let idx = 0;
   for (let b = 0; b < M.NB; b++) {
     for (let ci = 0; ci < CATS.length; ci++) {
@@ -196,15 +215,15 @@ function moveDots(dt) {
       const a = params[b][ci].a;
       for (let j = 0; j < n; j++) {
         const o = j * 9, th = a[o + 7] + a[o + 8] * visT, c = Math.cos(th) * a[o + 6], s = Math.sin(th) * a[o + 6];
-        const m = (idx + j) * 16;
-        arr[m + 12] = c * a[o] + s * a[o + 3];
-        arr[m + 13] = c * a[o + 1] + s * a[o + 4];
-        arr[m + 14] = c * a[o + 2] + s * a[o + 5];
+        const m = (idx + j) * 3;
+        arr[m] = c * a[o] + s * a[o + 3];
+        arr[m + 1] = c * a[o + 1] + s * a[o + 4];
+        arr[m + 2] = c * a[o + 2] + s * a[o + 5];
       }
       idx += n;
     }
   }
-  dots.instanceMatrix.needsUpdate = true;
+  dGeo.attributes.position.needsUpdate = true;
 }
 
 // --- Çarpışma parlamaları ---
@@ -221,7 +240,7 @@ const flashTex = (() => {
   return new THREE.CanvasTexture(c);
 })();
 const flashes = Array.from({ length: 10 }, () => {
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: flashTex, color: new THREE.Color(3, 2.6, 2.2), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
   s.visible = false;
   s.userData.life = 0;
   sim.scene.add(s);
@@ -294,6 +313,12 @@ ui.buttons([
 ]);
 ui.button({ label: '🚀 Mega takımyıldız: +5.000 uydu (550 km)', onClick: () => event('mega') });
 ui.toggle({ label: 'İrtifa bandı halkaları', value: true, onChange: (v) => (ringGroup.visible = v) });
+ui.section('Görünüm', { open: false });
+ui.buttons([
+  { label: '🌍 Genel', onClick: () => sim.moveCamera([-9, 7.5, 24], [1.5, 0.5, 0]) },
+  { label: '🛰 Yakın (ufuk)', onClick: () => sim.moveCamera([-3.2, 2.4, 10.6], [3.5, -0.8, 0]) },
+  { label: '⬇ Kutuptan', onClick: () => sim.moveCamera([0.5, 27, 1.5], [0, 0, 0]) },
+]);
 
 ui.section('Durum');
 const st = {
@@ -341,13 +366,16 @@ function updatePanel(r) {
     ? `⚠️ <b>Kendi kendini besleyen bantlar</b> (çarpışma parçası > atmosferin temizlediği):<br>${hot.slice(0, 4).map(([i, g]) => `${M.BAND_NAMES[i]} km <b>+%${fmt(g * 100, 1)}/yıl</b>`).join(' · ')}
        <br><small>Bu bantlarda fırlatma dursa bile parça sayısı çarpışmalarla artar.</small>`
     : '✅ Hiçbir bantta çarpışmalar parça nüfusunu atmosferin temizleyebileceğinden hızlı büyütmüyor.');
-  legendTxt.set(`<small><b style="color:#4ade80">●</b> aktif · <b style="color:#fbbf24">●</b> ölü uydu / roket gövdesi · <b style="color:#93c5fd">●</b> görev sonu inişte · <b style="color:#f87171">●</b> parça · 1 nokta ≈ ${fmt(tier, 0)} nesne · irtifa 3× abartılı</small>`);
+  legendTxt.set(`<small><b style="color:#b9e3c4">●</b> aktif · <b style="color:#e3cfa4">●</b> ölü uydu / roket gövdesi · <b style="color:#bfd3ee">●</b> görev sonu inişte · <b style="color:#d6d4d2">●</b> parça · 1 nokta ≈ ${fmt(tier, 0)} nesne · irtifa 3× abartılı</small>`);
   // Halka rengi: çarpışmaların net parça büyüme hızı (%/yıl) — mavi: temizleniyor, sarı: denge, kırmızı: büyüyor
   r.forEach((x, i) => {
     const t = clamp(0.5 + x.growth * 25, 0, 1);
     heatColor(t, ringCol);
+    ringCol.lerp(neutralCol, 0.45);
     rings[i].material.color.copy(ringCol);
-    rings[i].material.opacity = 0.1 + Math.abs(t - 0.5) * 0.35;
+    rings[i].material.opacity = 0.004 + Math.abs(t - 0.5) * 0.04;
+    rings[i].userData.edge.material.color.copy(ringCol);
+    rings[i].userData.edge.material.opacity = 0.06 + Math.abs(t - 0.5) * 0.5;
   });
 }
 
@@ -380,9 +408,15 @@ sim.onUpdate((dt) => {
   if (layoutAcc > 0.3) { layoutAcc = 0; layout(); }
 });
 
+const _dsz = new THREE.Vector2();
 sim.onRender((dt) => {
-  earth.rotation.y += dt * 0.05;
+  dotU.uTime.value += dt;
+  sim.renderer.getDrawingBufferSize(_dsz);
+  dotU.uPix.value = _dsz.y / (2 * Math.tan(THREE.MathUtils.degToRad(sim.camera.fov) / 2));
+  earthVis.spin(sim.paused ? 0 : dt * 0.06);
+  sunVis.update(dt);
   moveDots(dt);
+  craft.update(dt, dotU.uSun.value);
   for (const f of flashes) {
     if (!f.visible) continue;
     f.userData.life -= dt * 0.8;

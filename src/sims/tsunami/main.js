@@ -1,24 +1,28 @@
 // Tsunami Yayılımı — doğrusal sığ su denklemleri (2B ızgara), sığlaşma, kıyıya varış, taşkın, dalgakıran ve tahliye.
-import { createSim, THREE, clamp, smoothstep, lerp, fmt, instanced, rand } from '@core';
+import { createSim, THREE, clamp, smoothstep, lerp, fmt, instanced, rand, mat, landscape, createTerrain, terrainSkirt, createVegetation, RoundedBoxGeometry, BufferGeometryUtils, crowd } from '@core';
+import { sweep, plaster, roofTiles, houseGeometries, fishingBoat } from './kit.js';
 
 const G = 9.81;
 const NX = 160, NZ = 100;             // ızgara
 const DX = 2500;                      // m (400 km × 250 km)
 const LX = NX * DX / 1000, LZ = NZ * DX / 1000; // km
 const SEC_PER_SIM = 60;               // 1 sn simülasyon = 1 dk gerçek zaman
-const S = 0.1;                        // dünya birimi / km
-const VEX = 0.05;                     // kara yükseltisi: birim / m
 const H_MIN = 1.5;                    // bundan sığ hücreler kara (duvar) sayılır
+// Görsel dünya metre cinsinden; model alanı yatayda 1:50 küçültülür (1 km → 20 m), yükseklikler gerçek metre.
+const KM = 20, X0K = 338, Z0K = 125;
 
 const sim = createSim({
-  background: 0x0a1626,
-  camera: { position: [-6, 21, 27], target: [5, -1.2, 0], fov: 45 },
-  controls: { minDistance: 4, maxDistance: 70, maxPolarAngle: 1.4 },
+  sky: { elevation: 17, azimuth: 236, clouds: 0.32, haze: 1.1, visibility: 9000, wind: [5, 2] },
+  ocean: { wind: 6.5, windDir: 250, fetch: 220 },
+  camera: { position: [-380, 55, -260], target: [120, 12, -20], fov: 50, near: 0.5, far: 80000 },
+  controls: { minDistance: 8, maxDistance: 16000, maxPolarAngle: 1.52 },
   info: `
     <h3>Ne görüyorsun?</h3>
-    <p>Solda derin okyanus (≈4.000 m), ortada kıta yamacı, sağda sığ kıta sahanlığı ve körfezdeki <b>Liman kasabası</b>.
-    Deniz tabanındaki bir fay kırılınca taban bir yanda yükselir, öbür yanda çöker; üstündeki su kütlesi de aynı şekli alır
-    ve tsunami her yöne yayılır. Kırmızı: deniz seviyesinin üstü, mavi-beyaz: altı (çekilme).</p>
+    <p>Kıyıda <b>Liman kasabası</b>, önünde körfez ve açık deniz (batı). Açıkta, yaklaşık 4.000 m derinlikte bir fay kırılınca
+    taban bir yanda yükselir, öbür yanda çöker; üstündeki su kütlesi de aynı şekli alır ve tsunami her yöne yayılır.
+    Denizin yüzeyi <b>modelin hesapladığı yükseklikte</b>: dalga cephesi köpüklü bir kabarma olarak kıyıya ilerler, deniz
+    çekilince taban açığa çıkar, taşkın suyu evlerin arasına girer, teknelerle şamandıra suyla birlikte kalkar.
+    "Yükseklik haritası" katmanı: kırmızı deniz seviyesinin üstü, mavi altı (çekilme).</p>
     <h3>Neden kıyıda büyüyor?</h3>
     <p>Tsunami dalga boyu yüzlerce kilometre olduğundan hızı yalnız derinliğe bağlıdır: <b>c = √(g·h)</b>.
     4.000 m derinlikte ≈ 200 m/sn (jet uçağı hızı!), 50 m derinlikte ≈ 22 m/sn. Sığ suda dalga yavaşlar, arkadan gelen su
@@ -41,10 +45,13 @@ const sim = createSim({
     <p>Doğrusal sığ su denklemleri, kaydırmalı (C) ızgarada ileri-geri adımla çözülür (2,5 km hücre). İlk yüzey şekli,
     taban yükselmesinin suya aynen aktarıldığı basit bir yükselme/çökme çiftidir (Okada modelinin yerine). Mw, kayma ≈ 2 × yükselme
     varsayımıyla M₀ = μ·A·D'den kabaca hesaplanır. Kıyıdaki tırmanma ve taşkın doğrusal olmayan etkiler içerdiğinden yalnız yaklaşık
-    gösterilir. Dikey ölçek büyük ölçüde abartılıdır.</p>`,
+    gösterilir. <small>Görüntüde 400 km × 250 km'lik alan yatayda 1:50 küçültülmüştür (evler, tekneler, insanlar gerçek boyda);
+    yükseklikler metre cinsindendir. Açık denizdeki dalga "abartma" çarpanıyla büyütülür, kıyıya doğru çarpan 1'e (gerçek
+    yükseklik) iner.</small></p>`,
 });
+const scene = sim.scene, ocean = sim.ocean;
 
-// --- Batimetri ---
+// --- Batimetri (model, km) ---
 const xc = (z) => 370 + 10 * Math.sin(z / 37) - 30 * Math.exp(-(((z - 125) / 24) ** 2)); // kıyı çizgisi (km)
 const SHELF = 110;
 function depthAt(x, z) {                 // m; + su derinliği, − kara yükseltisi
@@ -117,68 +124,88 @@ function step(dt) {
 const CMAX = Math.sqrt(G * 4200);
 const DT_MAX = 0.45 * DX / CMAX / Math.SQRT2 * 1.4;
 
-// --- Sahne: taban/kara ve su yüzeyi ---
-const X = (xkm) => (xkm - LX / 2) * S, Z = (zkm) => (zkm - LZ / 2) * S;
-const bedY = (d) => (d > 0 ? -Math.sqrt(d / 4000) * 3.2 : -d * VEX);
-function gridGeo() {
-  const g = new THREE.BufferGeometry();
-  const pos = new Float32Array(N * 3), idx = [];
-  for (let k = 0; k < NZ; k++) for (let i = 0; i < NX; i++) pos.set([X(cx(i)), 0, Z(cz(k))], (k * NX + i) * 3);
-  for (let k = 0; k < NZ - 1; k++) for (let i = 0; i < NX - 1; i++) {
-    const a = k * NX + i, b = a + 1, c = a + NX, d = c + 1;
-    idx.push(a, c, b, b, c, d);
+// --- Dünya koordinatları (m) ---
+const XW = (xk) => (xk - X0K) * KM, ZW = (zk) => (zk - Z0K) * KM;
+const XK = (xw) => X0K + xw / KM, ZK = (zw) => Z0K + zw / KM;
+const ZCLAMP = 5800;                         // bu z'nin ötesinde kıyı biçimi sabit (derinlik dokusu kenarıyla uyumlu)
+const hills = landscape({ seed: 23, size: 900, height: 230, base: -20, warp: 0.5 });
+const micro = landscape({ seed: 7, size: 160, height: 5, base: -2.5, octaves: 5, warp: 0.3 });
+/** Görsel zemin yüksekliği (m): kıyıda modelle aynı, iç kesimde tepeler; deniz tabanı derinde sıkıştırılır. */
+function ground(xw, zw) {
+  const zk = ZK(clamp(zw, -ZCLAMP, ZCLAMP)), xk = XK(xw), c = xc(zk);
+  const d = depthAt(xk, zk);
+  if (xk < c) {
+    const sea = -(d < 40 ? d : 40 + (d - 40) * 0.12);
+    return lerp(sea, 0.3, smoothstep(c - 0.9, c, xk));          // kıyı çizgisinde yumuşak geçiş (kumsal)
   }
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
-  g.setIndex(idx);
-  return g;
-}
-const bedGeo = gridGeo();
-{
-  const p = bedGeo.attributes.position.array, col = bedGeo.attributes.color.array, c = new THREE.Color();
-  for (let j = 0; j < N; j++) {
-    const d = h[j];
-    p[j * 3 + 1] = bedY(d);
-    if (d > 0) c.setHex(0xd9c38f).lerp(new THREE.Color(0x0f2c4d), clamp(Math.sqrt(d / 4000) * 1.4, 0, 1));
-    else if (-d < 3) c.setHex(0xe8d6a0);
-    else if (-d < 25) c.setHex(0x7fb069).lerp(new THREE.Color(0x4d7c3a), (-d - 3) / 22);
-    else c.setHex(0x4d7c3a).lerp(new THREE.Color(0x8b7d5b), clamp((-d - 25) / 25, 0, 1));
-    col.set([c.r, c.g, c.b], j * 3);
-  }
-  bedGeo.computeVertexNormals();
-}
-sim.scene.add(new THREE.Mesh(bedGeo, new THREE.MeshLambertMaterial({ vertexColors: true })));
-{
-  // Kesit kaidesi
-  const m = new THREE.MeshLambertMaterial({ color: 0x1f2937 });
-  const base = new THREE.Mesh(new THREE.BoxGeometry(LX * S + 0.2, 0.6, LZ * S + 0.2), m);
-  base.position.y = -3.6;
-  sim.scene.add(base);
-}
-const waterGeo = gridGeo();
-const water = new THREE.Mesh(waterGeo, new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.86 }));
-sim.scene.add(water);
-
-// Fay işareti (deniz tabanında)
-const faultMark = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 1), new THREE.MeshBasicMaterial({ color: 0xef4444 }));
-sim.scene.add(faultMark);
-const faultLabel = sim.label('Fay (deniz tabanı)', { parent: faultMark, position: [0, 0.8, 0] });
-
-// Dalgakıran
-const bwGroup = new THREE.Group();
-{
-  const m = new THREE.MeshLambertMaterial({ color: 0x9ca3af });
-  const x = X(BW_I * 2.5);
-  for (const [k0, k1] of [[BW_K0, GAP0 - 1], [GAP1 + 1, BW_K1]]) {
-    const z0 = Z(k0 * 2.5), z1 = Z((k1 + 1) * 2.5);
-    const b = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.5, z1 - z0), m);
-    b.position.set(x, -0.1, (z0 + z1) / 2);
-    bwGroup.add(b);
-  }
-  sim.scene.add(bwGroup);
+  const inland = xk - c;
+  return -d + hills(xw, zw) * smoothstep(9, 70, inland) + micro(xw, zw) * smoothstep(0.4, 3, inland);
 }
 
-// --- Kasaba: evler, kıyı duvarı, yüksek yer, kişiler ---
+// --- Arazi: geniş zemin + kasaba çevresinde sık ağlı parça ---
+const land = new THREE.Group();
+scene.add(land);
+const TOPT = { water: 0, grass: 0x5f6a2e, dry: 0xa39461, forest: 0.7, sand: 0xcdb98e };
+const PATCH = { x: 60, z: 0, s: 1500 };
+const inPatch = (x, z) => Math.min(smoothstep(PATCH.s / 2, PATCH.s / 2 - 60, Math.abs(x - PATCH.x)), smoothstep(PATCH.s / 2, PATCH.s / 2 - 60, Math.abs(z - PATCH.z)));
+const BIG = { c: [3000, 0], s: 14000 };
+land.add(createTerrain((x, z) => ground(x, z) - 2.5 * inPatch(x, z), { size: [BIG.s, BIG.s], center: BIG.c, res: [360, 360], materialOptions: TOPT }));
+land.add(createTerrain(ground, { size: [PATCH.s, PATCH.s], center: [PATCH.x, PATCH.z], res: [300, 300], materialOptions: TOPT }));
+land.add(terrainSkirt(ground, { inner: BIG.s / 2, outer: 60000, center: BIG.c }));
+
+// --- Model ızgarası → okyanus: uzun dalga (tsunami yüksekliği) ve dinamik derinlik ---
+const level = new Float32Array(N);                               // görsel su seviyesi (m), hücre başına
+const longData = new Float32Array(N * 4);
+const longTex = new THREE.DataTexture(longData, NX, NZ, THREE.RGBAFormat, THREE.FloatType);
+longTex.minFilter = longTex.magFilter = THREE.LinearFilter; longTex.wrapS = longTex.wrapT = THREE.ClampToEdgeWrapping;
+const LONG_RECT = [XW(0), ZW(0), XW(LX), ZW(LZ)];
+ocean.setLongWave(longTex, LONG_RECT);
+const DR = [-3400, -ZCLAMP, 1900, ZCLAMP], DNX = 256, DNZ = 384;
+const groundD = new Float32Array(DNX * DNZ);
+const depthData = new Float32Array(DNX * DNZ * 4);
+for (let j = 0; j < DNZ; j++) for (let i = 0; i < DNX; i++) {
+  groundD[j * DNX + i] = ground(DR[0] + (i + 0.5) / DNX * (DR[2] - DR[0]), DR[1] + (j + 0.5) / DNZ * (DR[3] - DR[1]));
+}
+const depthTex = new THREE.DataTexture(depthData, DNX, DNZ, THREE.RGBAFormat, THREE.FloatType);
+depthTex.minFilter = depthTex.magFilter = THREE.LinearFilter; depthTex.wrapS = depthTex.wrapT = THREE.ClampToEdgeWrapping;
+ocean.setDepth(depthTex, DR);
+/** Görsel su seviyesi (m) bir dünya noktasında (hücreler arası çift doğrusal). */
+function levelAt(xw, zw) {
+  const fi = clamp(XK(xw) / 2.5 - 0.5, 0, NX - 1.001), fk = clamp(ZK(zw) / 2.5 - 0.5, 0, NZ - 1.001);
+  const i = Math.floor(fi), k = Math.floor(fk), a = fi - i, b = fk - k, c = k * NX + i;
+  return lerp(lerp(level[c], level[c + 1], a), lerp(level[c + NX], level[c + NX + 1], a), b);
+}
+function updateWaterMaps() {
+  const ex = exag.value;
+  for (let k = 0; k < NZ; k++) {
+    const row = k * NX, is = row + iShore[k];
+    const exS = 1 + (ex - 1) * smoothstep(30, 600, h[is]);
+    const shoreL = eta[is] * exS;
+    const holds = wall.value && k >= TOWN_K0 - 1 && k <= TOWN_K1 + 1 && rowFlood[k] <= 0;
+    for (let i = 0; i < NX; i++) {
+      const c = row + i;
+      let L;
+      if (wet[c]) L = eta[c] * (1 + (ex - 1) * smoothstep(30, 600, h[c]));
+      else {
+        const el = -h[c], f = rowFlood[k], inland = (i - iShore[k]) * 2.5;
+        if (f > el && inland < 12) L = Math.min(f, el + 4);
+        else L = holds ? Math.min(shoreL, el - 2) : Math.min(shoreL, el - 0.5);
+      }
+      level[c] = L; longData[c * 4] = L;
+    }
+  }
+  longTex.needsUpdate = true;
+  for (let j = 0; j < DNZ; j++) {
+    const zw = DR[1] + (j + 0.5) / DNZ * (DR[3] - DR[1]);
+    for (let i = 0; i < DNX; i++) {
+      const xw = DR[0] + (i + 0.5) / DNX * (DR[2] - DR[0]), q = j * DNX + i;
+      depthData[q * 4] = levelAt(xw, zw) - groundD[q];
+    }
+  }
+  depthTex.needsUpdate = true;
+}
+
+// --- Kasaba: evler (modeldeki konumlar), kıyı yolu, kıyı duvarı, yüksek yer, kişiler ---
 const TOWN_K0 = 42, TOWN_K1 = 58;
 const houses = [];
 for (let k = TOWN_K0; k <= TOWN_K1; k += 1) {
@@ -188,32 +215,108 @@ for (let k = TOWN_K0; k <= TOWN_K1; k += 1) {
     houses.push({ x, z, k, elev: -depthAt(x, z), flooded: false });
   }
 }
-const houseMesh = instanced(new THREE.BoxGeometry(0.1, 0.08, 0.1), new THREE.MeshLambertMaterial({ color: 0xffffff }), houses.length);
-const roofMesh = instanced(new THREE.ConeGeometry(0.085, 0.06, 4), new THREE.MeshLambertMaterial({ color: 0xffffff }), houses.length);
+const town = new THREE.Group();
+scene.add(town);
+const HVAR = [{ roof: 'gable', floors: 2, w: 11, d: 9 }, { roof: 'flat', floors: 3, w: 12, d: 10 }, { roof: 'gable', floors: 3, w: 10, d: 9 }, { roof: 'flat', floors: 4, w: 13, d: 11 }];
+const wallMat = plaster(0xefe8da), roofMat = roofTiles(0xa9502f), glassMat = mat.plastic({ color: 0x1d2630, gloss: 1 }), trimMat = mat.paintedMetal({ color: 0xe9e6df, wear: 0.1 });
+const houseSets = HVAR.map((v, vi) => {
+  const list = houses.map((hs, j) => ({ hs, j })).filter(({ j }) => ((j * 7 + (j >> 2)) % HVAR.length) === vi);
+  const g = houseGeometries(v);
+  const set = { list, meshes: [instanced(g.walls, wallMat, list.length), instanced(g.roof, v.roof === 'flat' ? wallMat : roofMat, list.length), instanced(g.glass, glassMat, list.length), instanced(g.trim, trimMat, list.length)] };
+  set.meshes.forEach((m) => town.add(m));
+  return set;
+});
+const WALL_COLS = [0xf3eee4, 0xefe3c8, 0xe9d7b8, 0xf1e6dc, 0xdfe3e6, 0xf0dcc8, 0xe8e0cf];
+const HOUSE_DX = 0.4; // km: görsel kaydırma (kıyı yolu için yer)
 {
-  const m = new THREE.Matrix4(), q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI / 4, 0)), s1 = new THREE.Vector3(1, 1, 1);
-  houses.forEach((hs, j) => {
-    const y = hs.elev * VEX;
-    m.makeTranslation(X(hs.x), y + 0.04, Z(hs.z)); houseMesh.setMatrixAt(j, m);
-    m.compose(new THREE.Vector3(X(hs.x), y + 0.11, Z(hs.z)), q, s1); roofMesh.setMatrixAt(j, m);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3(), col = new THREE.Color();
+  for (const set of houseSets) set.list.forEach(({ hs, j }, n) => {
+    const xw = XW(hs.x + HOUSE_DX), zw = ZW(hs.z);
+    // Kıyı çizgisine dik yönelim (yola bakan cephe)
+    const dz = 0.4, t = Math.atan2(XW(xc(hs.z + dz)) - XW(xc(hs.z - dz)), 2 * dz * KM);
+    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2 - t + rand(-0.12, 0.12));
+    sc.set(rand(0.85, 1.2), 1, rand(0.85, 1.15));
+    const gy = Math.min(ground(xw - 5, zw), ground(xw + 5, zw), ground(xw, zw - 5), ground(xw, zw + 5));
+    hs.y = gy - 0.25;
+    m4.compose(p.set(xw, hs.y, zw), q, sc);
+    col.setHex(WALL_COLS[j % WALL_COLS.length]);
+    set.meshes.forEach((me, mi) => { me.setMatrixAt(n, m4); if (mi === 0) me.setColorAt(n, col); });
   });
-  sim.scene.add(houseMesh, roofMesh);
 }
-const seawall = new THREE.Group();
+// Kıyı yolu (asfalt) ve kaldırım: kıyıya paralel süpürme
+const coastPath = (off, k0, k1, y = 0.05) => {
+  const pts = [];
+  for (let z = cz(k0); z <= cz(k1) + 1e-6; z += 0.25) { const x = XW(xc(z) + off); pts.push(new THREE.Vector3(x, 0, ZW(z))); }
+  pts.forEach((p) => { p.y = ground(p.x, p.z) + y; });
+  return pts;
+};
 {
-  const m = new THREE.MeshLambertMaterial({ color: 0xcbd5e1 });
-  for (let k = TOWN_K0 - 1; k <= TOWN_K1 + 1; k++) {
-    const zc = cz(k), x = xc(zc) + 0.25;
-    const b = new THREE.Mesh(new THREE.BoxGeometry(0.05, 6 * VEX, DX / 1000 * S * 1.02), m);
-    b.position.set(X(x), 6 * VEX / 2 + 0.5 * VEX, Z(zc));
-    seawall.add(b);
-  }
-  sim.scene.add(seawall);
+  const road = sweep([[-3, 0.18], [3, 0.18]], coastPath(0.25, TOWN_K0 - 2, TOWN_K1 + 2), { caps: false });
+  town.add(new THREE.Mesh(road, mat.asphalt({ color: 0x3a3b3e, scale: 1 })));
+  const kerb = sweep([[-1.6, 0], [-1.6, 0.35], [1.6, 0.35], [1.6, 0]], coastPath(0.06, TOWN_K0 - 2, TOWN_K1 + 2));
+  town.add(new THREE.Mesh(kerb, mat.concrete({ color: 0xc9c2b4 })));
 }
+const seawall = new THREE.Mesh(sweep([[-1.4, -0.5], [-0.8, 6], [0.4, 6], [0.9, 6.3], [1.2, -0.5]], coastPath(-0.03, TOWN_K0 - 1, TOWN_K1 + 1, 0)), mat.concrete({ color: 0xb9b3a8, stains: 0.9 }));
+scene.add(seawall);
+
+// Dalgakıran: moloz dolgu gövde + düzensiz koruma blokları
+const bwGroup = new THREE.Group();
+{
+  const x = XW(BW_I * 2.5), rockM = mat.rock({ color: 0x8a847a, scale: 0.6 });
+  const blockGeo = new THREE.IcosahedronGeometry(1.6, 1);
+  { const p = blockGeo.attributes.position; for (let i = 0; i < p.count; i++) { const f = 0.8 + 0.35 * Math.sin(p.getX(i) * 3.1) * Math.cos(p.getZ(i) * 2.7 + p.getY(i)); p.setXYZ(i, p.getX(i) * f, p.getY(i) * f * 0.8, p.getZ(i) * f); } blockGeo.computeVertexNormals(); }
+  const segs = [[BW_K0, GAP0 - 1], [GAP1 + 1, BW_K1]];
+  const blocks = instanced(blockGeo, rockM, 900);
+  let nb = 0;
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), s = new THREE.Vector3();
+  for (const [k0, k1] of segs) {
+    const z0 = ZW(k0 * 2.5), z1 = ZW((k1 + 1) * 2.5);
+    const pts = []; for (let z = z0; z <= z1 + 1e-6; z += (z1 - z0) / 30) if (ground(x, z) < -3) pts.push(new THREE.Vector3(x, 0, z));
+    if (pts.length < 2) continue;
+    bwGroup.add(new THREE.Mesh(sweep([[-24, -18], [-5, 3.5], [5, 3.5], [24, -18]], pts), mat.rock({ color: 0x7b766d, scale: 0.3 })));
+    for (let z = pts[0].z + 2; z < pts[pts.length - 1].z - 2; z += 2.6) for (let u = -9; u <= 9; u += 2.4) {
+      if (nb >= 900) break;
+      const off = u + rand(-0.6, 0.6), y = Math.abs(off) < 5 ? 3.6 : 3.5 - (Math.abs(off) - 5) * (21.5 / 19);
+      e.set(rand(0, 6), rand(0, 6), rand(0, 6)); q.setFromEuler(e); s.setScalar(rand(0.7, 1.25));
+      m4.compose(new THREE.Vector3(x + off, y + rand(-0.2, 0.4), z + rand(-0.8, 0.8)), q, s); blocks.setMatrixAt(nb++, m4);
+    }
+  }
+  blocks.count = nb;
+  bwGroup.add(blocks);
+  scene.add(bwGroup);
+}
+
+// Liman mendireği ve balıkçı tekneleri (su seviyesiyle kalkar)
+const boats = [];
+{
+  const k = 50, zc = cz(k) + 0.8, x0 = XW(xc(zc)), z0 = ZW(zc);
+  const pier = new THREE.Mesh(new RoundedBoxGeometry(70, 3.2, 7, 2, 0.3), mat.concrete({ color: 0xbdb6aa }));
+  pier.position.set(x0 - 30, 0.4, z0); town.add(pier);
+  const bol = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.3, 0.6, 12), mat.paintedMetal({ color: 0x2b2d30, wear: 0.4 }));
+  for (let i = 0; i < 6; i++) { const b = bol.clone(); b.position.set(x0 - 60 + i * 11, 2.3, z0 + 3); town.add(b); }
+  const cols = [[0xf4f2ec, 0x1f4f8f], [0xf4f2ec, 0xb3261e], [0x2f6fa0, 0xf4f2ec], [0xf4f2ec, 0x2e7d4f], [0xe9d9b4, 0x1f4f8f], [0xf4f2ec, 0x3a3a3a]];
+  cols.forEach(([c1, c2], i) => {
+    const b = fishingBoat(c1, c2);
+    const side = i % 2 ? 1 : -1;
+    b.userData = { x: x0 - 16 - Math.floor(i / 2) * 16, z: z0 + side * 9, ry: Math.PI / 2 + rand(-0.15, 0.15), ph: rand(0, 6) };
+    b.position.set(b.userData.x, 0, b.userData.z); b.rotation.y = b.userData.ry;
+    town.add(b); boats.push(b);
+  });
+}
+
 const HILL = { x: xc(128) + 5.5, z: 128 };
-const hillY = -depthAt(HILL.x, HILL.z) * VEX;
-sim.label('⛰️ Yüksek yer (tahliye alanı)', { position: [X(HILL.x), hillY + 0.6, Z(HILL.z)] });
-const townLabel = sim.label('🏘️ Liman', { position: [X(xc(125) + 1.5), 0.9, Z(118)], className: 'big' });
+const hillY = ground(XW(HILL.x), ZW(HILL.z));
+const hillLabel = sim.label('⛰️ Yüksek yer (tahliye alanı)', { position: [XW(HILL.x), hillY + 14, ZW(HILL.z)] });
+const townLabel = sim.label('🏘️ Liman', { position: [XW(xc(125) + 1.5), 38, ZW(118)], className: 'big' });
+// Toplanma alanı tabelası (yüksek yerde)
+{
+  const g = new THREE.Group(), post = mat.paintedMetal({ color: 0x9aa0a6, wear: 0.3 });
+  for (const s of [-0.9, 0.9]) { const p = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.6, 8), post); p.position.set(s, 1.3, 0); g.add(p); }
+  const board = new THREE.Mesh(new RoundedBoxGeometry(2.4, 1.2, 0.08, 1, 0.03), mat.paintedMetal({ color: 0x1f8a4c, wear: 0.1 }));
+  board.position.y = 2.3; g.add(board);
+  g.position.set(XW(HILL.x) - 6, hillY, ZW(HILL.z)); g.rotation.y = -Math.PI / 2;
+  scene.add(g);
+}
 
 const PEOPLE = 60;
 const people = [];
@@ -222,29 +325,88 @@ for (let j = 0; j < PEOPLE; j++) {
   people.push({ x: hs.x + rand(-0.3, 0.3), z: hs.z + rand(-0.3, 0.3), x0: 0, z0: 0, state: 0, delay: rand(0, 5), know: Math.random() < 0.5, tx: HILL.x + rand(-0.8, 0.8), tz: HILL.z + rand(-1.2, 1.2) });
 }
 people.forEach((p) => { p.x0 = p.x; p.z0 = p.z; });
-const personMesh = instanced(new THREE.SphereGeometry(0.03, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }), PEOPLE);
-sim.scene.add(personMesh);
+// Kasaba halkı: motorun eklemli figürleri (@core crowd) — liman işçileri, esnaf, öğrenciler; yürüme/koşu yer değiştirmeden, uzakta tek çizimli kademe
+const folk = crowd(PEOPLE, { seed: 23, camera: sim.camera, poses: ['stand'], outfits: { casual: 6, worker: 3, office: 1, student: 1 } });
+scene.add(folk.group);
+const folkYaw = new Float32Array(PEOPLE).map((_, j) => j * 1.7), folkPrev = new Float32Array(PEOPLE * 2).fill(NaN), folkV = new Float32Array(PEOPLE);
 const WALK = 5 / 60;  // km/dk (≈5 km/sa)
 
-// Ölçüm noktaları
+// Ağaçlar ve çalılar: kasaba şeridi ve kıyı boş
+const veg = createVegetation(ground, {
+  rect: [-200, -3000, 3200, 3000], trees: 4200, shrubs: 5200, rocks: 300, grass: 16000, grassAt: [270, -280, 60], near: [200, -100, 900],
+  kinds: { pine: 0.45, broad: 0.4, cypress: 0.15 }, seed: 17, water: 1,
+  forest: (x, z) => {
+    const inland = x - XW(xc(ZK(z)));
+    const town = Math.abs(z) < 480 && inland < 75 ? 0 : 1;
+    return town * smoothstep(20, 90, inland) * (0.45 + 0.3 * Math.sin(x * 0.013 + 1.1) * Math.cos(z * 0.017) + 0.2 * Math.sin((x + z) * 0.041));
+  },
+});
+scene.add(veg.group);
+
+// --- Ölçüm noktaları ve veri katmanları ---
 const GAUGE = { k: 50, i: iShore[50] };
 const DART = { k: 50, i: Math.round(200 / 2.5) };
-function marker(color, i, k, text) {
-  const g = new THREE.Group();
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 6), new THREE.MeshBasicMaterial({ color }));
-  pole.position.y = 0.45;
-  const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 8), new THREE.MeshBasicMaterial({ color }));
-  ball.position.y = 0.95;
-  g.add(pole, ball);
-  g.position.set(X(cx(i)), 0, Z(cz(k)));
-  sim.scene.add(g);
-  const lb = sim.label(text, { parent: g, position: [0, 1.4, 0] });
-  return { g, lb };
+// Mareograf istasyonu: mendirek ucunda direk + ölçüm kabini
+const gauge = new THREE.Group();
+{
+  const zc = cz(50) + 0.8, x0 = XW(xc(zc)) - 64, z0 = ZW(zc);
+  const steel = mat.brushedMetal({ color: 0xb8bcc2 });
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 7, 12), steel); mast.position.y = 3.5; gauge.add(mast);
+  const box = new THREE.Mesh(new RoundedBoxGeometry(1.2, 1.4, 1, 2, 0.1), mat.paintedMetal({ color: 0xf2c230, wear: 0.2 })); box.position.set(0, 2.6, 0.7); gauge.add(box);
+  const sol = new THREE.Mesh(new RoundedBoxGeometry(1.4, 0.06, 0.9, 1, 0.02), mat.plastic({ color: 0x1b2b4a, gloss: 1 })); sol.position.set(0, 7.1, 0); sol.rotation.x = -0.5; gauge.add(sol);
+  gauge.position.set(x0, 2, z0);
+  town.add(gauge);
 }
-const gaugeM = marker(0xfacc15, GAUGE.i, GAUGE.k, '📏 Mareograf');
-const dartM = marker(0xa78bfa, DART.i, DART.k, '📡 DART şamandırası');
-const probe = marker(0x22d3ee, 60, 30, '');
-const probeLabel = probe.lb;
+const gaugeLabel = sim.label('📏 Mareograf', { parent: gauge, position: [0, 9.5, 0] });
+// DART şamandırası (açık deniz): yüzer gövde, direk, güneş paneli, ışık
+const dart = new THREE.Group();
+{
+  const yellow = mat.paintedMetal({ color: 0xf0b90b, wear: 0.25 }), steel = mat.brushedMetal({ color: 0xaeb3b8 });
+  const hull = new THREE.Mesh(new THREE.LatheGeometry([[0.01, -1], [1.6, -0.9], [2.4, -0.3], [2.5, 0.2], [2.2, 0.6], [0.8, 0.8], [0.01, 0.8]].map(([a, b]) => new THREE.Vector2(a, b)), 48), yellow);
+  dart.add(hull);
+  const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.9, 3.4, 4, 1, true), steel); tower.position.y = 2.4; tower.rotation.y = Math.PI / 4; tower.material.side = THREE.DoubleSide; dart.add(tower);
+  const panel = new THREE.Mesh(new RoundedBoxGeometry(1.3, 0.08, 1.3, 1, 0.02), mat.plastic({ color: 0x14203a, gloss: 1 })); panel.position.y = 3.3; dart.add(panel);
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 8), mat.glow({ color: 0xffd27a, intensity: 8 })); lamp.position.y = 4.3; dart.add(lamp);
+  const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.6, 6), steel); ant.position.set(0.4, 4.4, 0); dart.add(ant);
+  dart.position.set(XW(cx(DART.i)), 0, ZW(cz(DART.k)));
+  dart.scale.setScalar(3);
+  scene.add(dart);
+}
+const dartLabel = sim.label('📡 DART şamandırası', { parent: dart, position: [0, 6, 0] });
+
+// Ölçüm noktası (tıklanan yer): suya dikilen ince ışık sütunu
+const probe = new THREE.Group();
+{
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 120, 12, 1, true), new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }));
+  beam.position.y = 60; probe.add(beam);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(10, 14, 48).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.7, depthWrite: false }));
+  ring.position.y = 1; probe.add(ring);
+  scene.add(probe);
+}
+const probeLabel = sim.label('', { parent: probe, position: [0, 130, 0] });
+
+// Fay izi (deniz tabanında; yüzeyde kırmızı çizgiyle gösterilir)
+const faultMark = new THREE.Mesh(new THREE.BoxGeometry(14, 2, 1), new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.8, depthWrite: false }));
+scene.add(faultMark);
+const faultLabel = sim.label('Fay (deniz tabanı)', { parent: faultMark, position: [0, 120, 0] });
+
+// Yükseklik haritası katmanı: su hücrelerinde kırmızı (yükselme) / mavi (çekilme), yarı saydam
+const heat = (() => {
+  const g = new THREE.BufferGeometry(), pos = new Float32Array(N * 3), idx = [];
+  for (let k = 0; k < NZ; k++) for (let i = 0; i < NX; i++) pos.set([XW(cx(i)), 0, ZW(cz(k))], (k * NX + i) * 3);
+  for (let k = 0; k < NZ - 1; k++) for (let i = 0; i < NX - 1; i++) { const a = k * NX + i, b = a + 1, c = a + NX, d = c + 1; idx.push(a, c, b, b, c, d); }
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(N * 4), 4));
+  g.setIndex(idx);
+  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, fog: false }));
+  m.frustumCulled = false; m.renderOrder = 2; m.visible = false;
+  scene.add(m);
+  return m;
+})();
+// Tıklama düzlemi (görünmez)
+const clickPlane = new THREE.Mesh(new THREE.PlaneGeometry(LX * KM, LZ * KM).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ visible: false }));
+clickPlane.position.set((LONG_RECT[0] + LONG_RECT[2]) / 2, 0, 0);
+scene.add(clickPlane);
 
 // --- Durum ---
 const st = { T: 0, acc: 0, arrival: null, firstSign: 0, maxGauge: 0, retreatWarned: false, warnT: 8 * 60, sirenOn: false, flooded: 0, runup: 0, alarm: false, retreatSeen: false, source: {} };
@@ -267,19 +429,19 @@ function initial() {
   const slip = 2 * Up, M0 = 3e10 * L * 1e3 * W * 1e3 * slip;
   st.source = { L, W, Up, xf, Mw: (2 / 3) * (Math.log10(M0) - 9.1), depth: depthAt(xf, zc) };
   Object.assign(st, { T: 0, acc: 0, arrival: null, firstSign: 0, maxGauge: 0, flooded: 0, runup: 0, alarm: false, retreatSeen: false, sirenOn: false });
-  faultMark.scale.z = L * S;
-  faultMark.position.set(X(xf), bedY(st.source.depth) + 0.1, Z(zc));
-  faultLabel.position.y = -bedY(st.source.depth) + 0.4;
+  faultMark.scale.z = L * KM;
+  faultMark.position.set(XW(xf), 1.5, ZW(zc));
   houses.forEach((hs) => (hs.flooded = false));
   people.forEach((p) => { p.x = p.x0; p.z = p.z0; p.state = 0; p.delay = rand(0, 5); });
   chart.clear();
   buildFaces();
+  updateWaterMaps();
   updateStats(true);
 }
 
 // --- Döngü ---
-const _m = new THREE.Matrix4(), _c = new THREE.Color();
-const cHi = new THREE.Color(0xef4444), cLo = new THREE.Color(0xe0f2fe), cFlood = new THREE.Color(0x5b8db8);
+const _m = new THREE.Matrix4(), _c = new THREE.Color(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(1, 1, 1), _p = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+const cHi = new THREE.Color(0xef4444), cLo = new THREE.Color(0x60a5fa);
 let frame = 0;
 sim.onUpdate((dt) => {
   // Fiziksel zaman: kararlı alt adımlar (8× hızda da)
@@ -328,61 +490,68 @@ sim.onUpdate((dt) => {
   if (++frame % 3 === 0) updateStats();
 });
 
-sim.onRender(() => {
-  // Su yüzeyi
-  const p = waterGeo.attributes.position.array, col = waterGeo.attributes.color.array;
-  const ex = exag.value * 0.06, sc = Math.max(0.3, st.source.Up || 1) * 0.35;
-  for (let k = 0; k < NZ; k++) for (let i = 0; i < NX; i++) {
-    const j = k * NX + i;
-    let y;
-    if (wet[j]) {
-      const e = eta[j];
-      y = e * ex;
-      const by = bedY(h[j]);
-      if (e < -h[j] + 0.3) y = by - 0.02;      // deniz çekildi: taban açıkta
-      const t = clamp(e / sc, -1, 1);
-      const deep = clamp(Math.sqrt(h[j] / 4000), 0, 1);
-      _c.setRGB(0.1 + 0.15 * (1 - deep), 0.35 + 0.25 * (1 - deep), 0.65 + 0.2 * (1 - deep));
-      if (t > 0) _c.lerp(cHi, t); else _c.lerp(cLo, -t * 0.9);
-    } else {
-      const el = -h[j], f = rowFlood[k];
-      const inland = (i - iShore[k]) * 2.5;
-      if (f > el && inland < 12) { y = (el + Math.min(f - el, 4)) * VEX + 0.015; _c.copy(cFlood); }
-      else { y = el * VEX - 0.05; _c.copy(cFlood); }
+let wallT = 0;
+sim.onRender((rdt) => {
+  wallT += rdt;
+  updateWaterMaps();
+  // Yükseklik haritası katmanı
+  if (heat.visible) {
+    const p = heat.geometry.attributes.position.array, col = heat.geometry.attributes.color.array;
+    const sc = Math.max(0.3, st.source.Up || 1) * 0.35;
+    for (let j = 0; j < N; j++) {
+      p[j * 3 + 1] = level[j] + 4;
+      const t = wet[j] ? clamp(eta[j] / sc, -1, 1) : 0;
+      _c.copy(t > 0 ? cHi : cLo);
+      col[j * 4] = _c.r; col[j * 4 + 1] = _c.g; col[j * 4 + 2] = _c.b; col[j * 4 + 3] = wet[j] ? 0.12 + 0.6 * Math.abs(t) : 0;
     }
-    p[j * 3 + 1] = y;
-    col[j * 3] = _c.r; col[j * 3 + 1] = _c.g; col[j * 3 + 2] = _c.b;
+    heat.geometry.attributes.position.needsUpdate = true;
+    heat.geometry.attributes.color.needsUpdate = true;
   }
-  waterGeo.attributes.position.needsUpdate = true;
-  waterGeo.attributes.color.needsUpdate = true;
-  if (sim.frame % 2 === 0) waterGeo.computeVertexNormals();
-  // Evler ve kişiler
-  houses.forEach((hs, j) => houseMesh.setColorAt(j, _c.setHex(hs.flooded ? 0xf87171 : 0xf8fafc)));
-  houses.forEach((hs, j) => roofMesh.setColorAt(j, _c.setHex(hs.flooded ? 0x7f1d1d : 0xc2410c)));
-  houseMesh.instanceColor.needsUpdate = roofMesh.instanceColor.needsUpdate = true;
+  // Tekneler ve şamandıra su seviyesiyle kalkar
+  for (const b of boats) {
+    const u = b.userData, L = levelAt(u.x, u.z);
+    b.position.y = L - 0.35 + 0.18 * Math.sin(wallT * 1.3 + u.ph);
+    b.rotation.set(0.04 * Math.sin(wallT * 1.1 + u.ph), u.ry, 0.06 * Math.sin(wallT * 0.9 + u.ph * 2));
+  }
+  dart.position.y = levelAt(dart.position.x, dart.position.z) + 0.6 + 0.4 * Math.sin(wallT * 0.8);
+  dart.rotation.z = 0.05 * Math.sin(wallT * 0.7);
+  // Evler: su basınca çamurlu ıslak iz (koyulaşır)
+  for (const set of houseSets) {
+    set.list.forEach(({ hs, j }, n) => set.meshes[0].setColorAt(n, _c.setHex(WALL_COLS[j % WALL_COLS.length]).multiplyScalar(hs.flooded ? 0.62 : 1).lerp(new THREE.Color(0x7a6a52), hs.flooded ? 0.35 : 0)));
+    set.meshes[0].instanceColor.needsUpdate = true;
+  }
+  // Kişiler
+  // Kişiler: yürüme yönüne dönük; hız gerçek yer değiştirmeden (hız çarpanıyla koşuya geçer), güvendekiler denize bakar
   people.forEach((pp, j) => {
-    const y = Math.max(-depthAt(pp.x, pp.z), 0) * VEX + 0.05;
-    _m.makeTranslation(X(pp.x), y, Z(pp.z));
-    personMesh.setMatrixAt(j, _m);
-    personMesh.setColorAt(j, _c.setHex(pp.state === 2 ? 0x22c55e : pp.state === 3 ? 0xef4444 : pp.state === 1 ? 0xfacc15 : 0xffffff));
+    const xw = XW(pp.x), zw = ZW(pp.z), y = ground(xw, zw);
+    const d = Number.isNaN(folkPrev[j * 2]) ? 0 : Math.hypot(xw - folkPrev[j * 2], zw - folkPrev[j * 2 + 1]);
+    folkPrev[j * 2] = xw; folkPrev[j * 2 + 1] = zw;
+    if (rdt > 0 && d < 20) folkV[j] += ((d / rdt) - folkV[j]) * Math.min(1, rdt * 6);
+    const goal = pp.state === 1 ? Math.atan2(pp.tx - pp.x, pp.tz - pp.z) : pp.state === 2 ? -Math.PI / 2 + 0.5 * Math.sin(j * 2.3) : j * 1.7;
+    const da = Math.atan2(Math.sin(goal - folkYaw[j]), Math.cos(goal - folkYaw[j]));
+    folkYaw[j] += da * Math.min(1, rdt * 6);
+    folk.set(j, xw, y, zw, folkYaw[j], pp.state === 1 ? (folkV[j] > 2.6 ? 'run' : 'walk') : 'stand');
+    if (stateCol.value) folk.tint(j, pp.state === 2 ? 0x22c55e : pp.state === 3 ? 0xef4444 : pp.state === 1 ? 0xfacc15 : 0xf8fafc, 0.85);
+    else folk.tint(j, null);
   });
-  personMesh.instanceMatrix.needsUpdate = true;
-  personMesh.instanceColor.needsUpdate = true;
+  folk.update(performance.now() / 1000);
   bwGroup.visible = breakwater.value;
   seawall.visible = wall.value;
-  gaugeM.g.position.y = Math.max(0, eta[GAUGE.k * NX + GAUGE.i]) * exag.value * 0.06;
+  veg.update(wallT, 0.8);
 });
 
 // Denize tıkla → ölçüm noktası
-sim.onClick([water], (hit) => {
-  const i = clamp(Math.floor((hit.point.x / S + LX / 2) / 2.5), 0, NX - 1);
-  const k = clamp(Math.floor((hit.point.z / S + LZ / 2) / 2.5), 0, NZ - 1);
+let probeAt = { i: 60, k: 30 };
+function placeProbe() { probe.position.set(XW(cx(probeAt.i)), 0, ZW(cz(probeAt.k))); }
+sim.onClick([clickPlane], (hit) => {
+  const i = clamp(Math.floor(XK(hit.point.x) / 2.5), 0, NX - 1);
+  const k = clamp(Math.floor(ZK(hit.point.z) / 2.5), 0, NZ - 1);
   if (!wet[k * NX + i]) { sim.toast('Burası kara; ölçüm noktası denizde olmalı.', 'warn'); return; }
-  probe.g.position.set(X(cx(i)), 0, Z(cz(k)));
   probeAt = { i, k };
+  placeProbe();
   updateStats(true);
 });
-let probeAt = { i: 60, k: 30 };
+placeProbe();
 
 // --- Panel ---
 const ui = sim.ui;
@@ -418,11 +587,26 @@ const stKmh = ui.stat({ label: 'Hız', unit: 'km/sa' });
 const stTravel = ui.stat({ label: '100 km yol', unit: 'dk' });
 
 ui.section('Görünüm');
-const exag = ui.slider({ label: 'Dalga yüksekliği abartması', min: 1, max: 20, step: 1, value: 8, unit: '×' });
-ui.toggle({ label: 'Etiketler', value: true, onChange: (v) => document.querySelectorAll('.label-layer .lbl').forEach((e) => (e.style.display = v ? '' : 'none')) });
+const exag = ui.slider({ label: 'Açık denizde dalga abartması', min: 1, max: 10, step: 1, value: 3, unit: '×' });
+ui.toggle({ label: 'Yükseklik haritası (kırmızı/mavi)', value: false, onChange: (v) => { heat.visible = v; } });
+const stateCol = ui.toggle({ label: 'Kişileri duruma göre renklendir', value: true });
+ui.toggle({ label: 'Etiketler ve işaretler', value: true, onChange: (v) => {
+  document.querySelectorAll('.label-layer .lbl').forEach((e) => (e.style.display = v ? '' : 'none'));
+  probe.visible = faultMark.visible = v;
+} });
+const VIEWS = {
+  town: [[-380, 55, -260], [120, 12, -20]],
+  close: [[70, 14, 110], [-30, 3, 10]],
+  sea: [[-1200, 260, 900], [300, 0, -150]],
+  wide: [[-900, 5200, 5600], [-2600, 0, -200]],
+};
 ui.buttons([
-  { label: '🔭 Genel bakış', onClick: () => sim.moveCamera([-6, 21, 27], [5, -1.2, 0]) },
-  { label: '🏘️ Kasabaya yakınlaş', onClick: () => sim.moveCamera([X(xc(125) - 30), 3.2, Z(160)], [X(xc(125) + 2), 0, Z(125)]) },
+  { label: '🏘️ Kasaba', onClick: () => sim.moveCamera(...VIEWS.town) },
+  { label: '🔍 Yakın', onClick: () => sim.moveCamera(...VIEWS.close) },
+]);
+ui.buttons([
+  { label: '🌊 Denizden', onClick: () => sim.moveCamera(...VIEWS.sea) },
+  { label: '🔭 Genel bakış', onClick: () => sim.moveCamera(...VIEWS.wide) },
 ]);
 ui.text('🧭 <b>Deniz çekilirse ya da güçlü bir deprem hissedersen</b>, uyarıyı bekleme: hemen kıyıdan uzaklaş, yüksek yere çık.', 'bad');
 

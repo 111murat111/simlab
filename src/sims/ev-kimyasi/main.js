@@ -1,15 +1,26 @@
 // Ev Kimyası Güvenliği — iki temizlik ürününü sanal kovada karıştır; güvenli köpürme mi, zehirli gaz mı? (uyarı amaçlı)
-import { createSim, THREE, RoundedBoxGeometry, rand, clamp, lerp, smoothstep, fmt, textTexture, instanced, pick } from '@core';
+import { createSim, THREE, RoundedBoxGeometry, rand, clamp, lerp, smoothstep, fmt, textTexture, pick, mat, procedural } from '@core';
 import { PRODUCTS, GASES, SYM, LEVEL, FIRST_AID, result, pairKey, ALL_PAIRS } from './data.js';
+import { labRoom, glassGeometry, liquidGeometry, glassMesh, liquidMesh, tiles } from './labkit.js';
+
+// Sahne metre ölçeğinde; kova + şişe düzeni U ölçekli bir "içerik" grubunda (1 birim = 17 cm) tezgâhın üstünde durur.
+const U = 0.17, BENCH = 0.9, WALL_Z = -0.58, DEPTH = 0.8, CZ = -0.04;
+const toC = (y) => (y - BENCH) / U;           // dünya yüksekliği → içerik birimi
+const WALL_C = (WALL_Z + 0.03 - CZ) / U;      // duvar yüzü (içerik z)
+const FRONT_C = (WALL_Z + DEPTH - CZ) / U;    // tezgâh ön kenarı
+const FLOOR_C = toC(0.02);
+const WIN = { y: 1.52, w: 1.0, h: 0.76 };
+const WIN_C = { x: WIN.w / 2 / U, y0: toC(WIN.y - WIN.h / 2), y1: toC(WIN.y + WIN.h / 2), yc: toC(WIN.y) };
 
 const BUCKET = new THREE.Vector3(0, 0, 0.4);
 const B_R0 = 0.6, B_R1 = 0.86, B_H = 1.1;
 const byId = Object.fromEntries(PRODUCTS.map((p) => [p.id, p]));
 
 const sim = createSim({
-  background: 0x0d1424,
-  camera: { position: [0, 6.2, 9.4], target: [0, 0.9, -0.4], fov: 45 },
-  controls: { maxPolarAngle: 1.45, minDistance: 4, maxDistance: 20 },
+  studio: { color: 0xc9c0b2, mood: 'day', warmth: 0.25, key: { el: 50, az: 212 }, radius: 22 },
+  look: { aoRadius: 0.06 },
+  camera: { position: [0, BENCH + 6.2 * U, CZ + 9.4 * U], target: [0, BENCH + 0.9 * U, CZ - 0.4 * U], fov: 45, near: 0.01, far: 200 },
+  controls: { maxPolarAngle: 1.45, minDistance: 4 * U, maxDistance: 20 * U },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Mutfak tezgahında sık kullanılan dokuz temizlik ürünü var. İkisini seçip <b>Karıştır</b>'a basınca şişeler sanal kovaya
@@ -33,117 +44,133 @@ const sim = createSim({
     derişimleri göstermez. Ürün içerikleri markaya göre değişir; her zaman etiketi oku ve ürünleri <b>asla karıştırma</b>.</small></p>`,
 });
 
-// --- Mutfak: tezgah, dolap, fayans duvar, pencere ---
-function canvasTex(w, h, draw, repeat) {
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  draw(c.getContext('2d'), w, h);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(...repeat); }
-  return t;
-}
-const counterTex = canvasTex(256, 256, (g, w, h) => {
-  g.fillStyle = '#3b4250'; g.fillRect(0, 0, w, h);
-  for (let i = 0; i < 2600; i++) {
-    const v = Math.floor(rand(40, 150));
-    g.fillStyle = `rgba(${v},${v + 6},${v + 14},${rand(0.3, 0.8)})`;
-    g.fillRect(rand(0, w), rand(0, h), rand(1, 3), rand(1, 3));
-  }
-}, [3, 2]);
-const tileTex = canvasTex(256, 256, (g, w, h) => {
-  g.fillStyle = '#b9c3cf'; g.fillRect(0, 0, w, h);
-  const n = 4, s = w / n;
-  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-    const v = 226 + ((i + j) % 2) * 8;
-    g.fillStyle = `rgb(${v},${v + 3},${v + 6})`;
-    g.fillRect(i * s + 3, j * s + 3, s - 6, s - 6);
-  }
-}, [6, 3]);
+// --- Mutfak: taş tezgâh, ahşap dolaplar, fayans duvar, üst dolaplar, sürgülü pencere ---
+labRoom(sim.scene, { width: 3.4, depth: DEPTH, benchH: BENCH, style: 'kitchen', wallZ: WALL_Z, shelf: false, window: false });
+const content = new THREE.Group();
+content.position.set(0, BENCH, CZ);
+content.scale.setScalar(U);
+sim.scene.add(content);
 
-const counter = new THREE.Mesh(new RoundedBoxGeometry(13, 0.4, 8.6, 3, 0.08),
-  new THREE.MeshStandardMaterial({ map: counterTex, roughness: 0.45, metalness: 0.05 }));
-counter.position.set(0, -0.2, 0);
-sim.scene.add(counter);
-const cabinet = new THREE.Mesh(new THREE.BoxGeometry(12.6, 3, 8), new THREE.MeshStandardMaterial({ color: 0x6b4a33, roughness: 0.8 }));
-cabinet.position.set(0, -1.9, -0.2);
-sim.scene.add(cabinet);
-for (let i = -2; i <= 2; i++) {
-  const door = new THREE.Mesh(new THREE.BoxGeometry(2.3, 2.5, 0.05), new THREE.MeshStandardMaterial({ color: 0x7c5a40, roughness: 0.7 }));
-  door.position.set(i * 2.45, -1.95, 3.82);
-  sim.scene.add(door);
-  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.6, 8), new THREE.MeshStandardMaterial({ color: 0xcbd5e1, metalness: 0.8, roughness: 0.3 }));
-  handle.rotation.z = Math.PI / 2;
-  handle.position.set(i * 2.45, -0.95, 3.9);
-  sim.scene.add(handle);
+// Üst dolaplar (pencerenin iki yanında)
+{
+  const body = mat.paintedMetal({ color: 0x6d7f73, wear: 0.02 });
+  const door = mat.wood({ color: 0x8a6440, varnish: true });
+  const handle = mat.brushedMetal({ color: 0xc9ccd0 });
+  for (const sx of [-1, 1]) {
+    const x = sx * 1.15;
+    const c = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.72, 0.34), body);
+    c.position.set(x, 1.86, WALL_Z + 0.17); sim.scene.add(c);
+    for (const dx of [-0.275, 0.275]) {
+      const d = new THREE.Mesh(new RoundedBoxGeometry(0.54, 0.7, 0.02, 2, 0.004), door);
+      d.position.set(x + dx, 1.86, WALL_Z + 0.35); sim.scene.add(d);
+      const h = new THREE.Mesh(new RoundedBoxGeometry(0.012, 0.14, 0.02, 2, 0.005), handle);
+      h.position.set(x + dx - Math.sign(dx) * 0.22, 1.6, WALL_Z + 0.372); sim.scene.add(h);
+    }
+  }
+  // Tezgâh altı ışık çubuğu hissi yerine: duvar dibinde fayans süpürgelik kenarı
+  const lip = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.012, 0.012), tiles({ color: 0xe8e2d6, size: 0.1 }));
+  lip.position.set(0, BENCH + 0.006, WALL_Z + 0.006); sim.scene.add(lip);
 }
-const wall = new THREE.Mesh(new THREE.PlaneGeometry(16, 8), new THREE.MeshStandardMaterial({ map: tileTex, roughness: 0.35 }));
-wall.position.set(0, 3, -4.3);
-sim.scene.add(wall);
 
-// Pencere: gökyüzü, çerçeve, açılıp kapanan alt kanat
+// Pencere: aydınlık dış manzara, beyaz PVC kasa, iki kanat (alt kanat yukarı sürülerek açılır)
 const win = new THREE.Group();
-win.position.set(0, 3.15, -4.28);
+win.position.set(0, WIN.y, WALL_Z + 0.004);
 sim.scene.add(win);
-const skyTex = canvasTex(256, 128, (g, w, h) => {
-  const gr = g.createLinearGradient(0, 0, 0, h);
-  gr.addColorStop(0, '#5aa7e8'); gr.addColorStop(0.7, '#bfe0f7'); gr.addColorStop(0.71, '#6fa36a'); gr.addColorStop(1, '#4b7d4a');
-  g.fillStyle = gr; g.fillRect(0, 0, w, h);
-  g.fillStyle = '#5d9160';
-  g.beginPath(); g.moveTo(0, h * 0.72);
-  for (let x = 0; x <= w; x += 8) g.lineTo(x, h * 0.66 - Math.sin(x * 0.04) * 8 - Math.sin(x * 0.11) * 4);
-  g.lineTo(w, h); g.lineTo(0, h); g.fill();
-});
-const sky = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 1.9), new THREE.MeshBasicMaterial({ map: skyTex }));
-sky.position.z = -0.01;
-win.add(sky);
-const frameMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.5 });
-for (const [w, h, x, y] of [[3.6, 0.12, 0, 1.0], [3.6, 0.12, 0, -1.0], [0.12, 2.1, -1.74, 0], [0.12, 2.1, 1.74, 0]]) {
-  const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.14), frameMat);
-  b.position.set(x, y, 0.05);
-  win.add(b);
+{
+  const sky = new THREE.Mesh(new THREE.PlaneGeometry(WIN.w, WIN.h), new THREE.ShaderMaterial({
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position, 1.0); }',
+    fragmentShader: `varying vec2 vUv; void main(){
+      vec3 top = vec3(0.5, 0.7, 1.0)*2.0, hor = vec3(1.0, 0.97, 0.92)*3.0;
+      vec3 c = mix(hor, top, smoothstep(0.15, 1.0, vUv.y));
+      float hill = smoothstep(0.30, 0.28, vUv.y - 0.05*sin(vUv.x*7.0 + 1.3) - 0.025*sin(vUv.x*19.0));
+      float trees = smoothstep(0.24, 0.22, vUv.y - 0.06*abs(sin(vUv.x*31.0)) - 0.03*sin(vUv.x*67.0));
+      c = mix(c, vec3(0.42, 0.5, 0.42)*1.4, hill);
+      c = mix(c, vec3(0.16, 0.24, 0.13), trees);
+      gl_FragColor = vec4(c, 1.0); }`,
+  }));
+  sky.userData.noShadow = true;
+  win.add(sky);
 }
-const glassMat = new THREE.MeshStandardMaterial({ color: 0xcfe8ff, transparent: true, opacity: 0.28, roughness: 0.05, metalness: 0.2 });
+const frameMat = mat.plastic({ color: 0xf2f2ef, gloss: 0.3 });
+const bar = (parent, w, h, x, y, z, d = 0.06) => {
+  const m = new THREE.Mesh(new RoundedBoxGeometry(w, h, d, 2, 0.008), frameMat);
+  m.position.set(x, y, z); parent.add(m); return m;
+};
+bar(win, WIN.w + 0.12, 0.06, 0, WIN.h / 2 + 0.03, 0.03);
+bar(win, WIN.w + 0.12, 0.06, 0, -WIN.h / 2 - 0.03, 0.03);
+bar(win, 0.06, WIN.h + 0.12, -WIN.w / 2 - 0.03, 0, 0.03);
+bar(win, 0.06, WIN.h + 0.12, WIN.w / 2 + 0.03, 0, 0.03);
+{
+  const sill = new THREE.Mesh(new RoundedBoxGeometry(WIN.w + 0.24, 0.025, 0.12, 2, 0.006), mat.ceramic({ color: 0xf1ede4 }));
+  sill.position.set(0, -WIN.h / 2 - 0.075, 0.05); win.add(sill);
+}
+const paneMat = mat.glass({ thickness: 0.004, rough: 0.02 });
 const upperSash = new THREE.Group();
 const lowerSash = new THREE.Group();
-for (const [s, y, z] of [[upperSash, 0.47, 0.03], [lowerSash, -0.47, 0.1]]) {
-  s.add(new THREE.Mesh(new THREE.PlaneGeometry(3.3, 0.9), glassMat));
-  for (const [w, h, x, yy] of [[3.4, 0.07, 0, 0.46], [3.4, 0.07, 0, -0.46], [0.07, 0.95, -1.68, 0], [0.07, 0.95, 1.68, 0]]) {
-    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.05), frameMat);
-    b.position.set(x, yy, 0);
-    s.add(b);
-  }
+const SASH_H = WIN.h / 2 + 0.02;
+for (const [s, y, z] of [[upperSash, WIN.h / 4, 0.02], [lowerSash, -WIN.h / 4, 0.05]]) {
+  const pane = new THREE.Mesh(new THREE.BoxGeometry(WIN.w - 0.06, SASH_H - 0.05, 0.004), paneMat);
+  pane.userData.noCast = true; pane.userData.noAO = true;
+  s.add(pane);
+  bar(s, WIN.w, 0.035, 0, SASH_H / 2 - 0.018, 0, 0.03);
+  bar(s, WIN.w, 0.035, 0, -SASH_H / 2 + 0.018, 0, 0.03);
+  bar(s, 0.035, SASH_H, -WIN.w / 2 + 0.018, 0, 0, 0.03);
+  bar(s, 0.035, SASH_H, WIN.w / 2 - 0.018, 0, 0, 0.03);
   s.position.set(0, y, z);
   win.add(s);
 }
+const SASH_CLOSED = -WIN.h / 4, SASH_OPEN = WIN.h / 4 - 0.02;
 
-// --- Kova ---
+// Tezgâhta birkaç gerçekçi eşya: ahşap kesme tahtası, seramik kupa
+{
+  const board = new THREE.Mesh(new RoundedBoxGeometry(0.38, 0.018, 0.26, 3, 0.006), mat.wood({ color: 0xa87a4c, ring: 10 }));
+  board.position.set(1.18, BENCH + 0.009, -0.3); board.rotation.y = 0.18; sim.scene.add(board);
+  const mug = new THREE.Mesh(glassGeometry([[0, 0], [0.036, 0], [0.04, 0.004], [0.041, 0.09]], 0.004, 40), mat.ceramic({ color: 0x2f5d8a }));
+  mug.position.set(-1.25, BENCH, -0.28); sim.scene.add(mug);
+  const hdl = new THREE.Mesh(new THREE.TorusGeometry(0.024, 0.006, 10, 24, Math.PI * 1.2), mug.material);
+  hdl.rotation.z = -Math.PI * 0.6; hdl.position.set(-1.25 + 0.045, BENCH + 0.048, -0.28); sim.scene.add(hdl);
+}
+
+// --- Kova: kalın cidarlı plastik kova, metal sap ---
 const bucket = new THREE.Group();
 bucket.position.copy(BUCKET);
-sim.scene.add(bucket);
+content.add(bucket);
 {
-  const pts = [new THREE.Vector2(0, 0), new THREE.Vector2(B_R0, 0), new THREE.Vector2(B_R1, B_H)];
-  const mat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.55, side: THREE.DoubleSide });
-  bucket.add(new THREE.Mesh(new THREE.LatheGeometry(pts, 40), mat));
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(B_R1, 0.04, 8, 48), mat);
+  const m = new THREE.Mesh(glassGeometry([[0, 0], [B_R0, 0], [B_R0 + 0.01, 0.03], [B_R1, B_H]], 0.035, 64), mat.plastic({ color: 0x5f7fa3, gloss: 0.35, scale: U }));
+  bucket.add(m);
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(B_R1 + 0.01, 0.045, 12, 64), m.material);
   rim.rotation.x = Math.PI / 2; rim.position.y = B_H;
   bucket.add(rim);
-  const handle = new THREE.Mesh(new THREE.TorusGeometry(B_R1 + 0.02, 0.018, 6, 40, Math.PI),
-    new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.35 }));
+  const handle = new THREE.Mesh(new THREE.TorusGeometry(B_R1 + 0.03, 0.02, 8, 48, Math.PI), mat.brushedMetal({ color: 0xc3c8ce, scale: U }));
   handle.position.y = B_H - 0.1;
-  handle.rotation.y = 0.35;
+  handle.rotation.set(-1.1, 0.35, 0);
   bucket.add(handle);
 }
-const bucketR = (y) => lerp(B_R0, B_R1, y / B_H) - 0.03;
-const liquidMat = new THREE.MeshStandardMaterial({ color: 0x8899aa, roughness: 0.15, metalness: 0.1, emissive: 0x000000 });
-const liquid = new THREE.Mesh(new THREE.CircleGeometry(1, 40), liquidMat);
-liquid.rotation.x = -Math.PI / 2;
+const bucketR = (y) => lerp(B_R0, B_R1, y / B_H) - 0.04;
+const liqColor = new THREE.Color(), liqTarget = new THREE.Color();
+const liquid = liquidMesh(new THREE.BufferGeometry(), 0x8899aa, 0.08);
+const liquidMat = liquid.material;
+liquidMat.thickness = 0.5;
+liquidMat.emissive = new THREE.Color(0);
 liquid.visible = false;
 bucket.add(liquid);
+let liqBuilt = -1;
+function buildBucketLiquid(level) {
+  if (Math.abs(level - liqBuilt) < 0.008) return;
+  liqBuilt = level;
+  liquid.geometry.dispose();
+  liquid.geometry = liquidGeometry(bucketR, 0.04, Math.max(0.05, level), { meniscus: 0.002 / U, segs: 56, steps: 6 });
+}
 
-// Köpük topları ve fokurdayan kabarcıklar (InstancedMesh)
+// Köpük (InstancedMesh: kabarcık kümeleri) ve fokurdayan kabarcıklar (yumuşak nokta sprite'ları)
 const FOAM_N = 130, FIZZ_N = 50;
-const foam = instanced(new THREE.IcosahedronGeometry(1, 1), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 }), FOAM_N);
+const foamMat = procedural({
+  key: 'ev-foam', physical: true, scale: U, bump: 0.004,
+  params: { color: 0xf6f8f8, roughness: 0.3, sheen: 0.8, sheenColor: new THREE.Color(0xffffff), sheenRoughness: 0.5 },
+  pattern: `float c = vn3(p*900.0); col *= 0.9 + 0.12*c; rough = 0.2 + 0.4*c; h = c;`,
+});
+const foam = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 2), foamMat, FOAM_N);
+foam.userData.noCast = true;
 const foamSeed = [];
 for (let i = 0; i < FOAM_N; i++) {
   const d = new THREE.Vector3().randomDirection();
@@ -153,12 +180,31 @@ for (let i = 0; i < FOAM_N; i++) {
 }
 foam.count = 0;
 bucket.add(foam);
-const fizz = instanced(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshStandardMaterial({ color: 0xe0f2fe, transparent: true, opacity: 0.7, roughness: 0.1 }), FIZZ_N);
+const softTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,0.0)'); gr.addColorStop(0.55, 'rgba(255,255,255,0.25)'); gr.addColorStop(0.8, 'rgba(255,255,255,0.9)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
 const fizzP = Array.from({ length: FIZZ_N }, () => ({ x: 0, y: 0, z: 0, v: 0, life: 0, s: 0 }));
-fizz.count = FIZZ_N;
+const fizzPos = new Float32Array(FIZZ_N * 3);
+const fizzGeo = new THREE.BufferGeometry();
+fizzGeo.setAttribute('position', new THREE.BufferAttribute(fizzPos, 3).setUsage(THREE.DynamicDrawUsage));
+const fizz = new THREE.Points(fizzGeo, new THREE.PointsMaterial({ map: softTex, size: 0.006, color: 0xeef6ff, transparent: true, depthWrite: false, sizeAttenuation: true }));
+fizz.frustumCulled = false;
 bucket.add(fizz);
 
 // Tehlike levhası ve gaz etiketi
+const canvasTex = (w, h, draw) => {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+};
 const signTex = canvasTex(256, 256, (g) => {
   g.beginPath(); g.moveTo(128, 18); g.lineTo(240, 222); g.lineTo(16, 222); g.closePath();
   g.fillStyle = '#facc15'; g.fill();
@@ -171,22 +217,24 @@ sign.scale.setScalar(0.9);
 sign.position.set(BUCKET.x, 3.5, BUCKET.z);
 sign.visible = false;
 sign.renderOrder = 10;
-sim.scene.add(sign);
-const gasLabel = sim.label('', { position: [BUCKET.x, 2.75, BUCKET.z], className: 'big' });
+content.add(sign);
+const gasLabel = sim.label('', { parent: content, position: [BUCKET.x, 2.75, BUCKET.z], className: 'big' });
 gasLabel.visible = false;
-const alarm = new THREE.PointLight(0xff3b30, 0, 9, 1.5);
+const ALARM_K = 0.12;
+const alarm = new THREE.PointLight(0xff3b30, 0, 1.6, 1.5);
 alarm.position.set(BUCKET.x, 2, BUCKET.z + 1);
-sim.scene.add(alarm);
+content.add(alarm);
 
-// --- Şişeler ---
-const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.45, ...extra });
-function lathe(profile, seg = 32) { return new THREE.LatheGeometry(profile.map(([r, y]) => new THREE.Vector2(r, y)), seg); }
+// --- Şişeler: HDPE plastik gövde, PET/cam şeffaf şişelerde gerçek sıvı, kâğıt etiket ---
+function lathe(profile, seg = 48) { return new THREE.LatheGeometry(profile.map(([r, y]) => new THREE.Vector2(r, y)), seg); }
 function labelTex(p) {
-  return textTexture(p.tag, { size: 40, color: p.labelFg || '#ffffff', bg: p.labelBg, width: 256, font: '800 {s}px system-ui, sans-serif' });
+  const t = textTexture(p.tag, { size: 40, color: p.labelFg || '#ffffff', bg: p.labelBg, width: 256, font: '800 {s}px system-ui, sans-serif' });
+  t.anisotropy = 4;
+  return t;
 }
+const labelMat = (p) => new THREE.MeshStandardMaterial({ map: labelTex(p), roughness: 0.55 });
 function bandLabel(p, r, y, h) {
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 24, 1, true, -Math.PI * 0.42, Math.PI * 0.84),
-    new THREE.MeshStandardMaterial({ map: labelTex(p), roughness: 0.6 }));
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 32, 1, true, -Math.PI * 0.42, Math.PI * 0.84), labelMat(p));
   m.position.y = y;
   return m;
 }
@@ -197,29 +245,31 @@ const PROFILES = {
   squeeze: [[0, 0], [0.27, 0], [0.3, 0.06], [0.3, 1.0], [0.2, 1.14], [0.09, 1.22], [0, 1.22]],
   brown: [[0, 0], [0.24, 0], [0.25, 0.04], [0.25, 0.7], [0.13, 0.84], [0.1, 0.94], [0, 0.94]],
 };
+const plastic = (color, gloss = 0.4) => mat.plastic({ color, gloss, scale: U });
 
 function makeBottle(p) {
   const g = new THREE.Group();
   let h, capY, capR = 0.14;
   if (p.shape === 'jug') {
-    const body = new THREE.Mesh(new RoundedBoxGeometry(0.78, 1.12, 0.55, 4, 0.12), std(p.body, { roughness: 0.55 }));
+    const bm = plastic(p.body, 0.25);
+    const body = new THREE.Mesh(new RoundedBoxGeometry(0.78, 1.12, 0.55, 5, 0.14), bm);
     body.position.y = 0.56; g.add(body);
-    const shoulder = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.3, 0.2, 20), std(p.body, { roughness: 0.55 }));
+    const shoulder = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.3, 0.2, 32), bm);
     shoulder.position.set(0.14, 1.2, 0); g.add(shoulder);
-    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.055, 8, 20, Math.PI), std(p.body, { roughness: 0.55 }));
+    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.055, 12, 28, Math.PI), bm);
     handle.position.set(-0.2, 1.05, 0); handle.rotation.z = Math.PI * 0.1; g.add(handle);
-    const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.46), new THREE.MeshStandardMaterial({ map: labelTex(p), roughness: 0.6 }));
-    lab.position.set(0, 0.5, 0.279); g.add(lab);
+    const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.46), labelMat(p));
+    lab.position.set(0, 0.5, 0.278); g.add(lab);
     h = 1.3; capY = 1.3;
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.14, 20), std(p.cap));
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.14, 32), plastic(p.cap, 0.5));
     cap.position.set(0.14, 1.37, 0); g.add(cap);
     g.userData.mouth = new THREE.Vector3(0.14, 1.44, 0);
   } else if (p.shape === 'box') {
-    const body = new THREE.Mesh(new RoundedBoxGeometry(0.62, 0.82, 0.36, 3, 0.03), std(p.body, { roughness: 0.8 }));
+    const body = new THREE.Mesh(new RoundedBoxGeometry(0.62, 0.82, 0.36, 3, 0.02), mat.plastic({ color: p.body, gloss: 0.05, scale: U }));
     body.position.y = 0.41; g.add(body);
-    const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.54, 0.4), new THREE.MeshStandardMaterial({ map: labelTex(p), roughness: 0.7 }));
-    lab.position.set(0, 0.42, 0.182); g.add(lab);
-    const spout = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.06, 0.2), std(0xffffff));
+    const lab = new THREE.Mesh(new THREE.PlaneGeometry(0.54, 0.4), labelMat(p));
+    lab.position.set(0, 0.42, 0.181); g.add(lab);
+    const spout = new THREE.Mesh(new RoundedBoxGeometry(0.2, 0.06, 0.2, 2, 0.01), plastic(0xf4f4f0, 0.1));
     spout.position.set(0, 0.84, 0); g.add(spout);
     h = 0.87;
     g.userData.mouth = new THREE.Vector3(0, 0.87, 0);
@@ -227,35 +277,44 @@ function makeBottle(p) {
     const prof = PROFILES[p.shape];
     h = prof[prof.length - 1][1];
     const bodyR = prof[2][0];
-    const bodyMat = p.clear
-      ? std(p.body, { transparent: true, opacity: 0.42, roughness: 0.12, depthWrite: false })
-      : std(p.body, { roughness: p.shape === 'brown' ? 0.25 : 0.5 });
-    const body = new THREE.Mesh(lathe(prof), bodyMat);
+    let body;
+    if (p.clear) {
+      // Şeffaf PET şişe: gerçek kırılma + içinde renkli sıvı (menisküslü)
+      body = glassMesh(glassGeometry(prof.slice(0, -1), 0.02, 48), { thickness: 0.004 });
+      const rOf = (y) => {
+        for (let i = 1; i < prof.length - 1; i++) {
+          const [r0, y0] = prof[i], [r1, y1] = prof[i + 1];
+          if (y <= y1) return Math.max(0.01, lerp(r0, r1, (y - y0) / Math.max(y1 - y0, 1e-4)) - 0.025);
+        }
+        return 0.05;
+      };
+      const liq = liquidMesh(liquidGeometry(rOf, 0.025, 0.8, { meniscus: 0.002 / U, segs: 40 }), p.liquid, 0.05);
+      liq.material.thickness = 0.4;
+      g.add(liq);
+    } else {
+      body = new THREE.Mesh(lathe(prof), plastic(p.body, p.shape === 'brown' ? 0.6 : 0.35));
+    }
     if (p.shape === 'squeeze') body.scale.set(1.2, 1, 0.72);
     g.add(body);
-    if (p.clear) {
-      const fill = prof.filter(([, y]) => y <= 0.8).map(([r, y]) => [r * 0.9, y]);
-      fill.push([0, fill[fill.length - 1][1]]);
-      const liq = new THREE.Mesh(lathe(fill, 24), std(p.liquid, { roughness: 0.2 }));
-      liq.position.y = 0.02;
-      g.add(liq);
-    }
     const lab = bandLabel(p, bodyR + 0.006, h * 0.4, Math.min(0.46, h * 0.36));
     if (p.shape === 'squeeze') lab.scale.set(1.2, 1, 0.72);
     g.add(lab);
     capY = h;
     capR = prof[prof.length - 2][0] + 0.02;
     if (p.shape === 'spray') {
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.42), std(p.cap));
+      const cm = plastic(p.cap, 0.4);
+      const head = new THREE.Mesh(new RoundedBoxGeometry(0.2, 0.2, 0.42, 2, 0.04), cm);
       head.position.set(0, h + 0.1, 0.08); g.add(head);
-      const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.1, 10), std(0x0f172a));
+      const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.1, 16), plastic(0x1b1f26, 0.3));
       nozzle.rotation.x = Math.PI / 2; nozzle.position.set(0, h + 0.12, 0.33); g.add(nozzle);
-      const trig = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.24, 0.07), std(p.cap));
+      const trig = new THREE.Mesh(new RoundedBoxGeometry(0.07, 0.24, 0.07, 2, 0.02), cm);
       trig.position.set(0, h - 0.05, 0.24); trig.rotation.x = 0.3; g.add(trig);
       h += 0.2;
     } else {
-      const cap = new THREE.Mesh(new THREE.CylinderGeometry(capR, capR, 0.16, 20), std(p.cap));
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(capR, capR, 0.16, 32), plastic(p.cap, 0.5));
       cap.position.y = capY + 0.08; g.add(cap);
+      const rib = new THREE.Mesh(new THREE.TorusGeometry(capR, 0.012, 6, 32), cap.material);
+      rib.rotation.x = Math.PI / 2; rib.position.y = capY + 0.15; g.add(rib);
       h += 0.16;
     }
     g.userData.mouth = new THREE.Vector3(0, h, 0);
@@ -272,22 +331,25 @@ const bottles = PRODUCTS.map((p, i) => {
   g.position.copy(home);
   g.rotation.y = rotY;
   g.traverse((o) => { o.userData.pid = p.id; });
-  sim.scene.add(g);
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.035, 8, 40), new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.9 }));
+  content.add(g);
+  // Seçim halkası (veri katmanı): tezgâhta ince ışıklı halka
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.02, 8, 48), mat.glow({ color: 0x38bdf8, intensity: 2.5 }));
   ring.rotation.x = Math.PI / 2;
   ring.position.set(home.x, 0.03, home.z);
   ring.visible = false;
-  sim.scene.add(ring);
-  const lbl = sim.label(p.short, { parent: sim.scene, position: [home.x, g.userData.h + 0.3 + (i % 2) * 0.34, home.z] });
+  ring.userData.noShadow = true;
+  content.add(ring);
+  const lbl = sim.label(p.short, { parent: content, position: [home.x, g.userData.h + 0.3 + (i % 2) * 0.34, home.z] });
   return { p, g, home, rotY, ring, lbl, bob: 0 };
 });
 const bottleOf = Object.fromEntries(bottles.map((b) => [b.p.id, b]));
 
-// Dökme akışı
+// Dökme akışı (ince sıvı sütunu)
 const streams = [0, 1].map(() => {
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.03, 1, 8), new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, roughness: 0.1 }));
+  const m = liquidMesh(new THREE.CylinderGeometry(0.035, 0.028, 1, 16), 0xffffff, 0.2);
+  m.material.thickness = 0.03;
   m.visible = false;
-  sim.scene.add(m);
+  content.add(m);
   return m;
 });
 
@@ -301,14 +363,14 @@ cGeo.setAttribute('aColor', new THREE.BufferAttribute(cCol, 3).setUsage(THREE.Dy
 cGeo.setAttribute('aAlpha', new THREE.BufferAttribute(cAlpha, 1).setUsage(THREE.DynamicDrawUsage));
 cGeo.setAttribute('aSize', new THREE.BufferAttribute(cSize, 1).setUsage(THREE.DynamicDrawUsage));
 const cMat = new THREE.ShaderMaterial({
-  uniforms: { uScale: { value: 400 } },
+  uniforms: { uScale: { value: 400 }, uU: { value: U } },
   vertexShader: `
     attribute vec3 aColor; attribute float aAlpha; attribute float aSize;
-    uniform float uScale; varying vec3 vC; varying float vA;
+    uniform float uScale, uU; varying vec3 vC; varying float vA;
     void main() {
       vC = aColor; vA = aAlpha;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = aSize * uScale / max(-mv.z, 0.1);
+      gl_PointSize = aSize * uU * uScale / max(-mv.z, 0.01);
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader: `
@@ -316,14 +378,14 @@ const cMat = new THREE.ShaderMaterial({
     void main() {
       float r = length(gl_PointCoord - 0.5) * 2.0;
       if (r > 1.0) discard;
-      gl_FragColor = vec4(vC, vA * (1.0 - r) * (1.0 - r));
+      gl_FragColor = vec4(vC * 1.6, vA * (1.0 - r) * (1.0 - r));
     }`,
   transparent: true, depthWrite: false,
 });
 const cloudPts = new THREE.Points(cGeo, cMat);
 cloudPts.frustumCulled = false;
 cloudPts.renderOrder = 5;
-sim.scene.add(cloudPts);
+content.add(cloudPts);
 let emitAcc = 0;
 
 function emitCloud(gas) {
@@ -350,17 +412,19 @@ function updateCloud(dt, t) {
     // Hafif türbülans
     c.vx += Math.sin(t * 0.9 + i) * 0.05 * dt;
     c.vz += Math.cos(t * 0.7 + i * 1.3) * 0.05 * dt;
-    if (open) { c.vz -= 0.55 * dt; c.vy += (3.2 - c.y) * 0.08 * dt; }
+    if (open) { c.vz -= 0.55 * dt; c.vy += (WIN_C.yc - c.y) * 0.08 * dt; }
     const drag = Math.exp(-dt * 0.9);
     c.vx *= drag; c.vy *= drag; c.vz *= drag;
     c.x += c.vx * dt; c.y += c.vy * dt; c.z += c.vz * dt;
     // Havadan ağır gazlar tezgaha çöker ve yayılır
-    if (c.y < 0.2 && Math.abs(c.x) < 6.5 && Math.abs(c.z) < 4.3) {
-      c.y = 0.2;
+    const onBench = Math.abs(c.x) < 9.5 && c.z < FRONT_C;
+    const floorY = onBench ? 0.2 : FLOOR_C + 0.2;
+    if (c.y < floorY) {
+      c.y = floorY;
       if (c.vy < 0) { c.vy *= -0.1; const sp = Math.hypot(c.x - BUCKET.x, c.z - BUCKET.z) || 1; c.vx += (c.x - BUCKET.x) / sp * 0.2; c.vz += (c.z - BUCKET.z) / sp * 0.2; }
     }
-    if (c.z < -4.15) { if (open && Math.abs(c.x) < 1.7 && c.y > 2.1 && c.y < 4.2) c.alive = false; else { c.z = -4.15; c.vz *= -0.2; } }
-    if (c.age > c.life || c.y > 7 || Math.abs(c.x) > 9) c.alive = false;
+    if (c.z < WALL_C) { if (open && Math.abs(c.x) < WIN_C.x && c.y > WIN_C.y0 && c.y < WIN_C.y1) c.alive = false; else { c.z = WALL_C; c.vz *= -0.2; } }
+    if (c.age > c.life || c.y > 12 || Math.abs(c.x) > 9) c.alive = false;
     const k = c.age / c.life;
     const al = c.alive ? c.a * smoothstep(0, 0.08, k) * (1 - smoothstep(0.6, 1, k)) : 0;
     cAlpha[i] = al;
@@ -380,7 +444,6 @@ let sel = ['camasir', 'tuzruhu'];
 let mix = null;          // dökme animasyonu
 let react = null;        // süren tepkime
 let liquidY = 0, liquidTarget = 0;
-const liqColor = new THREE.Color(), liqTarget = new THREE.Color();
 let foamLevel = 0;
 const explored = new Set();
 let dangerFound = 0;
@@ -391,7 +454,7 @@ function setSelection(a, b, fromUI = false) {
   bottles.forEach((bt) => {
     const k = sel.indexOf(bt.p.id);
     bt.ring.visible = k >= 0;
-    if (k >= 0) bt.ring.material.color.setHex(k === 0 ? 0x38bdf8 : 0xf59e0b);
+    if (k >= 0) bt.ring.material.emissive.setHex(k === 0 ? 0x38bdf8 : 0xf59e0b);
     bt.lbl.el.style.borderColor = k === 0 ? '#38bdf8' : k === 1 ? '#f59e0b' : '';
     bt.lbl.el.style.color = k === 0 ? '#7dd3fc' : k === 1 ? '#fcd34d' : '';
   });
@@ -464,7 +527,7 @@ function updateMix(dt) {
       const len = Math.max(_m.y - bottom, 0.05);
       s.position.set(_m.x, bottom + len / 2, _m.z);
       s.scale.set(1 + Math.sin(t * 40 + k) * 0.15, len, 1);
-      s.material.color.setHex(bt.p.shape === 'box' ? 0xffffff : bt.p.liquid);
+      s.material.attenuationColor.setHex(bt.p.shape === 'box' ? 0xffffff : bt.p.liquid);
     }
   });
   if (t > T_TILT && t < T_POUR) {
@@ -487,11 +550,9 @@ function beginReaction(res) {
 
 function updateReaction(dt) {
   liquidY = lerp(liquidY, liquidTarget, 1 - Math.exp(-dt * 4));
-  const r = bucketR(liquidY);
-  liquid.position.y = liquidY;
-  liquid.scale.set(r, r, 1);
+  if (liquid.visible) buildBucketLiquid(liquidY);
   liqColor.lerp(liqTarget, 1 - Math.exp(-dt * 1.5));
-  liquidMat.color.copy(liqColor);
+  liquidMat.attenuationColor.copy(liqColor);
   if (!react) return;
   react.t += dt;
   const res = react.res;
@@ -541,11 +602,9 @@ function drawFoamFizz(t) {
     foam.instanceMatrix.needsUpdate = true;
   } else foam.count = 0;
   fizzP.forEach((f, i) => {
-    _p.set(f.x, f.y, f.z);
-    _s.setScalar(f.life > 0 ? f.s : 0);
-    fizz.setMatrixAt(i, _mat.compose(_p, _q, _s));
+    fizzPos[i * 3] = f.x; fizzPos[i * 3 + 1] = f.life > 0 ? f.y : -99; fizzPos[i * 3 + 2] = f.z;
   });
-  fizz.instanceMatrix.needsUpdate = true;
+  fizzGeo.attributes.position.needsUpdate = true;
 }
 
 // --- Arayüz ---
@@ -731,8 +790,8 @@ sim.onRender((dt) => {
     if (!mix || (b !== mix.a && b !== mix.b)) b.g.position.y = lerp(b.g.position.y, up, 1 - Math.exp(-dt * 8));
   });
   if (sign.visible) { sign.position.y = 3.5 + Math.sin(t * 2.5) * 0.08; sign.material.opacity = 0.75 + Math.sin(t * 6) * 0.25; }
-  alarm.intensity = sign.visible ? 6 + Math.sin(t * 6) * 5 : lerp(alarm.intensity, 0, 1 - Math.exp(-dt * 4));
-  lowerSash.position.y = lerp(lowerSash.position.y, windowOpen.value ? 0.4 : -0.47, 1 - Math.exp(-dt * 4));
+  alarm.intensity = sign.visible ? (6 + Math.sin(t * 6) * 5) * ALARM_K : lerp(alarm.intensity, 0, 1 - Math.exp(-dt * 4));
+  lowerSash.position.y = lerp(lowerSash.position.y, windowOpen.value ? SASH_OPEN : SASH_CLOSED, 1 - Math.exp(-dt * 4));
 });
 
 sim.onClick(() => bottles.map((b) => b.g), (hit) => {

@@ -1,16 +1,20 @@
 // Kuantum Çift Yarık — tek tek parçacıklar, Huygens–Fresnel ile hesaplanan |ψ|² dağılımından örneklenir.
-import { createSim, THREE, clamp, mapRange, gauss, fmt } from '@core';
+import { createSim, THREE, clamp, mapRange, gauss, fmt, mat, RoundedBoxGeometry } from '@core';
+import { opticsRoom, opticalTable, postMount, laserHead, glowBeam, glowSprite, dustMotes, instrument, OM } from './optlab.js';
 
 const NB = 100;            // histogram kutusu
 const GRID = 600;          // olasılık tablosu çözünürlüğü
 const GUN_X = -11, SCREEN_X = 10;
 const SCR_W = 16, SCR_H = 9, SLIT_H = 5;
 
+// Gerçek ölçek: 1 birim = 4 cm (U); kaynak–ekran ≈ 84 cm, optik masa üstünde; ışın ekseni masadan 18 cm yukarıda
+const U = 0.04, BENCH = 0.85, FLOOR_Y = -4.6, AXIS_Y = BENCH - FLOOR_Y * U;
+const toW = (p) => [p[0] * U, AXIS_Y + p[1] * U, p[2] * U];
 const sim = createSim({
-  background: 0x05070f,
-  camera: { position: [-12, 12, 19], target: [1.5, 0, -2], fov: 55 },
-  controls: { minDistance: 8, maxDistance: 60 },
-  lights: false,
+  studio: { color: 0xb8bbb8, mood: 'day', warmth: 0.12, key: { el: 58, az: 200 }, radius: 22 },
+  look: { aoRadius: 0.04, exposure: 0.66 },
+  camera: { position: toW([-13, 11, 20]), target: toW([2, -0.5, -1.5]), fov: 52, near: 0.01, far: 100 },
+  controls: { minDistance: 8 * U, maxDistance: 80 * U, maxPolarAngle: Math.PI * 0.62 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Kaynak parçacıkları <b>tek tek</b> gönderir. Her biri ekranda <b>tek bir noktaya</b> çarpar — bu yönüyle parçacık gibidir.
@@ -115,47 +119,98 @@ function updateColor() {
 }
 
 // --- Sahne ---
-sim.scene.add(new THREE.AmbientLight(0x8090b0, 0.9));
-const dl = new THREE.DirectionalLight(0xffffff, 1.6);
-dl.position.set(-6, 12, 10);
-sim.scene.add(dl);
-
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 30), new THREE.MeshStandardMaterial({ color: 0x0c1222, roughness: 0.9 }));
-floor.rotation.x = -Math.PI / 2;
-floor.position.y = -4.6;
-sim.scene.add(floor);
-const grid = new THREE.GridHelper(40, 40, 0x1e293b, 0x141c2e);
-grid.position.y = -4.59;
-sim.scene.add(grid);
-
-// Kaynak (tabanca)
-const gun = new THREE.Group();
-{
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.1, 3, 32), new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.6, roughness: 0.35 }));
-  body.rotation.z = Math.PI / 2;
-  gun.add(body);
-  const stand = new THREE.Mesh(new THREE.BoxGeometry(1.2, 3.6, 1.2), new THREE.MeshStandardMaterial({ color: 0x334155 }));
-  stand.position.set(0, -2.8, 0);
-  gun.add(stand);
-  gun.position.set(GUN_X - 1.4, 0, 0);
-  sim.scene.add(gun);
+// Kuantum optiği laboratuvarı: boyalı oda, titreşim yalıtımlı optik masa (M6 delik ızgarası), cihaz arabası, yazı tahtası
+const TABLE_Z = -0.1;
+opticsRoom(sim.scene, {
+  bench: BENCH, tableZ: TABLE_Z, back: -1.35, cart: [-1.75, -0.75, 0.5],
+  board: { x: -0.35, lines: [['Δy ≈ λ·L / d', '#1d4ed8', 64], ['I ∝ cos²(π·d·sinθ / λ)', '#111', 50], ['λ = h / p', '#b91c1c', 58]],
+    sketch: (c, Wc, Hc) => {
+      c.strokeStyle = '#111'; c.lineWidth = 6;
+      const x = 640; c.beginPath(); c.moveTo(x, 60); c.lineTo(x, Hc * 0.42); c.moveTo(x, Hc * 0.47); c.lineTo(x, Hc * 0.53); c.moveTo(x, Hc * 0.58); c.lineTo(x, Hc - 60); c.stroke();
+      c.strokeStyle = '#1d4ed8'; c.lineWidth = 3;
+      for (let r = 30; r < 200; r += 30) for (const y of [Hc * 0.445, Hc * 0.555]) { c.beginPath(); c.arc(x, y, r, -1.1, 1.1); c.stroke(); }
+      c.strokeStyle = '#b91c1c'; c.lineWidth = 4; c.beginPath();
+      for (let i = 0; i <= 60; i++) { const yy = 60 + i * (Hc - 120) / 60, u = (yy - Hc / 2) / 40; const v = Math.cos(u) ** 2 * Math.exp(-u * u / 40); i ? c.lineTo(860 - v * 60, yy) : c.moveTo(860 - v * 60, yy); }
+      c.stroke();
+    } },
+});
+opticalTable(sim.scene, { top: BENCH, z: TABLE_Z });
+const content = new THREE.Group();
+content.position.set(0, AXIS_Y, 0);
+content.scale.setScalar(U);
+sim.scene.add(content);
+const MQ = {
+  steel: mat.brushedMetal({ color: 0xd4d7db, rough: 0.2, scale: U }),
+  anod: mat.paintedMetal({ color: 0x1b1d21, wear: 0.05, scale: U }),
+  housing: mat.paintedMetal({ color: 0x2c3036, wear: 0.12, scale: U }),
+};
+function post(parent, x, yTop, z = 0) {
+  const g = postMount((yTop - FLOOR_Y) * U);   // metre ölçekli direk + tutucu + çatal
+  g.scale.setScalar(1 / U);
+  g.position.set(x, FLOOR_Y, z);
+  parent.add(g);
 }
-const nozzleMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-const nozzle = new THREE.Mesh(new THREE.TorusGeometry(0.55, 0.12, 12, 32), nozzleMat);
+
+// Kaynak: He-Ne benzeri lazer kafası (elektron modunda aynı yerde elektron tabancası varsayılır), önünde zayıflatıcı
+// (ND) filtre tekerleği: ışık, parçacıkların tek tek gelmesi için çok zayıflatılır
+{
+  const head = laserHead({ len: 0.24, r: 0.022, axisH: AXIS_Y - BENCH, label: 'Tek foton kaynağı' });
+  head.scale.setScalar(1 / U);
+  head.position.set(GUN_X - 2.2, 0, 0);
+  content.add(head);
+  const wheel = new THREE.Group();
+  const disc = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.25, 0.12, 48).rotateZ(Math.PI / 2), MQ.anod);
+  wheel.add(disc);
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (i / 6) * Math.PI * 2;
+    const f = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 0.14, 24).rotateZ(Math.PI / 2),
+      new THREE.MeshPhysicalMaterial({ color: new THREE.Color().setHSL(0.6, 0.05, 0.5 - i * 0.07), roughness: 0.05, metalness: 0.3, clearcoat: 1 }));
+    f.position.set(0, Math.sin(a) * 0.8, Math.cos(a) * 0.8); wheel.add(f);
+  }
+  wheel.position.set(GUN_X - 1.0, 0.8, 0);
+  content.add(wheel);
+  post(content, GUN_X - 1.0, -0.45);
+}
+const nozzleMat = mat.glow({ color: 0xffffff, intensity: 3 });
+nozzleMat.color = nozzleMat.emissive;
+const nozzle = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.1, 12, 32), nozzleMat);
 nozzle.rotation.y = Math.PI / 2;
 nozzle.position.set(GUN_X + 0.15, 0, 0);
-sim.scene.add(nozzle);
-sim.label('Kaynak', { position: [GUN_X - 1.4, 1.8, 0], className: 'plain' });
+content.add(nozzle);
+sim.label('Kaynak', { parent: content, position: [GUN_X - 5, 1.7, 0], className: 'plain' });
+// Kaynaktan yarığa giden soluk ışın + açıklıktaki yumuşak parıltı (renk parçacık rengini izler)
+const beam = glowBeam(0xffffff, 0.07);
+beam.userData.set(new THREE.Vector3(GUN_X - 2.2, 0, 0), new THREE.Vector3(-0.2, 0, 0));
+beam.children.forEach((m) => { m.material.opacity *= 0.35; });
+content.add(beam);
+const apGlow = glowSprite(0xffffff, 1.4);
+apGlow.position.set(GUN_X + 0.15, 0, 0);
+content.add(apGlow);
 
 // Engel ve yarıklar (parametre değişince yeniden kurulur)
 const barrier = new THREE.Group();
-sim.scene.add(barrier);
-const barrierMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.5, roughness: 0.45 });
-const shutterMat = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.6 });
+content.add(barrier);
+const barrierMat = mat.brushedMetal({ color: 0x6d7177, rough: 0.38, scale: U });
+const shutterMat = mat.plastic({ color: 0xb3241c, gloss: 0.4, scale: U });
+{
+  // Yarık levhası tutucusu: iki direk
+  // Yarık levhası tutucusu: eloksallı çerçeve, sıkma vidaları, iki direk
+  const holder = new THREE.Group();
+  const HALF = 4.6, H = 7, fw = 0.55;
+  const bar = (w, h, d, y, z) => { const m = new THREE.Mesh(new RoundedBoxGeometry(w, h, d, 2, 0.08), MQ.anod); m.position.set(0, y, z); holder.add(m); };
+  bar(0.7, fw, 2 * HALF + 2 * fw, H / 2 + fw / 2, 0); bar(0.7, fw, 2 * HALF + 2 * fw, -H / 2 - fw / 2, 0);
+  bar(0.7, H, fw, 0, -HALF - fw / 2); bar(0.7, H, fw, 0, HALF + fw / 2);
+  for (const z of [-HALF - fw / 2, HALF + fw / 2]) for (const y of [-2, 2]) {
+    const sc = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.3, 16).rotateZ(Math.PI / 2), MQ.steel);
+    sc.position.set(-0.45, y, z); holder.add(sc);
+  }
+  post(holder, 0, -H / 2 - fw, -4.0); post(holder, 0, -H / 2 - fw, 4.0);
+  content.add(holder);
+}
 let slitZ = [], slitAv = 0.4;
 const detLamps = [];
 const detGroup = new THREE.Group();
-sim.scene.add(detGroup);
+content.add(detGroup);
 function visualSlits() {
   const dv = mapRange(P.d, 0.05, 0.5, 1.0, 4.4);
   slitAv = mapRange(P.a, 0.01, 0.12, 0.18, 0.95);
@@ -186,11 +241,12 @@ function buildBarrier() {
   detGroup.children.slice().forEach((c) => { c.geometry.dispose(); detGroup.remove(c); });
   detLamps.length = 0;
   (P.slits === 2 ? [0, 1] : [1]).forEach((i) => {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(Math.max(0.5, slitAv * 0.9), 0.07, 8, 24), new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0x3a2000 }));
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(Math.max(0.5, slitAv * 0.9), 0.07, 8, 24), mat.brushedMetal({ color: 0xd6a24a, scale: U }));
     ring.rotation.y = Math.PI / 2;
     ring.position.set(0.45, 0, slitZ[i]);
     detGroup.add(ring);
-    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), new THREE.MeshBasicMaterial({ color: 0x3a2a08 }));
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), mat.glow({ color: 0xffc040, intensity: 0 }));
+    lamp.material.color.setHex(0x3a2a08);
     lamp.position.set(0.45, SLIT_H / 2 + 1.2, slitZ[i]);
     lamp.userData.flash = 0;
     detGroup.add(lamp);
@@ -198,8 +254,8 @@ function buildBarrier() {
   });
   detGroup.visible = P.det;
 }
-sim.label('Engel (yarıklar)', { position: [0, 4.1, 3.2], className: 'plain' });
-const detLabel = sim.label('🔍 Dedektör', { position: [0.45, SLIT_H / 2 + 2, 0], className: 'plain' });
+sim.label('Engel (yarıklar)', { parent: content, position: [0, 4.1, 3.2], className: 'plain' });
+const detLabel = sim.label('🔍 Dedektör', { parent: content, position: [0.45, SLIT_H / 2 + 2, 0], className: 'plain' });
 
 // Ekran (nokta birikimi tuval dokusunda)
 const CW = 1024, CH = 576;
@@ -208,16 +264,47 @@ scrCanvas.width = CW; scrCanvas.height = CH;
 const sctx = scrCanvas.getContext('2d');
 const scrTex = new THREE.CanvasTexture(scrCanvas);
 scrTex.colorSpace = THREE.SRGBColorSpace;
-const screen = new THREE.Mesh(new THREE.PlaneGeometry(SCR_W, SCR_H), new THREE.MeshBasicMaterial({ map: scrTex }));
+// Algılayıcı ekran: koyu fosfor yüzey; çarpan parçacıklar ışıyan noktalar olarak birikir (emissiveMap)
+const screen = new THREE.Mesh(new THREE.PlaneGeometry(SCR_W, SCR_H), new THREE.MeshStandardMaterial({
+  color: 0x0a0c10, roughness: 0.55, emissive: 0xffffff, emissiveMap: scrTex, emissiveIntensity: 1.6 }));
 screen.rotation.y = -Math.PI / 2;
 screen.position.set(SCREEN_X, 0, 0);
-sim.scene.add(screen);
-const frame = new THREE.Mesh(new THREE.BoxGeometry(0.3, SCR_H + 0.4, SCR_W + 0.4), new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.4 }));
+content.add(screen);
+const frame = new THREE.Mesh(new RoundedBoxGeometry(0.3, SCR_H + 0.4, SCR_W + 0.4, 2, 0.08), MQ.anod);
 frame.position.set(SCREEN_X + 0.2, 0, 0);
-sim.scene.add(frame);
-sim.label('Ekran', { position: [SCREEN_X, -SCR_H / 2 - 0.5, 0], className: 'plain' });
-const scaleL = sim.label('', { position: [SCREEN_X, -SCR_H / 2 - 0.5, -SCR_W / 2 + 0.8], className: 'plain' });
-const scaleR = sim.label('', { position: [SCREEN_X, -SCR_H / 2 - 0.5, SCR_W / 2 - 0.8], className: 'plain' });
+content.add(frame);
+post(content, SCREEN_X + 0.2, -SCR_H / 2 - 0.2, -SCR_W / 2 + 1.5); post(content, SCREEN_X + 0.2, -SCR_H / 2 - 0.2, SCR_W / 2 - 1.5);
+sim.label('Ekran', { parent: content, position: [SCREEN_X, -SCR_H / 2 - 0.5, 0], className: 'plain' });
+// Ekranı görüntüleyen soğutmalı kamera (ön-sağda, ekrana bakar) ve canlı sayım gösteren foton sayacı (masanın arkasında)
+{
+  const cam = new THREE.Group();
+  cam.add(new THREE.Mesh(new RoundedBoxGeometry(0.09, 0.075, 0.08, 3, 0.01), mat.paintedMetal({ color: 0xa9aeb5, wear: 0.03 })));
+  const fin = new RoundedBoxGeometry(0.004, 0.06, 0.07, 1, 0.001);
+  for (let i = 0; i < 6; i++) { const f = new THREE.Mesh(fin, OM.anod); f.position.x = -0.05 - i * 0.007; cam.add(f); }
+  const barrel = new THREE.Mesh(new THREE.LatheGeometry([[0, 0], [0.022, 0], [0.022, 0.03], [0.026, 0.032], [0.026, 0.06], [0.02, 0.062], [0, 0.062]].map(([a, b]) => new THREE.Vector2(a, b)), 32), OM.anod);
+  barrel.rotation.z = -Math.PI / 2; barrel.position.x = 0.045; cam.add(barrel);
+  const glass = new THREE.Mesh(new THREE.CircleGeometry(0.017, 24).rotateY(Math.PI / 2), new THREE.MeshPhysicalMaterial({ color: 0x1a2a3a, roughness: 0.02, metalness: 0.4, clearcoat: 1 }));
+  glass.position.x = 0.1075; cam.add(glass);
+  const stripe = new THREE.Mesh(new RoundedBoxGeometry(0.091, 0.012, 0.081, 1, 0.003), mat.paintedMetal({ color: 0x1d4ed8, wear: 0.02 }));
+  stripe.position.y = 0.018; cam.add(stripe);
+  const pm = postMount(AXIS_Y - BENCH - 0.0375); pm.position.y = -(AXIS_Y - BENCH); cam.add(pm);
+  cam.position.set(0.18, AXIS_Y, 0.4);
+  cam.rotation.y = Math.atan2(0.4, SCREEN_X * U - 0.18);
+  sim.scene.add(cam);
+}
+const counter = instrument(0.3, 0.12, 0.26, { body: 0x2f3338, text: '0', color: '#7dd3fc', led: 0x38bdf8 });
+counter.position.set(0.72, BENCH, -0.52); counter.rotation.y = -0.35;
+sim.scene.add(counter);
+const counterDraw = (n) => {
+  const { tex } = counter.userData.display, c = tex.image.getContext('2d');
+  c.fillStyle = '#020a12'; c.fillRect(0, 0, 256, 96);
+  c.fillStyle = '#7dd3fc'; c.font = '700 54px "Courier New", monospace'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(String(n).padStart(6, '0'), 128, 50);
+  tex.needsUpdate = true;
+};
+let counterShown = -1;
+const scaleL = sim.label('', { parent: content, position: [SCREEN_X, -SCR_H / 2 - 0.5, -SCR_W / 2 + 0.8], className: 'plain' });
+const scaleR = sim.label('', { parent: content, position: [SCREEN_X, -SCR_H / 2 - 0.5, SCR_W / 2 - 0.8], className: 'plain' });
 let texDirty = true;
 function clearScreen() {
   sctx.globalCompositeOperation = 'source-over';
@@ -239,13 +326,16 @@ function drawDot(u) {
 // Histogram çubukları (ekranın üstünde)
 const barGeo = new THREE.BoxGeometry(0.12, 1, SCR_W / NB * 0.85);
 barGeo.translate(0, 0.5, 0);
-const bars = new THREE.InstancedMesh(barGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), NB);
+const barMat = mat.glow({ color: 0xffffff, intensity: 1.3 });
+barMat.color = barMat.emissive;   // çubuk rengi parçacık rengini izler
+const bars = new THREE.InstancedMesh(barGeo, barMat, NB);
 bars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-sim.scene.add(bars);
+bars.userData.noShadow = true;
+content.add(bars);
 const theoryLine = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(NB * 3), 3)),
   new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 }));
 theoryLine.frustumCulled = false;
-sim.scene.add(theoryLine);
+content.add(theoryLine);
 const BAR_Y = SCR_H / 2 + 0.35, BAR_H = 3.2;
 const _m = new THREE.Matrix4(), _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3();
 function updateBars() {
@@ -269,13 +359,13 @@ function updateBars() {
   theoryLine.geometry.attributes.position.needsUpdate = true;
   return maxH;
 }
-sim.label('Sayım histogramı · beyaz çizgi: |ψ|² kuramı', { position: [SCREEN_X, BAR_Y + BAR_H + 0.6, -3], className: 'plain' });
+sim.label('Sayım histogramı · beyaz çizgi: |ψ|² kuramı', { parent: content, position: [SCREEN_X, BAR_Y + BAR_H + 0.6, -3], className: 'plain' });
 
 // Dalga görünümü (yatay kesit, gölgelendirici)
 const waveMat = new THREE.ShaderMaterial({
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  uniforms: { uT: { value: 0 }, uK: { value: 8 }, uS: { value: new THREE.Vector2(-1, 1) }, uN: { value: 2 }, uDet: { value: 0 }, uC: { value: new THREE.Color() } },
-  vertexShader: `varying vec3 vP; void main(){ vec4 w = modelMatrix * vec4(position,1.0); vP = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  uniforms: { uT: { value: 0 }, uK: { value: 8 }, uS: { value: new THREE.Vector2(-1, 1) }, uN: { value: 2 }, uDet: { value: 0 }, uC: { value: new THREE.Color() }, uLocal: { value: new THREE.Matrix4() } },
+  vertexShader: `uniform mat4 uLocal; varying vec3 vP; void main(){ vP = (uLocal * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
     varying vec3 vP; uniform float uT, uK, uN, uDet; uniform vec2 uS; uniform vec3 uC;
     void main(){
@@ -299,7 +389,10 @@ const waveMat = new THREE.ShaderMaterial({
 const wavePlane = new THREE.Mesh(new THREE.PlaneGeometry(SCREEN_X - GUN_X, 16, 1, 1), waveMat);
 wavePlane.rotation.x = -Math.PI / 2;
 wavePlane.position.set((SCREEN_X + GUN_X) / 2, -0.02, 0);
-sim.scene.add(wavePlane);
+wavePlane.updateMatrix();
+waveMat.uniforms.uLocal.value.copy(wavePlane.matrix);   // içerik koordinatları (birim) shader'a
+wavePlane.userData.noShadow = true;
+content.add(wavePlane);
 
 // Uçuştaki parçacıklar ve dalga halkaları
 const POOL = 70;
@@ -313,16 +406,17 @@ const glowTex = (() => {
   return new THREE.CanvasTexture(c);
 })();
 const partPoints = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(POOL * 3), 3)),
-  new THREE.PointsMaterial({ size: 0.9, map: glowTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  new THREE.PointsMaterial({ size: 0.9 * U, map: glowTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
 partPoints.frustumCulled = false;
-sim.scene.add(partPoints);
+content.add(partPoints);
 const ringGeo = new THREE.RingGeometry(0.985, 1, 48, 1, -Math.PI / 2, Math.PI);
 const rings = new THREE.InstancedMesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }), POOL);
 rings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 rings.frustumCulled = false;
 const ringQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
 for (let i = 0; i < POOL; i++) rings.setColorAt(i, new THREE.Color(0));
-sim.scene.add(rings);
+rings.userData.noShadow = true;
+content.add(rings);
 const FLY1 = 0.55, FLY2 = 0.55; // kaynak→engel, engel→ekran süreleri (s)
 
 function registerHit(u, slit) {
@@ -362,7 +456,21 @@ sim.onUpdate((dt) => {
 
 const posArr = partPoints.geometry.attributes.position.array;
 const ringCol = new THREE.Color();
+// Havadaki toz: kaynak ışınında ve yarıktan sonra yayılan ışıkta parlar (yalnız foton modunda)
+const dust = dustMotes({ count: 380, box: [GUN_X - 2, -3, -8, SCREEN_X - 0.3, 4, 8], size: 0.0045, seed: 5 });
+content.add(dust.points);
+function dustLight(x, y, z, out) {
+  let k = 0;
+  if (P.type === 'foton') {
+    if (x < 0) k = Math.exp(-(y * y + z * z) / 0.35) * 1.5;
+    else { const wz = 1 + 0.75 * x; k = Math.exp(-(y * y) / 0.3) * Math.exp(-(z * z) / (wz * wz)) * 0.8; }
+  }
+  out.setRGB(0.012 + partColor.r * k, 0.012 + partColor.g * k, 0.013 + partColor.b * k);
+}
+let dustT = 0;
 sim.onRender((real) => {
+  dustT += Math.min(real || 0.016, 0.1);
+  dust.update(dustT, dustLight);
   waveMat.uniforms.uT.value += real * 5;
   // Parçacık konumları
   let pi = 0, ri = 0;
@@ -394,7 +502,7 @@ sim.onRender((real) => {
   for (const l of detLamps) {
     if (!l) continue;
     l.userData.flash = Math.max(0, l.userData.flash - real * 4);
-    l.material.color.setRGB(0.23 + l.userData.flash * 0.77, 0.16 + l.userData.flash * 0.7, 0.03 + l.userData.flash * 0.2);
+    l.material.emissiveIntensity = l.userData.flash * 6;
   }
   if (texDirty) { scrTex.needsUpdate = true; texDirty = false; }
   if (barTimer > 0.15) { barTimer = 0; updateBars(); drawHist(); updateStats(); }
@@ -493,6 +601,7 @@ function theoryVisibility() {
 }
 function updateStats() {
   stN.set(hits);
+  if (hits !== counterShown) { counterShown = hits; counterDraw(hits); }
   const lam = P.lam * 1e-9, L = P.L;
   stFr.set(P.slits === 2 ? scrUnits((lam * L) / (P.d * 1e-3)) : '—');
   stEnv.set(scrUnits((2 * lam * L) / (P.a * 1e-3)));
@@ -505,6 +614,7 @@ function rebuild() {
   buildBarrier();
   updateColor();
   nozzleMat.color.copy(partColor);
+  beam.userData.color(partColor); apGlow.material.color.copy(partColor);
   waveMat.uniforms.uC.value.copy(partColor);
   waveMat.uniforms.uK.value = (2 * Math.PI) / mapRange(P.lam, 380, 750, 0.5, 1.0);
   waveMat.uniforms.uS.value.set(slitZ[0], slitZ[1]);

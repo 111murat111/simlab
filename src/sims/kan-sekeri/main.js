@@ -1,5 +1,6 @@
 // Kan Şekeri Dengesi — basitleştirilmiş Bergman minimal modeliyle 24 saatlik glukoz–insülin dinamiği ve organ etkinliği.
 import { createSim, THREE, fmt, clamp, lerp } from '@core';
+import { buildAnatomy } from './anatomy.js';
 import * as M from './model.js';
 
 const MIN_PER_SEC = 10;       // 1× hızda 1 saniye = 10 dakika
@@ -8,17 +9,21 @@ const SAMPLE = 5;             // grafik örnekleme aralığı (dk)
 const NS = (24 * 60) / SAMPLE;
 
 const sim = createSim({
-  background: 0x0a0f1c,
-  camera: { position: [0, 0.3, 7.6], target: [0, 0.1, 0], fov: 45 },
-  controls: { minDistance: 3, maxDistance: 16 },
-  lights: true,
+  studio: { mood: 'lab', color: 0x2c2a34, warmth: 0.15, key: { el: 55, az: 165, power: 1.35 }, radius: 40, height: 20 },
+  camera: { position: [2.0, 2.0, 7.5], target: [0.2, 0.2, 0], fov: 42, near: 0.05, far: 120 },
+  controls: { minDistance: 2.2, maxDistance: 13, maxPolarAngle: Math.PI * 0.8, minPolarAngle: Math.PI * 0.18 },
+  look: { exposure: 1.1, bloomStrength: 0.45 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Kan şekeri (glukoz) yemekle yükselir; pankreas <b>insülin</b> salgılar, insülin kasların ve karaciğerin şekeri almasını sağlar,
     şeker yeniden normale iner. Model, basitleştirilmiş <b>Bergman minimal modelidir</b>: glukoz, uzak insülin etkisi ve plazma insülini;
     buna bağırsak emilimi (hızlı/yavaş glisemik indeks), deri altı insülin emilimi, egzersiz ve böbrek eşiği (~180 mg/dL) eklenmiştir.</p>
-    <p>Gövdede <b>pankreas</b> insülin salgıladıkça, <b>karaciğer</b> şeker depolarken (yeşil) ya da salarken (turuncu), <b>kaslar</b>
-    şeker aldıkça, <b>bağırsak</b> emilim yaparken parlar. Damar içindeki parçacıklar kandaki şeker miktarını gösterir.</p>
+    <p>Karın boşluğunun kesitine bakıyorsun: solda <b>karaciğer</b>, üstte <b>mide</b>, ortada C biçimli <b>on iki parmak bağırsağı</b>
+    ve ona yaslanan <b>pankreas</b>, altta <b>ince bağırsak</b>, sağda bir <b>iskelet kası</b> demeti, arkada böbrekler ve büyük damarlar.
+    Önde açık kesilmiş <b>portal ven</b> bağırsaktan emilen şekeri karaciğere taşır. <b style="color:#fcd34d">Amber</b> parçacıklar kandaki glukozu
+    (sayısı kan şekeriyle artar), <b style="color:#c4b5fd">mor</b> parçacıklar insülini gösterir. Pankreastaki <b>Langerhans adacıkları</b>
+    insülin salgıladıkça mor parlar; karaciğere giden akım şeker depolanırken <b style="color:#4ade80">yeşil</b>, salınırken
+    <b style="color:#fb923c">turuncu</b>dur; kaslar şeker aldıkça ve bağırsak emilim yaptıkça ışır. Egzersizde kas lifleri kasılır.</p>
     <h3>Dene</h3>
     <ul>
       <li>Aynı 60 g karbonhidratı önce <b>hızlı</b>, sonra <b>yavaş</b> GI ile ye: yavaş olanın tepe değeri belirgin düşük.</li>
@@ -35,83 +40,11 @@ const sim = createSim({
 sim.formatTime = () => `Gün ${day} · ${clock(minute)}`;
 const clock = (m) => { const t = ((Math.floor(m) % 1440) + 1440) % 1440; return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
 
-// ================= 3B gövde =================
-const body = new THREE.Group();
-sim.scene.add(body);
-const skinMat = new THREE.MeshStandardMaterial({ color: 0xf2c6a0, transparent: true, opacity: 0.16, depthWrite: false, roughness: 0.6 });
-const skinEdge = new THREE.MeshBasicMaterial({ color: 0xf8d7b8, transparent: true, opacity: 0.08, side: THREE.BackSide, depthWrite: false });
-function skin(geo, pos, rot = [0, 0, 0], parent = body) {
-  const m = new THREE.Mesh(geo, skinMat); m.position.fromArray(pos); m.rotation.fromArray(rot); parent.add(m);
-  const e = new THREE.Mesh(geo, skinEdge); e.scale.setScalar(1.03); m.add(e);
-  return m;
-}
-skin(new THREE.SphereGeometry(0.38, 32, 20), [0, 1.62, 0]);
-skin(new THREE.CapsuleGeometry(0.62, 1.2, 8, 24), [0, 0.35, 0]).scale.set(1, 1, 0.62);
-skin(new THREE.CylinderGeometry(0.13, 0.15, 0.25, 16), [0, 1.2, 0]);
-const limbs = {};
-function limb(name, x, y, len, r, rotZ) {
-  const g = new THREE.Group(); g.position.set(x, y, 0); g.rotation.z = rotZ; body.add(g);
-  skin(new THREE.CapsuleGeometry(r, len, 6, 16), [0, -len / 2 - r * 0.6, 0], [0, 0, 0], g);
-  limbs[name] = g;
-  return g;
-}
-limb('lArm', -0.78, 0.95, 1.05, 0.14, -0.12);
-limb('rArm', 0.78, 0.95, 1.05, 0.14, 0.12);
-limb('lLeg', -0.3, -0.45, 1.25, 0.2, 0.02);
-limb('rLeg', 0.3, -0.45, 1.25, 0.2, -0.02);
-
-function organ(geo, color, pos, scale = [1, 1, 1], parent = body) {
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, emissive: color, emissiveIntensity: 0.05 });
-  const m = new THREE.Mesh(geo, mat); m.position.fromArray(pos); m.scale.fromArray(scale); parent.add(m);
-  return m;
-}
-const brain = organ(new THREE.SphereGeometry(0.26, 24, 16), 0xf0abfc, [0, 1.66, 0], [1, 0.85, 1.05]);
-const heart = organ(new THREE.SphereGeometry(0.16, 20, 14), 0xef4444, [0.1, 0.78, 0.1], [1, 1.15, 0.9]);
-const liver = organ(new THREE.SphereGeometry(0.34, 24, 16), 0x9a3412, [-0.25, 0.42, 0.08], [1.25, 0.62, 0.8]);
-const stomach = organ(new THREE.SphereGeometry(0.2, 20, 14), 0xf9a8d4, [0.3, 0.38, 0.12], [1, 1.3, 0.8]);
-const pancreas = organ(new THREE.CapsuleGeometry(0.06, 0.45, 6, 12), 0xfacc15, [0.08, 0.2, 0.02], [1, 1, 1]);
-pancreas.rotation.z = Math.PI / 2 - 0.25;
-const gut = organ(new THREE.TorusKnotGeometry(0.2, 0.05, 90, 8, 3, 5), 0xfb7185, [0, -0.12, 0.05], [1.15, 0.8, 0.6]);
-const kidneys = [-0.26, 0.26].map((x) => organ(new THREE.SphereGeometry(0.1, 16, 12), 0x7f1d1d, [x, 0.2, -0.18], [0.8, 1.3, 0.8]));
-const muscles = [];
-for (const [name, len, r] of [['lArm', 0.55, 0.1], ['rArm', 0.55, 0.1], ['lLeg', 0.75, 0.15], ['rLeg', 0.75, 0.15]]) {
-  const m = organ(new THREE.CapsuleGeometry(r, len, 6, 12), 0xb91c1c, [0, -len / 2 - 0.25, 0], [1, 1, 1], limbs[name]);
-  m.material.emissive.setHex(0xffd166);
-  muscles.push(m);
-}
-const lbls = [
-  sim.label('Beyin', { parent: brain, position: [0.55, 0.1, 0], className: 'plain' }),
-  sim.label('Karaciğer', { parent: liver, position: [-0.75, 0.05, 0], className: 'plain' }),
-  sim.label('Mide', { parent: stomach, position: [0.55, 0.1, 0], className: 'plain' }),
-  sim.label('Pankreas', { parent: pancreas, position: [0, -0.55, 0], className: 'plain' }),
-  sim.label('Bağırsak', { parent: gut, position: [0.6, -0.1, 0], className: 'plain' }),
-  sim.label('Kaslar', { parent: muscles[3], position: [0.45, 0, 0], className: 'plain' }),
-];
-const bodyLbl = sim.label('', { parent: body, position: [0, 2.35, 0], className: 'big' });
-
-// Kan dolaşımındaki glukoz parçacıkları
-const NP = 160;
-const partGeo = new THREE.SphereGeometry(0.035, 8, 6);
-const parts = new THREE.InstancedMesh(partGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }), NP);
-parts.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-body.add(parts);
-const vessel = new THREE.CatmullRomCurve3([
-  [0.1, 0.8, 0.12], [0.6, 1.0, 0.05], [0.8, 0.2, 0.05], [0.4, -1.2, 0.05], [0.3, -2.0, 0.05], [0.1, -0.6, 0.1],
-  [-0.1, -0.6, 0.1], [-0.3, -2.0, 0.05], [-0.4, -1.2, 0.05], [-0.8, 0.2, 0.05], [-0.6, 1.0, 0.05], [0, 1.45, 0.05],
-].map((p) => new THREE.Vector3(...p)), true);
-const vesselLine = new THREE.Mesh(new THREE.TubeGeometry(vessel, 160, 0.025, 6, true), new THREE.MeshBasicMaterial({ color: 0x7f1d1d, transparent: true, opacity: 0.45 }));
-body.add(vesselLine);
-const partOffset = Array.from({ length: NP }, () => Math.random());
-const _m = new THREE.Matrix4(), _p = new THREE.Vector3();
-
-const floor = new THREE.Mesh(new THREE.CircleGeometry(3, 48), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.95 }));
-floor.rotation.x = -Math.PI / 2;
-floor.position.y = -2.35;
-sim.scene.add(floor);
-const bed = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.3, 1.6), new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.8 }));
-bed.position.set(0, -1.9, 0);
-bed.visible = false;
-sim.scene.add(bed);
+// ================= 3B sahne: karın içi kesit =================
+const LOWQ = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+const A = buildAnatomy(sim, LOWQ);
+const lbls = A.organs.labels.map(([o, pos, t]) => sim.label(t, { parent: A.root, position: pos, className: 'plain' }));
+const bodyLbl = sim.label('', { parent: A.root, position: [-0.2, 2.85, 0.2], className: 'big' });
 
 // ================= Durum =================
 let profile = 'saglikli';
@@ -160,6 +93,15 @@ ui.buttons([
 ui.buttons([
   { label: '⚠️ Tip 1: yemeksiz doz', variant: 'danger', onClick: () => { if (profile !== 'tip1') { profSel.set('tip1'); profile = 'tip1'; restart(); } autoTg.set(false); injectBolus(10); } },
   { label: '🌅 Yeni gün', onClick: () => restart() },
+]);
+
+ui.section('Görünüm');
+ui.toggle({ label: 'Glukoz ve insülin parçacıkları', value: true, onChange: (v) => { A.data.visible = v; } });
+ui.toggle({ label: 'Organ etiketleri', value: true, onChange: (v) => lbls.forEach((l) => { l.visible = v; l.el.style.display = v ? '' : 'none'; }) });
+ui.buttons([
+  { label: 'Genel', onClick: () => sim.moveCamera([2.0, 2.0, 7.5], [0.2, 0.2, 0]) },
+  { label: 'Pankreas', onClick: () => sim.moveCamera([0.9, 0.9, 3.3], [0.35, 0.2, 0.3]) },
+  { label: 'Portal ven', onClick: () => sim.moveCamera([1.6, -0.2, 3.6], [0.4, -0.55, 1.0]) },
 ]);
 
 ui.section('Kan şekeri (24 saat)');
@@ -325,47 +267,17 @@ function drawChart() {
 
 // ================= Görsel güncelleme =================
 const col = new THREE.Color();
-let lie = 0, walk = 0;
+let lie = 0;
 sim.onRender((rdt) => {
   if (!s) return;
   if (++chartTick % 4 === 0) drawChart();
   const G = s.G;
-  // Organ ışımaları
-  const glow = (m, v, c1) => { m.material.emissiveIntensity = lerp(m.material.emissiveIntensity, 0.05 + clamp(v, 0, 1) * 1.6, 0.15); if (c1 != null) m.material.emissive.setHex(c1); };
-  glow(pancreas, lastRates.sec / 12);
-  glow(gut, lastRates.Ra / 5);
-  glow(stomach, (s.gutF[0] + s.gutS[0]) / 60);
-  const hep = lastRates.hepatic;
-  glow(liver, Math.abs(hep) / 3, hep < 0 ? 0x22c55e : 0xf97316);
-  muscles.forEach((m) => glow(m, lastRates.muscle / 4));
-  kidneys.forEach((k) => glow(k, lastRates.renal / 1.5, 0xfbbf24));
-  glow(brain, G < 70 ? 0.1 : 0.35);
-  brain.material.color.setHex(G < 60 ? 0x6b7280 : 0xf0abfc);
-  heart.scale.setScalar(1 + Math.sin(performance.now() / 160) * 0.05);
-  // Kandaki glukoz parçacıkları
-  const visible = Math.round(clamp(G / 400, 0.05, 1) * NP);
-  const tt = performance.now() / 1000 * 0.03;
-  for (let i = 0; i < NP; i++) {
-    if (i < visible) { vessel.getPointAt((partOffset[i] + tt) % 1, _p); _m.makeTranslation(_p.x, _p.y, _p.z + 0.02); }
-    else _m.makeScale(0, 0, 0);
-    parts.setMatrixAt(i, _m);
-  }
-  parts.instanceMatrix.needsUpdate = true;
-  if (G < 70) col.setHex(0x60a5fa); else if (G <= 140) col.setHex(0x4ade80); else if (G <= 180) col.setHex(0xfacc15); else col.setHex(0xf97316);
-  parts.material.color.lerp(col, 0.1);
-  // Uyku: yatar; egzersiz: yürür
   const sleeping = minute < sleepUntil;
   const exercising = minute >= exerciseStart && minute < exerciseUntil;
   lie = lerp(lie, sleeping ? 1 : 0, Math.min(1, rdt * 3));
-  body.rotation.z = -lie * Math.PI / 2;
-  body.position.y = -lie * 1.3;
-  bed.visible = lie > 0.5;
-  if (exercising && !sim.paused) walk += rdt * 6;
-  const sw = exercising ? Math.sin(walk) * 0.45 : 0;
-  limbs.lLeg.rotation.x = sw; limbs.rLeg.rotation.x = -sw;
-  limbs.lArm.rotation.x = -sw * 0.8; limbs.rArm.rotation.x = sw * 0.8;
-  const sun = sim.scene.userData.sun;
-  if (sun) sun.intensity = lerp(sun.intensity, sleeping ? 0.5 : 2.2, 0.05);
+  A.update({ G, I: s.I, r: lastRates, sleeping, exercising, dt: rdt, paused: sim.paused, fill: s.gutF[0] + s.gutS[0] });
+  if (G < 70) col.setRGB(1.0, 2.0, 3.6); else if (G <= 140) col.setRGB(3.2, 2.5, 1.2); else if (G <= 180) col.setRGB(3.6, 2.6, 0.6); else col.setRGB(3.8, 1.6, 0.4);
+  A.setGlucoseColor(col);
   bodyLbl.setText(`${fmt(G, 0)} mg/dL${sleeping ? ' · 😴' : exercising ? ' · 🏃' : ''}`);
   bodyLbl.el.style.color = G < 70 ? '#93c5fd' : G <= 140 ? '#86efac' : G <= 180 ? '#fde047' : '#fdba74';
   // İstatistik
@@ -387,3 +299,12 @@ sim.onRender((rdt) => {
 
 sim.onReset(() => restart());
 restart();
+
+// Uyku: ortam ışığı kısılır (stüdyo pozlaması)
+{
+  const baseExp = sim.sky.exposure.bind(sim.sky);
+  let dimK = 1;
+  sim.sky.exposure = () => baseExp() * dimK;
+  sim.onRender(() => { dimK = lerp(dimK, 1 - 0.55 * lie, 0.08); });
+}
+

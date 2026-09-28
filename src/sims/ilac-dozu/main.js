@@ -1,5 +1,6 @@
 // İlaç Dozu ve Yarı Ömür — tek bölmeli farmakokinetik: ağızdan (1. derece emilim), IV bolus ve infüzyon; tedavi penceresi.
-import { createSim, THREE, fmt, clamp, lerp, rand, instanced } from '@core';
+import { createSim, THREE, fmt, clamp } from '@core';
+import { buildClinic } from './clinic.js';
 
 // Temsili ilaçlar (gerçek bir ilaca karşılık gelmez)
 const DRUGS = {
@@ -9,17 +10,20 @@ const DRUGS = {
 };
 
 const sim = createSim({
-  background: 0x0e1422,
-  camera: { position: [1.2, 4.2, 11.5], target: [1.2, 3.3, 0], fov: 45 },
-  controls: { minDistance: 4, maxDistance: 25 },
+  studio: { mood: 'day', color: 0xb4b8b0, warmth: 0.3, key: { el: 34, az: 318, power: 1.6 }, radius: 12, height: 6 },
+  look: { exposure: 0.74 },
+  camera: { position: [-0.62, 1.1, 0.92], target: [0.08, 0.88, -0.16], fov: 38, near: 0.02, far: 60 },
+  controls: { minDistance: 0.35, maxDistance: 3.2, maxPolarAngle: Math.PI * 0.62 },
   info: `
     <p style="border:1px solid #f87171;border-radius:8px;padding:8px"><b>⚠️ Eğitim amaçlıdır.</b> İlaç A/B/C ve tüm değerler
     temsilidir, gerçek bir ilacı anlatmaz. Doz, doz aralığı veya unutulan doz kararı için mutlaka <b>hekim veya eczacıya</b> danış;
     prospektüsteki talimat bu simülasyondan önce gelir.</p>
     <h3>Ne görüyorsun?</h3>
-    <p>Kan damarlarındaki parçacıkların <b>sayısı ve rengi</b> kandaki ilaç derişimini (C) gösterir: gri/mavi = etkisiz düzey,
-    yeşil = <b>tedavi penceresi</b>, kırmızı = toksik düzey. Sağdaki cam sütun aynı derişimi ölçekli gösterir.
-    Ağızdan alınan hap mideye iner, ilaç yavaş yavaş kana <b>emilir</b>; karaciğer ve böbrekler onu sürekli <b>temizler</b>.</p>
+    <p>Bir hastane odasında başucu masası. <b>Hasta monitörü</b> kandaki ilaç derişimini (C) canlı çizer: yeşil bant
+    <b>tedavi penceresi</b>, kırmızı bant toksik bölgedir. Sağ alttaki büyütülmüş <b>kan örneğinde</b> parlayan ilaç parçacıklarının
+    sayısı derişimle artar (gri = etkisiz, yeşil = pencerede, kırmızı = toksik). Ağızdan her dozda blisterden bir kapsül eksilir;
+    ilaç bağırsaktan yavaş yavaş kana <b>emilir</b>, karaciğer ve böbrekler onu sürekli <b>temizler</b>. IV bolusta enjektör
+    boşalır; infüzyonda serumdan sürekli damla düşer ve pompa hızı gösterir.</p>
     <h3>Model</h3>
     <ul>
       <li>Tek bölmeli model: dA<sub>kan</sub>/dt = k<sub>a</sub>·A<sub>mide</sub> − k·A<sub>kan</sub>; C = A<sub>kan</sub> / V<sub>d</sub>.</li>
@@ -64,94 +68,11 @@ function pk() {
 const conc = () => blood / vdSl.value;
 
 // --- Sahne ---
-const floor = new THREE.Mesh(new THREE.CircleGeometry(9, 48), new THREE.MeshStandardMaterial({ color: 0x1a2336, roughness: 0.9 }));
-floor.rotation.x = -Math.PI / 2;
-sim.scene.add(floor);
-const body = new THREE.Group();
-sim.scene.add(body);
-const skin = new THREE.MeshPhongMaterial({ color: 0x9fc5ff, transparent: true, opacity: 0.13, depthWrite: false, shininess: 40 });
-const part = (geo, x, y, z, rz = 0) => { const m = new THREE.Mesh(geo, skin); m.position.set(x, y, z); m.rotation.z = rz; m.renderOrder = 5; body.add(m); return m; };
-part(new THREE.CapsuleGeometry(1.05, 1.7, 8, 24), 0, 3.6, 0);
-part(new THREE.SphereGeometry(0.62, 24, 16), 0, 5.75, 0);
-part(new THREE.CylinderGeometry(0.25, 0.3, 0.5, 16), 0, 5.05, 0);
-part(new THREE.CapsuleGeometry(0.28, 2.1, 6, 12), -1.45, 3.55, 0, -0.18);
-part(new THREE.CapsuleGeometry(0.28, 2.1, 6, 12), 1.45, 3.55, 0, 0.18);
-part(new THREE.CapsuleGeometry(0.36, 2.2, 6, 12), -0.5, 1.2, 0);
-part(new THREE.CapsuleGeometry(0.36, 2.2, 6, 12), 0.5, 1.2, 0);
-body.children.forEach((m) => m.scale.z = 0.7);
-
-const organ = (geo, color, x, y, z) => { const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, roughness: 0.6 })); m.position.set(x, y, z); body.add(m); return m; };
-const heart = organ(new THREE.SphereGeometry(0.28, 20, 14), 0xd4344a, 0.22, 4.3, 0.15);
-const stomach = organ(new THREE.SphereGeometry(0.34, 20, 14), 0xf0a38a, -0.35, 3.45, 0.25);
-stomach.scale.set(1.3, 0.8, 0.8);
-const liver = organ(new THREE.SphereGeometry(0.4, 20, 14), 0x8b3a2b, 0.42, 3.6, 0.1);
-liver.scale.set(1.3, 0.6, 0.8);
-const kidneyMat = new THREE.MeshStandardMaterial({ color: 0xa0453a, roughness: 0.6 });
-const kidneys = [-0.45, 0.45].map((x) => { const m = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), kidneyMat); m.scale.set(0.8, 1.3, 0.8); m.position.set(x, 3.0, -0.3); body.add(m); return m; });
-
-// Damarlar (kalpten çıkıp dönen kapalı döngüler)
-const H = [0.2, 4.3, 0.1];
-const loops = [
-  [H, [0.1, 5.0, 0.15], [0.15, 5.9, 0.2], [-0.15, 6.0, -0.1], [-0.1, 5.0, -0.1], [0, 4.4, -0.05]],
-  [H, [-0.8, 4.6, 0.1], [-1.5, 3.9, 0.1], [-1.75, 2.6, 0.05], [-1.55, 3.6, -0.1], [-0.7, 4.4, -0.1]],
-  [H, [0.9, 4.6, 0.1], [1.55, 3.9, 0.1], [1.75, 2.6, 0.05], [1.5, 3.6, -0.1], [0.7, 4.4, -0.1]],
-  [H, [-0.15, 3.3, 0.1], [-0.5, 1.8, 0.1], [-0.55, 0.2, 0.1], [-0.45, 1.8, -0.1], [-0.1, 3.3, -0.1]],
-  [H, [0.25, 3.3, 0.1], [0.5, 1.8, 0.1], [0.55, 0.2, 0.1], [0.45, 1.8, -0.1], [0.3, 3.3, -0.1]],
-  [H, [0.5, 3.8, 0.15], [0.5, 3.0, -0.25], [-0.5, 3.0, -0.25], [-0.3, 3.8, 0.0]],
-].map((pts) => new THREE.CatmullRomCurve3(pts.map((p) => new THREE.Vector3(...p)), true));
-const vesselMat = new THREE.MeshStandardMaterial({ color: 0x9b1c2c, roughness: 0.5, transparent: true, opacity: 0.55 });
-loops.forEach((c) => body.add(new THREE.Mesh(new THREE.TubeGeometry(c, 90, 0.045, 6, true), vesselMat)));
-const lens = loops.map((c) => c.getLength());
-const totLen = lens.reduce((a, b) => a + b, 0);
-
-const NP = 360;
-const parts = instanced(new THREE.SphereGeometry(0.055, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffffff }), NP);
-body.add(parts);
-const pp = Array.from({ length: NP }, (_, i) => {
-  let r = rand(0, totLen), li = 0;
-  while (r > lens[li] && li < lens.length - 1) { r -= lens[li]; li++; }
-  return { li, u: rand(0, 1), off: new THREE.Vector3(rand(-0.03, 0.03), rand(-0.03, 0.03), rand(-0.03, 0.03)), th: i / NP };
-});
-const dummy = new THREE.Object3D();
-
-// Seviye sütunu (3B ölçek)
-const GX = 3.6, G0 = 0.4, GH = 5.6;
-const gauge = new THREE.Group();
-gauge.position.set(GX, 0, 0);
-sim.scene.add(gauge);
-const gaugeGlass = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, GH, 32, 1, true), new THREE.MeshPhongMaterial({ color: 0xdff3ff, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
-gaugeGlass.position.y = G0 + GH / 2;
-gaugeGlass.renderOrder = 4;
-const gaugeFill = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 1, 32), new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.4, emissive: 0x000000 }));
-const winBand = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.46, 1, 32, 1, true), new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
-const toxBand = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.46, 1, 32, 1, true), new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
-const base = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.7, 0.4, 32), new THREE.MeshStandardMaterial({ color: 0x334155 }));
-base.position.y = 0.2;
-gauge.add(gaugeGlass, gaugeFill, winBand, toxBand, base);
-const lblMtc = sim.label('', { parent: gauge, position: [0.6, 0, 0], className: 'plain' });
-const lblMec = sim.label('', { parent: gauge, position: [0.6, 0, 0], className: 'plain' });
-const lblC = sim.label('', { parent: gauge, position: [0, G0 + GH + 0.45, 0], className: 'big' });
-
-// Hap ve serum torbası
-const pillMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.4 });
-const pills = [];
-function dropPill(big) {
-  const m = new THREE.Mesh(new THREE.CapsuleGeometry(0.09, 0.18, 4, 10), pillMat);
-  m.rotation.z = Math.PI / 2;
-  if (big) m.scale.setScalar(1.4);
-  body.add(m);
-  pills.push({ m, t: 0 });
-}
-const ivGroup = new THREE.Group();
-const bag = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.75, 0.15), new THREE.MeshPhongMaterial({ color: 0xe0f2fe, transparent: true, opacity: 0.7 }));
-bag.position.set(-2.6, 6.2, 0.4);
-const line = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([[-2.6, 5.8, 0.4], [-2.5, 4.6, 0.5], [-2.0, 3.2, 0.35], [-1.75, 2.7, 0.15]].map((p) => new THREE.Vector3(...p))), 30, 0.02, 6), new THREE.MeshBasicMaterial({ color: 0xcbd5e1 }));
-const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 6.6, 8), new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.6 }));
-pole.position.set(-2.9, 3.3, 0.3);
-const dropM = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 6), new THREE.MeshBasicMaterial({ color: 0x7dd3fc }));
-ivGroup.add(bag, line, pole, dropM);
-sim.scene.add(ivGroup);
-const lblState = sim.label('', { position: [0, 7.1, 0], className: 'big' });
+const LOWQ = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+const R = buildClinic(sim, LOWQ);
+const lbls = R.labels.map(([o, pos, t]) => sim.label(t, { parent: o, position: pos, className: 'plain' }));
+const hist = [];
+const HMAX = 240;
 
 // --- Arayüz ---
 const ui = sim.ui;
@@ -205,8 +126,8 @@ function applyDrug() {
 
 function giveDose(D, extra = false) {
   const p = pk();
-  if (route.value === 'oral') { gut += p.f * D; dropPill(D > doseSl.value * 1.01); }
-  else if (route.value === 'iv') blood += D;
+  if (route.value === 'oral') { gut += p.f * D; R.takePill(); }
+  else if (route.value === 'iv') { blood += D; R.pushSyringe(); }
   doseCount++;
   if (!extra) { lastPeak = curPeak; lastTrough = curTrough; curPeak = 0; curTrough = Infinity; }
 }
@@ -229,9 +150,8 @@ function restart() {
   hours = 0; gut = 0; blood = 0; nextDose = 0; skipNext = false; firstDone = false;
   inWin = 0; afterFirst = 0; lastPeak = 0; lastTrough = Infinity; curPeak = 0; curTrough = Infinity; doseCount = 0; missed = 0;
   sim.time = 0; chartAcc = 0;
-  pills.forEach((p) => { p.m.geometry.dispose(); p.m.removeFromParent(); }); pills.length = 0;
+  R.resetPills(); hist.length = 0;
   chart.clear();
-  ivGroup.visible = route.value !== 'oral';
   fSl.disable(route.value !== 'oral');
 }
 
@@ -254,65 +174,39 @@ sim.onUpdate((dt) => {
     if (firstDone || inf) { afterFirst += hs; if (C >= d.mec && C <= d.mtc) inWin += hs; }
     curPeak = Math.max(curPeak, C); curTrough = Math.min(curTrough, C);
     chartAcc += hs;
-    if (chartAcc >= stepH) { chartAcc -= stepH; chart.push([C, d.mec, d.mtc]); }
+    if (chartAcc >= stepH) { chartAcc -= stepH; chart.push([C, d.mec, d.mtc]); hist.push(C); if (hist.length > HMAX) hist.shift(); }
     if (hours >= nextDose - 1e-9) scheduledDose();
   }
 });
 
 // --- Görsel ---
-const col = new THREE.Color(), cLow = new THREE.Color(0x64748b), cOk = new THREE.Color(0x22c55e), cTox = new THREE.Color(0xef4444), cWarn = new THREE.Color(0xf97316);
+const col = new THREE.Color(), cLow = new THREE.Color(0x94a3b8), cOk = new THREE.Color(0x4ade80), cTox = new THREE.Color(0xf87171), cWarn = new THREE.Color(0xfb923c);
 function concColor(C, d, out) {
   if (C < d.mec) return out.copy(cLow).lerp(cOk, clamp(C / d.mec, 0, 1) * 0.35);
   if (C <= d.mtc) return out.copy(cOk);
   return out.copy(cWarn).lerp(cTox, clamp((C - d.mtc) / (d.mtc * 0.3), 0, 1));
 }
-let uiT = 0;
+let uiT = 0, monT = 1, wall = 0, showSample = true;
 sim.onRender((rdt) => {
   const d = drug(), p = pk(), C = conc();
   const top = d.mtc * 1.5;
-  const y = (c) => G0 + GH * clamp(c / top, 0, 1);
-  // Parçacıklar: sayı ∝ derişim
-  const frac = clamp(C / top, 0, 1);
-  concColor(C, d, col);
-  parts.material.color.copy(col);
-  const t = sim.paused ? 0 : rdt;
-  for (let i = 0; i < NP; i++) {
-    const q = pp[i];
-    q.u = (q.u + t * 0.9 / lens[q.li]) % 1;
-    dummy.position.copy(loops[q.li].getPointAt(q.u)).add(q.off);
-    dummy.scale.setScalar(q.th < frac ? 1 : 0.0001);
-    dummy.updateMatrix();
-    parts.setMatrixAt(i, dummy.matrix);
+  wall += sim.paused ? 0 : rdt;
+  R.update(rdt, wall, { infusing: route.value === 'inf', ivMode: route.value !== 'oral' });
+  monT += rdt;
+  if (monT > 0.25) {
+    monT = 0;
+    const zone = C < d.mec ? 'Etkisiz düzey' : C <= d.mtc ? 'Tedavi penceresinde' : 'Toksik bölge!';
+    concColor(C, d, col);
+    R.drawMonitor({
+      drug: d.name.split(' (')[0], time: sim.formatTime(0), top, mec: d.mec, mtc: d.mtc, hist, maxN: HMAX,
+      C: fmt(C, 2), zone, zoneCol: '#' + col.getHexString(), frac: showSample ? C / top : 0, dotCol: '#' + col.getHexString(), t: wall,
+      foot: `t½ ${fmt(p.t12, 1)} sa · CL ${fmt(p.cl, 1)} L/sa · doz ${doseCount} · unutulan ${missed}`,
+    });
+    R.drawPump(route.value === 'inf', fmt(doseSl.value / tauSl.value, 1));
   }
-  parts.instanceMatrix.needsUpdate = true;
-  heart.scale.setScalar(1 + 0.08 * Math.max(0, Math.sin(sim.time * 7)));
-  kidneyMat.color.setHex(0xa0453a).lerp(col.setHex(0x6b7280), 1 - kidney());
-  // Haplar: ağızdan mideye
-  for (let i = pills.length - 1; i >= 0; i--) {
-    const q = pills[i];
-    q.t += t * 0.8;
-    const s = clamp(q.t, 0, 1);
-    q.m.position.set(lerp(0, -0.35, s), lerp(5.55, 3.45, s), lerp(0.7, 0.3, s));
-    if (q.t > 1.6) { q.m.geometry.dispose(); q.m.removeFromParent(); pills.splice(i, 1); }
-  }
-  stomach.material.emissive.setHex(0xf59e0b).multiplyScalar(clamp(gut / (doseSl.value || 1), 0, 1) * 0.6);
-  // Serum damlası
-  if (ivGroup.visible) { const k = (sim.time * 1.5) % 1; dropM.position.set(-2.6, 5.75 - k * 0.4, 0.4); dropM.visible = route.value === 'inf' || k < 0.2; }
-  // Ölçek sütunu
-  const fillH = Math.max(y(C) - G0, 0.001);
-  gaugeFill.scale.y = fillH; gaugeFill.position.y = G0 + fillH / 2;
-  gaugeFill.material.color.copy(concColor(C, d, col));
-  winBand.scale.y = y(d.mtc) - y(d.mec); winBand.position.y = (y(d.mtc) + y(d.mec)) / 2;
-  toxBand.scale.y = y(top) - y(d.mtc); toxBand.position.y = (y(top) + y(d.mtc)) / 2;
-  lblMtc.position.y = y(d.mtc); lblMec.position.y = y(d.mec);
   uiT += rdt;
   if (uiT < 0.2) return;
   uiT = 0;
-  lblMtc.setText(`— toksik eşik ${fmt(d.mtc, 1)}`);
-  lblMec.setText(`— en düşük etkili ${fmt(d.mec, 1)}`);
-  lblC.setText(`${fmt(C, 2)} mg/L`);
-  const zone = C < d.mec ? ['Etkisiz düzey', '#94a3b8'] : C <= d.mtc ? ['Tedavi penceresinde', '#4ade80'] : ['Toksik bölge!', '#f87171'];
-  lblState.setText(`<span style="color:${zone[1]}">${zone[0]}</span>`);
   sC.set(fmt(C, 2), C < d.mec ? 'warn' : C <= d.mtc ? 'good' : 'bad');
   sT12.set(fmt(p.t12, 1), kidney() < 0.6 && d.fr > 0.5 ? 'warn' : '');
   sCL.set(fmt(p.cl, 2));
@@ -327,12 +221,24 @@ sim.onRender((rdt) => {
     Doz sayısı: <b>${doseCount}</b>, unutulan: <b>${missed}</b>. ${route.value === 'inf' ? `İnfüzyon hızı ${fmt(doseSl.value / tauSl.value, 1)} mg/saat.` : `Sonraki doz: ${fmt(Math.max(0, nextDose - hours), 1)} saat sonra.`}`);
 });
 
-sim.onClick([heart, liver, stomach, ...kidneys], (hit) => {
-  const o = hit.object;
-  const msg = o === heart ? 'Kalp: ilacı tüm vücuda dağıtır.' : o === liver ? 'Karaciğer: ilaçların çoğunu metabolize eder (böbrek dışı klerens).'
-    : o === stomach ? 'Mide/bağırsak: hap çözünür, ilaç k<sub>a</sub> hızıyla kana emilir.' : `Böbrek: ilacı idrarla atar. Fonksiyon %${kidneySl.value}.`;
+const O = R.objects;
+sim.onClick([O.monitor, O.bottle, O.blister, O.syringe, O.bag, O.pump], (hit) => {
+  let o = hit.object; const is = (x) => { let q = o; while (q) { if (q === x) return true; q = q.parent; } return false; };
+  const msg = is(O.monitor) ? 'Monitör: kandaki ilaç derişimi C(t); yeşil bant tedavi penceresi.'
+    : is(O.bottle) || is(O.blister) ? 'Ağızdan doz: ilaç bağırsaktan k<sub>a</sub> hızıyla kana emilir; biyoyararlanım F kadarı kana ulaşır.'
+      : is(O.syringe) ? 'IV bolus: dozun tamamı anında kana geçer (F = 1).' : 'IV infüzyon: sabit hızla damla; dalgalanmasız kararlı düzey.';
   sim.toast(msg);
 });
 
+ui.section('Görünüm');
+ui.toggle({ label: 'Monitörde kan örneği', value: true, onChange: (v) => { showSample = v; } });
+ui.toggle({ label: 'Nesne etiketleri', value: true, onChange: (v) => lbls.forEach((l) => { l.visible = v; l.el.style.display = v ? '' : 'none'; }) });
+ui.buttons([
+  { label: 'Genel', onClick: () => sim.moveCamera([-0.62, 1.1, 0.92], [0.08, 0.88, -0.16]) },
+  { label: 'Monitör', onClick: () => sim.moveCamera([-0.3, 1.05, 0.35], [-0.2, 1.0, -0.18]) },
+  { label: 'Haplar', onClick: () => sim.moveCamera([-0.14, 0.95, 0.52], [-0.08, 0.76, 0.16]) },
+]);
+
 sim.onReset(() => restart());
 restart();
+

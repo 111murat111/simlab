@@ -1,5 +1,6 @@
 // Jev ve LLM'ler — karar yarışı: aynı sınıflandırma işini yapan modellerin gecikme ve maliyet karşılaştırması (liste fiyatları).
-import { createSim, THREE, clamp, gauss, fmt, instanced, makeGround } from '@core';
+import { createSim, THREE, clamp, gauss, fmt, instanced, mat, procedural } from '@core';
+import { buildHall, conveyor, scanGate, silo, coinGeometry, toteGeometry } from './hall.js';
 
 // $/1M token (girdi, çıktı). Jev çıktısı ücretsiz.
 const MODELS = [
@@ -25,13 +26,14 @@ const X0 = -8.5, X1 = 8.5, TOWER_X = 11, LANE_W = 2.1;
 const MAX_SLOTS = 8, MAX_COINS = 70, COIN_H = 0.11;
 
 const sim = createSim({
-  background: 0x070b16,
-  camera: { position: [0.9, 29, 22], target: [0.9, 0, 1.4], fov: 45 },
-  controls: { maxPolarAngle: Math.PI / 2.1, minDistance: 8, maxDistance: 110 },
+  sky: { elevation: 58, azimuth: 168, clouds: 0.25, haze: 1, visibility: 20000 },
+  camera: { position: [-1.5, 8.6, 17.5], target: [1.6, 0.6, 0.6], fov: 50, near: 0.05, far: 5000 },
+  controls: { maxPolarAngle: Math.PI / 2.1, minDistance: 4, maxDistance: 19.5 },
+  look: { aoRadius: 0.6, exposure: 1.05 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Yedi şerit, aynı işi yapan yedi modeldir: bir metni okuyup <b>tek bir karar</b> vermek (ör. "bu talep hangi ekibe
-    gitmeli?"). Her küp bir istektir; şeridi geçme süresi modelin yanıt süresidir. Şeritlerin sonundaki jeton kuleleri,
+    gitmeli?"). Sahne bir ayrıştırma salonu: her <b>konveyör bant</b> bir model, bant üzerindeki her renkli <b>kasa</b> bir istektir; bandı geçme süresi modelin yanıt süresidir. Bantların sonundaki cam silolardaki jeton kuleleri,
     seçtiğin günlük hacimde <b>aylık faturayı</b> gösterir (logaritmik: her ~8 jeton 10 kat daha pahalı).</p>
     <p><b>Jev</b> (TypeSafe'in "System One" modeli) metin üretmez; yalnızca <b>seçim</b> (choice), <b>puan</b> (score) ya da
     <b>evet olasılığı</b> (noul) döndürür. Bu yüzden çıktı ücreti yoktur ve çok hızlıdır. Genel amaçlı LLM'ler ise aynı kararı
@@ -71,34 +73,68 @@ const sim = createSim({
 });
 sim.formatTime = (t) => `${fmt(t, 1)} sn`;
 
-// --- Sahne: zemin, şeritler ---
-sim.scene.add(makeGround(46, 0x0e1526, { receiveShadow: false }));
+// --- Sahne: ayrıştırma salonu, konveyör bantlar, tarayıcı kapıları, cam jeton siloları ---
+const TOP = 0.85; // bant üst yüzeyi (m)
+buildHall(sim.scene);
+// Çatı altındaki salon, açık gökyüzünün ortam ışığını tam almaz: iç yüzeylerde ortam yansımasını kıs (tepe lambaları ve
+// ışıklıklardan gelen doğrudan ışık baskın olsun)
+sim.scene.traverse((o) => { for (const m of [].concat(o.material || [])) if (m.isMeshStandardMaterial && !m.userData.envCut) { m.envMapIntensity = (m.envMapIntensity ?? 1) * 0.5; m.userData.envCut = true; } });
 const lanes = MODELS.map((m, i) => {
   const z = (i - (MODELS.length - 1) / 2) * LANE_W;
   const col = new THREE.Color(m.color);
-  const strip = new THREE.Mesh(
-    new THREE.BoxGeometry(X1 - X0 + 1, 0.08, LANE_W * 0.72),
-    new THREE.MeshStandardMaterial({ color: col.clone().multiplyScalar(0.18), roughness: 0.8 }),
-  );
-  strip.position.set((X0 + X1) / 2, 0.04, z);
-  sim.scene.add(strip);
-  const finish = new THREE.Mesh(
-    new THREE.BoxGeometry(0.14, 0.9, LANE_W * 0.8),
-    new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.3, transparent: true, opacity: 0.85 }),
-  );
-  finish.position.set(X1 + 0.3, 0.45, z);
-  sim.scene.add(finish);
-  const name = sim.label('', { position: [X0 - 2.2, 0.5, z], className: 'lane-lbl' });
+  sim.scene.add(conveyor(X0, X1 + 0.6, z, TOP, LANE_W * 0.62, m.color));
+  const gate = scanGate(X1 + 0.3, z, TOP, LANE_W * 0.62, m.color);
+  sim.scene.add(gate.group);
+  const finish = { material: gate.light };
+  sim.scene.add(silo(TOWER_X, z, 0.62, MAX_COINS * COIN_H + 0.6));
+  // zemin: bantlar arası sarı yürüme yolu çizgisi
+  const line = new THREE.Mesh(new THREE.PlaneGeometry(X1 - X0 + 4, 0.1).rotateX(-Math.PI / 2), mat.plastic({ color: 0xd8b21c }));
+  line.position.set((X0 + X1) / 2, 0.004, z + LANE_W / 2); line.receiveShadow = true; line.userData.noFit = true;
+  sim.scene.add(line);
+  const name = sim.label('', { position: [X0 - 2.4, 1.6, z], className: 'lane-lbl' });
   name.el.style.borderColor = m.color;
-  const cost = sim.label('', { position: [TOWER_X + 2.3, 0.3, z] });
+  const cost = sim.label('', { position: [TOWER_X + 1.4, 0.4, z] });
   return { m, z, col, finish, name, cost, flash: 0, slots: [], done: 0, spent: 0, costPer: 0, monthly: 0, coins: 0, coinsShown: 0 };
 });
 
-// İstek küpleri ve jeton kuleleri (tek InstancedMesh'ler)
-const cubes = instanced(new THREE.BoxGeometry(0.42, 0.42, 0.42), new THREE.MeshStandardMaterial({ roughness: 0.35, emissive: 0x111111 }), MODELS.length * MAX_SLOTS);
-const coins = instanced(new THREE.CylinderGeometry(0.55, 0.55, COIN_H * 0.8, 20), new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.7, roughness: 0.3 }), MODELS.length * MAX_COINS);
+// İstek kasaları ve jetonlar (tek InstancedMesh'ler)
+// Plastik sevkiyat kasası: dikey nervürler, üst dudak, kısa yüzlerde kulp oyuğu, uzun yüzde barkod etiketi; üstten iç hacim
+const toteMat = procedural({
+  key: 'jev-tote', bump: 0.003, params: { color: 0xffffff, roughness: 0.5 },
+  pattern: `
+    vec3 a = axisDominant(pn);
+    float side = 1.0 - a.y;
+    float u = a.x > 0.5 ? p.z : p.x;
+    float rib = smoothstep(0.3, 0.45, abs(fract(u/0.045) - 0.5))*side*step(0.03, p.y)*step(p.y, 0.29);
+    float lip = smoothstep(0.29, 0.3, p.y)*side;
+    float handle = step(0.5, a.z)*step(0.235, p.y)*step(p.y, 0.285)*step(abs(p.x), 0.075);
+    float lab = step(0.5, a.x)*step(0.1, p.y)*step(p.y, 0.2)*step(abs(p.z), 0.085);
+    float bars = step(0.5, fract(p.z*260.0 + sin(floor(p.z*130.0)*7.1)*0.4))*step(0.115, p.y)*step(p.y, 0.16)*step(abs(p.z), 0.07);
+    float top = step(0.5, a.y)*step(0.3, p.y);
+    float inner = top*step(abs(p.x), 0.175)*step(abs(p.z), 0.195);
+    col *= 0.9 + 0.1*rib - 0.08*lip;
+    col = mix(col, col*0.28, inner);
+    col = mix(col, vec3(0.03), handle);
+    col = mix(col, mix(vec3(0.86), vec3(0.05), bars), lab);
+    rough = mix(0.45 + 0.1*rib, 0.75, lab + handle);
+    h = rib*0.5 + lip - handle - inner*0.5;`,
+});
+const cubes = instanced(toteGeometry(0.42), toteMat, MODELS.length * MAX_SLOTS);
+const coinMat = procedural({
+  key: 'jev-coin', bump: 0.04, params: { color: 0xd9a93a, roughness: 0.28, metalness: 1 },
+  pattern: `
+    float r = length(p.xz);
+    float n = fbm3(p*6.0 + seed*13.0, 3);
+    float ridge = step(0.53, r)*(0.5 + 0.5*sin(atan(p.z, p.x)*140.0));
+    float ring = smoothstep(0.38, 0.4, r)*(1.0 - smoothstep(0.42, 0.44, r));
+    col *= 0.85 + 0.25*n - 0.1*seed;
+    rough = 0.22 + 0.2*n;
+    h = ridge*0.6 + ring*0.8 + n*0.2;`,
+});
+const coins = instanced(coinGeometry(0.55, COIN_H * 0.8), coinMat, MODELS.length * MAX_COINS);
+cubes.castShadow = coins.castShadow = true;
 sim.scene.add(cubes, coins);
-lanes.forEach((ln, i) => { for (let k = 0; k < MAX_SLOTS; k++) cubes.setColorAt(i * MAX_SLOTS + k, ln.col); });
+lanes.forEach((ln, i) => { for (let k = 0; k < MAX_SLOTS; k++) cubes.setColorAt(i * MAX_SLOTS + k, ln.col.clone().multiplyScalar(0.85)); });
 const tmp = new THREE.Object3D();
 
 // --- Parametreler ---
@@ -220,7 +256,7 @@ sim.onUpdate((dt) => {
 });
 
 // Dar/dikey ekranda kamerayı geri çek ki şeritler kadraja sığsın
-const camBase = sim.camera.position.clone(), camTarget = new THREE.Vector3(0.9, 0, 1.4);
+const camBase = sim.camera.position.clone(), camTarget = new THREE.Vector3(1.6, 0.6, 0.6);
 let lastAspect = 0;
 sim.onRender((realDt) => {
   const a = sim.camera.aspect;
@@ -234,22 +270,22 @@ sim.onRender((realDt) => {
       const s = ln.slots[k];
       if (s) {
         const f = clamp((t - s.t0) / s.dur, 0, 1);
-        tmp.position.set(X0 + (X1 - X0) * f, 0.32, ln.z + (k - (p.conc - 1) / 2) * (LANE_W * 0.55 / Math.max(p.conc, 2)));
+        tmp.position.set(X0 + (X1 - X0) * f, TOP, ln.z + (k - (p.conc - 1) / 2) * (LANE_W * 0.55 / Math.max(p.conc, 2)));
         tmp.scale.setScalar(ln.m.jev ? 0.7 : 1);
-        tmp.rotation.set(0, f * 6, 0);
+        tmp.rotation.set(0, (k % 3 - 1) * 0.12, 0);
       } else tmp.scale.setScalar(0);
       tmp.updateMatrix();
       cubes.setMatrixAt(i * MAX_SLOTS + k, tmp.matrix);
     }
     ln.flash = Math.max(0, ln.flash - realDt * 4);
-    ln.finish.material.emissiveIntensity = 0.25 + ln.flash * 1.2;
+    ln.finish.material.emissiveIntensity = 0.6 + ln.flash * 3.5;
     // kuleler hedef yüksekliğe yumuşakça büyür
     ln.coinsShown += (ln.coins - ln.coinsShown) * Math.min(1, realDt * 6);
     const n = Math.round(ln.coinsShown);
     for (let k = 0; k < MAX_COINS; k++) {
-      if (k < n) { tmp.position.set(TOWER_X + Math.sin(k * 1.7) * 0.05, COIN_H * (k + 0.5), ln.z + Math.cos(k * 2.3) * 0.05); tmp.scale.setScalar(1); }
+      if (k < n) { tmp.position.set(TOWER_X + Math.sin(k * 1.7) * 0.02, 0.3 + COIN_H * (k + 0.5), ln.z + Math.cos(k * 2.3) * 0.02); tmp.scale.setScalar(1); }
       else tmp.scale.setScalar(0);
-      tmp.rotation.set(0, 0, 0);
+      tmp.rotation.set(Math.sin(k * 3.1) * 0.03, k * 0.9, 0);
       tmp.updateMatrix();
       coins.setMatrixAt(ci++, tmp.matrix);
     }

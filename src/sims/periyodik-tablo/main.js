@@ -1,5 +1,5 @@
 // Periyodik Tablo Keşfi — 118 elementli 3B tablo, özelliğe göre yükseklik, elektron dizilimi ve Bohr modeli.
-import { createSim, THREE, RoundedBoxGeometry, fmt, heatColor, textPlane, instanced, pick } from '@core';
+import { createSim, THREE, RoundedBoxGeometry, fmt, heatColor, textPlane, instanced, pick, mat, procedural, textTexture, BufferGeometryUtils } from '@core';
 import { ELEMENTS, CATS, NOTES, categoryOf, stateOf, isRadioactive } from './data.js';
 
 const N = ELEMENTS.length;
@@ -9,9 +9,10 @@ const MAXH = 4.2;
 const BASEH = 0.22;
 
 const sim = createSim({
-  background: 0x080d1a,
-  camera: { position: [0, 13.2, 12.4], target: [0, 0.4, 0.4], fov: 45 },
-  controls: { minDistance: 5, maxDistance: 40 },
+  studio: { color: 0x3b3f46, mood: 'day', warmth: 0.25, key: { el: 62, az: 28, power: 1.1 }, fill: 0.9, radius: 30, height: 18 },
+  camera: { position: [0, 1.96, 1.47], target: [0, 1.04, 0.04], fov: 48, near: 0.02, far: 200 },
+  controls: { minDistance: 0.5, maxDistance: 4.5 },
+  look: { aoRadius: 0.06 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Bilinen 118 elementin tamamı, atom numarasına göre sıralanmış standart düzende. Aynı <b>sütundaki (grup)</b> elementlerin
@@ -109,34 +110,126 @@ for (let i = 0; i < COUNT; i++) {
   X[i] = posX(t.col); Zp[i] = posZ(t.row);
 }
 
-// --- Sahne ---
+// --- Sahne: müze salonu; ahşap kaide üstünde cam vitrin, içinde element karoları (1 model birimi = 10 cm) ---
+const K = 0.1, BY = 0.98; // ölçek ve vitrin tabanı yüksekliği (m)
+const PT = new THREE.Group();
+PT.scale.setScalar(K); PT.position.set(0, BY, 0);
+sim.scene.add(PT);
+if (sim.stage?.mesh) sim.stage.mesh.visible = false;
 {
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.MeshStandardMaterial({ color: 0x0d1424, roughness: 1 }));
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = -0.01;
-  sim.scene.add(floor);
-  const plate = new THREE.Mesh(new RoundedBoxGeometry(19.4, 0.1, 11.4, 2, 0.05), new THREE.MeshStandardMaterial({ color: 0x131c30, roughness: 0.8 }));
-  plate.position.set(0, -0.05, 0.35);
-  sim.scene.add(plate);
-  // Grup ve periyot numaraları
+  const scene = sim.scene;
+  const add = (o, cast = true) => { o.castShadow = cast; o.receiveShadow = true; o.userData.noFit = true; scene.add(o); return o; };
+  const WZ = -1.6; // arka duvar
+  // meşe parke (uzun tahta; halka deseni tahta boyunca)
+  const planks = [];
+  for (let i = 0; i < 40; i++) planks.push(new THREE.BoxGeometry(0.18, 2.4, 0.02).translate(-3.6 + i * 0.18, 0, 0).toNonIndexed());
+  const floorG = BufferGeometryUtils.mergeGeometries(planks);
+  const floorM = mat.wood({ color: 0x6b4a30, varnish: 0.6, scale: 1.4 });
+  for (let r = -1; r <= 3; r++) { const f = add(new THREE.Mesh(floorG, floorM), false); f.rotation.x = -Math.PI / 2; f.position.set(0, 0, WZ + 1.2 + r * 2.4); f.userData.noCast = true; }
+  // duvarlar: koyu antrasit sıva
+  const plaster = procedural({ key: 'pt-plaster', bump: 0.01, params: { color: 0x474c53, roughness: 0.92 },
+    pattern: `float n = fbm3(p*2.0, 4); col *= 0.9 + 0.18*n; h = n;` });
+  add(new THREE.Mesh(new THREE.BoxGeometry(7.2, 3.6, 0.1).translate(0, 1.8, WZ - 0.05), plaster), false);
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.1, 3.6, 12).translate(-3.6, 1.8, WZ + 6), plaster), false);
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.1, 3.6, 12).translate(3.6, 1.8, WZ + 6), plaster), false);
+  const skirting = mat.paintedMetal({ color: 0x1c1f23, wear: 0.05 });
+  add(new THREE.Mesh(new THREE.BoxGeometry(7.2, 0.1, 0.02).translate(0, 0.05, WZ + 0.01), skirting), false);
+  const printed = (tex, h) => new THREE.Mesh(new THREE.PlaneGeometry(h * tex.image.width / tex.image.height, h), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.8, transparent: true }));
+  const title = printed(textTexture('ELEMENTLERİN PERİYODİK TABLOSU', { color: '#e8dcc0', size: 64, font: '600 64px Georgia, serif' }), 0.16);
+  title.position.set(0, 1.74, WZ + 0.01); scene.add(title);
+  const sub = printed(textTexture('Mendeleyev, 1869 · bugün 118 element', { color: '#b9ad94', size: 40, font: 'italic 40px Georgia, serif' }), 0.075);
+  sub.position.set(0, 1.6, WZ + 0.01); scene.add(sub);
+
+  // Duvar vitrini: ceviz alt dolap, arkadan aydınlatılmış raflarda element örnekleri (cam kavanozlar)
+  const walnutC = mat.wood({ color: 0x4a3222, varnish: 0.7, scale: 1.2 });
+  const VW = 3.4, VD = 0.34, V0 = 0.72, V1 = 1.42, vz = WZ + VD / 2;
+  add(new THREE.Mesh(new RoundedBoxGeometry(VW, V0, VD, 2, 0.01).translate(0, V0 / 2, vz), walnutC));
+  for (let i = 0; i < 4; i++) {   // kapak çizgileri + kulplar
+    const x = -VW / 2 + VW / 8 + i * VW / 4;
+    add(new THREE.Mesh(new RoundedBoxGeometry(VW / 4 - 0.02, V0 - 0.16, 0.02, 2, 0.006).translate(x, V0 / 2 + 0.03, vz + VD / 2 + 0.005), walnutC), false);
+    add(new THREE.Mesh(new RoundedBoxGeometry(0.12, 0.014, 0.02, 2, 0.005).translate(x, V0 - 0.1, vz + VD / 2 + 0.02), mat.brushedMetal({ color: 0xb58c4e, rough: 0.35 })), false);
+  }
+  const back = procedural({ key: 'pt-velvet', bump: 0.004, params: { color: 0x1b2433, roughness: 0.95 },
+    pattern: `float n = fbm3(p*3.0, 3); col *= 0.88 + 0.16*n; h = n;` });
+  add(new THREE.Mesh(new THREE.BoxGeometry(VW - 0.04, V1 - V0, 0.02).translate(0, (V0 + V1) / 2, WZ + 0.01), back), false);
+  for (const sx of [-1, 1]) add(new THREE.Mesh(new RoundedBoxGeometry(0.04, V1 - V0 + 0.02, VD, 1, 0.008).translate(sx * (VW / 2 - 0.02), (V0 + V1) / 2, vz), walnutC));
+  add(new THREE.Mesh(new RoundedBoxGeometry(VW + 0.06, 0.07, VD + 0.04, 2, 0.012).translate(0, V1 + 0.035, vz + 0.01), walnutC));
+  // tepe LED şeridi (parlar) + iki sıcak nokta ışık
+  const led = new THREE.Mesh(new THREE.BoxGeometry(VW - 0.1, 0.012, 0.02).translate(0, V1 - 0.008, vz + VD / 2 - 0.05), mat.glow({ color: 0xffe2b0, intensity: 3.5 }));
+  led.userData.noCast = true; scene.add(led);
+  for (const x of [-0.9, 0.9]) { const L = new THREE.PointLight(0xffd9a8, 2.0, 2.4, 2); L.position.set(x, V1 - 0.06, vz + 0.1); scene.add(L); }
+  // cam raf
+  const shelfGlass = new THREE.MeshPhysicalMaterial({ color: 0xcfe6e8, roughness: 0.08, transparent: true, opacity: 0.35, metalness: 0 });
+  const shelfY = [V0 + 0.012, V0 + 0.35];
+  const sh = add(new THREE.Mesh(new RoundedBoxGeometry(VW - 0.08, 0.012, VD - 0.04, 1, 0.003).translate(0, shelfY[1], vz), shelfGlass), false);
+  sh.userData.noCast = true;
+  add(new THREE.Mesh(new RoundedBoxGeometry(VW - 0.06, 0.02, VD, 1, 0.004).translate(0, V0 + 0.01, vz), back), false);
+  // örnekler: [sembol, içerik rengi, metal mi, biçim]  (biçim: 0 külçe, 1 toz, 2 sıvı)
+  const samples = [['Cu', 0xc9784a, 1, 0], ['S', 0xe8d23a, 0, 1], ['C', 0x1c1c1e, 0, 0], ['Fe', 0x8d9096, 1, 0], ['Au', 0xe0b04a, 1, 0], ['Bi', 0xc8b8c8, 1, 0], ['I', 0x3b2a4a, 1, 0],
+    ['Br', 0x8a2a10, 0, 2], ['Mg', 0xd9dde2, 1, 0], ['Si', 0x6f7784, 1, 0], ['P', 0xb3261e, 0, 1], ['Zn', 0xb9c0c8, 1, 0], ['Ag', 0xe4e6e8, 1, 0], ['Pb', 0x6d7178, 1, 0]];
+  const jarGeo = new THREE.LatheGeometry([[0, 0], [0.034, 0], [0.036, 0.004], [0.036, 0.085], [0.03, 0.095], [0.026, 0.1], [0.026, 0.11], [0, 0.11]].map(([r, y]) => new THREE.Vector2(r, y)), 32);
+  const jarMat = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.05, transmission: 1, thickness: 0.004, ior: 1.5, transparent: false });
+  const capMat = mat.plastic({ color: 0x15171b, gloss: 0.6 });
+  const capGeo = new THREE.CylinderGeometry(0.028, 0.028, 0.02, 24);
+  const lumpGeo = new THREE.IcosahedronGeometry(0.02, 1);
+  { const pa = lumpGeo.attributes.position; for (let i = 0; i < pa.count; i++) { const k = 0.75 + 0.5 * Math.abs(Math.sin(i * 12.9898) * 0.5); pa.setXYZ(i, pa.getX(i) * k, pa.getY(i) * k * 0.8, pa.getZ(i) * k); } lumpGeo.computeVertexNormals(); }
+  const pileGeo = new THREE.SphereGeometry(0.032, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2).scale(1, 0.55, 1);
+  const liqGeo = new THREE.CylinderGeometry(0.033, 0.033, 0.05, 24).translate(0, 0.029, 0);
+  samples.forEach(([sym, color, metal, kind], i) => {
+    const row = i < 7 ? 1 : 0, k = i % 7;
+    const x = -VW / 2 + 0.35 + k * ((VW - 0.7) / 6), y = shelfY[row] + 0.006, z = vz - 0.02;
+    const jar = new THREE.Mesh(jarGeo, jarMat); jar.position.set(x, y, z); jar.userData.noCast = true; scene.add(jar);
+    const cap = add(new THREE.Mesh(capGeo, capMat)); cap.position.set(x, y + 0.12, z);
+    const m = metal ? mat.brushedMetal({ color, rough: 0.35 }) : mat.plastic({ color, gloss: kind === 2 ? 1 : 0.1 });
+    if (kind === 0) for (let j = 0; j < 3; j++) { const l = add(new THREE.Mesh(lumpGeo, m)); l.position.set(x + (j - 1) * 0.016, y + 0.014 + (j === 1 ? 0.012 : 0), z + (j % 2) * 0.01); l.rotation.set(j, j * 2.1, i); l.scale.setScalar(0.8 + 0.25 * ((i + j) % 3) / 2); }
+    else if (kind === 1) { const pl = add(new THREE.Mesh(pileGeo, m)); pl.position.set(x, y + 0.003, z); }
+    else { const lq = new THREE.Mesh(liqGeo, mat.liquid({ color, density: 0.02 })); lq.position.set(x, y, z); lq.userData.noCast = true; scene.add(lq); }
+    const card = printed(textTexture(sym, { color: '#2a2a2a', size: 48, font: '700 48px Georgia, serif', bg: '#efe8d8', pad: 10 }), 0.035);
+    card.position.set(x, y + 0.02, z + 0.07); card.rotation.x = -0.35; scene.add(card);
+  });
+  const frontGlass = new THREE.MeshPhysicalMaterial({ color: 0xe8f0f2, roughness: 0.05, transparent: true, opacity: 0.06, depthWrite: false, envMapIntensity: 0.3 });
+  const fg = new THREE.Mesh(new THREE.PlaneGeometry(VW - 0.08, V1 - V0 - 0.02), frontGlass); fg.position.set(0, (V0 + V1) / 2, vz + VD / 2 - 0.01); fg.userData.noCast = true; scene.add(fg);
+
+  // kaide: ahşap kaplama gövde, siyah süpürgelik, pirinç kenar; üstte koyu mat deri kaplı sergi yüzeyi
+  const walnut = mat.wood({ color: 0x4a3222, varnish: 0.7, scale: 1.2 });
+  add(new THREE.Mesh(new RoundedBoxGeometry(2.2, BY - 0.06, 1.4, 2, 0.012).translate(0, (BY - 0.06) / 2 + 0.04, 0.035), walnut));
+  add(new THREE.Mesh(new RoundedBoxGeometry(2.16, 0.05, 1.36, 1, 0.01).translate(0, 0.025, 0.035), skirting), false);
+  add(new THREE.Mesh(new RoundedBoxGeometry(2.24, 0.03, 1.44, 1, 0.01).translate(0, BY - 0.035, 0.035), mat.brushedMetal({ color: 0x6f5a3a, rough: 0.68 })));   // patinalı bronz: pürüzlü, softbox'ı yansıtıp patlamasın
+  const leather = procedural({ key: 'pt-leather', bump: 0.006, params: { color: 0x1d2330, roughness: 0.78 },
+    pattern: `float n = fbm3(p*2.5, 3), g = cells3(p*60.0);
+      col *= 0.9 + 0.14*n;
+      rough = 0.72 + 0.12*n;
+      h = n*0.4 + smoothstep(0.0, 0.5, g)*0.2;` });
+  add(new THREE.Mesh(new RoundedBoxGeometry(2.08, 0.02, 1.28, 1, 0.005).translate(0, BY - 0.012, 0.035), leather), false);
+  // Grup ve periyot numaraları (deri üzerine basılı)
   const top = { 1: 1, 2: 2, 13: 2, 14: 2, 15: 2, 16: 2, 17: 2, 18: 1 };
+  const lit = (m) => { const t = m.material.map; m.material = new THREE.MeshStandardMaterial({ map: t, transparent: true, roughness: 0.9 }); return m; };
   for (let g = 1; g <= 18; g++) {
-    const m = textPlane(String(g), 0.36, { color: '#7c8aa5', size: 44 });
+    const m = lit(textPlane(String(g), 0.36, { color: '#b9a57a', size: 44 }));
     m.rotation.x = -Math.PI / 2;
     m.position.set(posX(g), 0.02, posZ(top[g] || 4) - 0.78);
-    sim.scene.add(m);
+    PT.add(m);
   }
   for (let p = 1; p <= 7; p++) {
-    const m = textPlane(String(p), 0.36, { color: '#7c8aa5', size: 44 });
+    const m = lit(textPlane(String(p), 0.36, { color: '#b9a57a', size: 44 }));
     m.rotation.x = -Math.PI / 2;
     m.position.set(posX(1) - 0.8, 0.02, posZ(p));
-    sim.scene.add(m);
+    PT.add(m);
   }
 }
 
-const tiles = instanced(new RoundedBoxGeometry(TILE, 1, TILE, 2, 0.05), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, metalness: 0.05 }), COUNT);
-tiles.frustumCulled = false;
-sim.scene.add(tiles);
+// karolar: sırlı seramik (parlak sır, ince çatlak dokusu)
+const tileMat = procedural({ key: 'pt-tile', physical: true, bump: 0.004,
+  params: { color: 0xffffff, roughness: 0.4, metalness: 0.0, clearcoat: 0.7, clearcoatRoughness: 0.14 },
+  pattern: `
+    float n = fbm3(p*3.0 + seed*9.0, 3), sp = vn3(p*40.0);
+    col *= 0.93 + 0.08*n + 0.03*(seed - 0.5);
+    col *= 1.0 - 0.12*smoothstep(0.72, 0.9, sp);
+    rough = 0.34 + 0.12*n;
+    h = n*0.5 + sp*0.2;` });
+const tiles = instanced(new RoundedBoxGeometry(TILE, 1, TILE, 3, 0.06), tileMat, COUNT);
+tiles.frustumCulled = false; tiles.castShadow = tiles.receiveShadow = true;
+PT.add(tiles);
 
 // Etiket atlası: her element için bir hücre (numara, sembol, alt satır)
 const AC = 16, AR = 8, CELL = 128;
@@ -152,7 +245,7 @@ function drawAtlas(mode) {
   actx.lineJoin = 'round';
   const txt = (s, x, y, size, weight = 700) => {
     actx.font = `${weight} ${size}px system-ui, sans-serif`;
-    actx.lineWidth = Math.max(3, size * 0.14);
+    actx.lineWidth = Math.max(2, size * 0.08);
     actx.strokeStyle = 'rgba(8,12,24,.85)';
     actx.strokeText(s, x, y);
     actx.fillStyle = '#fff';
@@ -196,28 +289,29 @@ labelGeo.setAttribute('position', new THREE.BufferAttribute(lpos, 3).setUsage(TH
 labelGeo.setAttribute('uv', new THREE.BufferAttribute(luv, 2));
 labelGeo.setAttribute('color', new THREE.BufferAttribute(lcol, 3));
 labelGeo.setIndex(lidx);
-const labels = new THREE.Mesh(labelGeo, new THREE.MeshBasicMaterial({
-  map: atlasTex, transparent: true, depthWrite: false, vertexColors: true, toneMapped: false, side: THREE.DoubleSide,
+const labels = new THREE.Mesh(labelGeo, new THREE.MeshStandardMaterial({
+  map: atlasTex, transparent: true, depthWrite: false, vertexColors: true, side: THREE.DoubleSide, roughness: 0.5,
   polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
 }));
 labels.frustumCulled = false;
-labels.renderOrder = 2;
-sim.scene.add(labels);
+labels.renderOrder = 2; labels.userData.noCast = true;
+PT.add(labels);
 
 // Seçim çerçevesi
 const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(TILE + 0.08, 1, TILE + 0.08)),
   new THREE.LineBasicMaterial({ color: 0xffffff, toneMapped: false }));
-sim.scene.add(outline);
+PT.add(outline);
 
 // Üzerine gelinen element etiketi
-const hoverLbl = sim.label('', { position: [0, 0, 0] });
+const hoverLbl = sim.label('', { parent: PT, position: [0, 0, 0] });
 hoverLbl.visible = false;
 
 // --- Bohr modeli (tablonun üstündeki boş alanda) ---
 const bohr = new THREE.Group();
 bohr.position.set(posX(7.5), 2.7, posZ(2) - 0.4);
-sim.scene.add(bohr);
-const nucleus = new THREE.Mesh(new THREE.SphereGeometry(0.3, 32, 20), new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.4, emissive: 0x3a0a0a }));
+PT.add(bohr);
+// Bohr modeli: cam kürecik çekirdek, ince ışık halkaları ve parlayan elektronlar (vitrin içinde asılı veri katmanı)
+const nucleus = new THREE.Mesh(new THREE.SphereGeometry(0.3, 32, 20), new THREE.MeshPhysicalMaterial({ color: 0xd63a2f, roughness: 0.2, clearcoat: 1, emissive: 0x3a0a0a }));
 bohr.add(nucleus);
 const rings = [];
 {
@@ -230,7 +324,7 @@ const rings = [];
     rings.push(l);
   }
 }
-const electrons = instanced(new THREE.SphereGeometry(0.075, 12, 8), new THREE.MeshBasicMaterial({ color: 0x7dd3fc, toneMapped: false }), N);
+const electrons = instanced(new THREE.SphereGeometry(0.075, 12, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(0.9, 2.2, 3.2) }), N);
 electrons.frustumCulled = false;
 bohr.add(electrons);
 const bohrLbl = sim.label('', { parent: bohr, position: [0, -2.35, 0], className: 'big' });
@@ -312,9 +406,12 @@ function refresh() {
       _c.set(colorMode === 'kategori' ? CATS[hd.cat].color : colorMode === 'blok' ? BLOCK_C.f : '#475569');
     }
     tgt[i] = h;
+    _c.multiplyScalar(0.86);
     if (!on) _c.multiplyScalar(0.22);
     tiles.setColorAt(i, _c);
-    const d = on ? 1 : 0.28;
+    // basılı yazı: açık karoda koyu mürekkep, koyu karoda beyaz
+    const lum = 0.2126 * _c.r + 0.7152 * _c.g + 0.0722 * _c.b;
+    const d = lum > 0.16 ? 0.07 : on ? 1 : 0.3;
     for (let k = 0; k < 4; k++) lcol.set([d, d, d], (i * 4 + k) * 3);
   }
   tiles.instanceColor.needsUpdate = true;
@@ -603,12 +700,13 @@ let userMoved = false, lastAspect = 0;
 sim.controls.addEventListener('start', () => { userMoved = true; });
 function fitCamera() {
   const cam = sim.camera, flat = heightMode === 'duz';
-  const dir = flat ? [0, 13.2, 12] : [0, 11.5, 14.5];
+  const dir = flat ? [0, 9, 14] : [0, 8.6, 14.6];
   const len = Math.hypot(...dir);
   const tanH = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) * cam.aspect;
   const d = Math.max(flat ? 17 : 19, (10.4 * 1.08) / tanH);
   const ty = flat ? 0.6 : 1.4;
-  sim.moveCamera([0, ty + (dir[1] / len) * d, 0.4 + (dir[2] / len) * d], [0, ty, 0.4]);
+  // model birimleri → metre (vitrin grubu ölçeği)
+  sim.moveCamera([0, BY + K * (ty + (dir[1] / len) * d), K * (0.4 + (dir[2] / len) * d)], [0, BY + K * ty, K * 0.4]);
   lastAspect = cam.aspect;
 }
 sim.onRender(() => { if (!userMoved && Math.abs(sim.camera.aspect - lastAspect) > 0.01) fitCamera(); });

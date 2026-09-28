@@ -1,11 +1,15 @@
 // Işık ve Optik — ince mercek (1/f = 1/do + 1/di), prizmada Snell + Cauchy dağılımı, yağmur damlasında gökkuşağı ve göz kusurları.
-import { createSim, THREE, fmt, clamp } from '@core';
+import { createSim, THREE, fmt, clamp, mat, RoundedBoxGeometry } from '@core';
+import { opticsRoom, opticalTable, postMount, laserHead, mirrorMount, glowBeam, glowSprite, dustMotes, hardboardMat, OM } from './optlab.js';
 
+// Gerçek ölçek: SC = 0,32 birim/cm → 1 birim = 3,125 cm (U). Düzenekler optik masada; optik eksen masadan 20 cm yukarıda.
+const U = 0.03125, BENCH = 0.85, FLOOR = -6.475, AXIS_Y = BENCH - FLOOR * U;
+const W = (p) => [p[0] * U, AXIS_Y + p[1] * U, p[2] * U];   // içerik birimi → dünya (m)
 const sim = createSim({
-  background: 0x04060c,
-  camera: { position: [0, 1.5, 30], target: [0, 0.5, 0], fov: 45 },
-  controls: { minDistance: 6, maxDistance: 90, maxPolarAngle: Math.PI * 0.85 },
-  lights: false,
+  studio: { color: 0xb8bbb8, mood: 'day', warmth: 0.12, key: { el: 58, az: 158 }, radius: 22 },
+  look: { aoRadius: 0.04, exposure: 0.78 },
+  camera: { position: W([9, 14, 54]), target: W([2, -1, -3]), fov: 48, near: 0.01, far: 100 },
+  controls: { minDistance: 6 * U, maxDistance: 110 * U, maxPolarAngle: Math.PI * 0.62 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Dört optik düzenek: <b>Mercek</b> (ince mercek denklemi <b>1/f = 1/d<sub>o</sub> + 1/d<sub>i</sub></b>,
@@ -46,13 +50,13 @@ class Rays {
       return m;
     };
     this.core = mk(1); this.halo = mk(0.3);
-    this.max = max; this.r = r; this.n = 0;
+    this.max = max; this.r = r; this.n = 0; this.segs = [];
     this.group = new THREE.Group();
     this.group.add(this.halo, this.core);
     this._m = new THREE.Matrix4(); this._q = new THREE.Quaternion(); this._p = new THREE.Vector3();
     this._s = new THREE.Vector3(); this._d = new THREE.Vector3(); this._c = new THREE.Color();
   }
-  begin() { this.n = 0; }
+  begin() { this.n = 0; this.segs.length = 0; }
   seg(a, b, color, { dash = false, alpha = 1, w = 1 } = {}) {
     const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
     if (!(len > 1e-4) || !isFinite(len)) return;
@@ -78,6 +82,7 @@ class Rays {
     this._s.set(r * 3.2, len, r * 3.2);
     this._m.compose(this._p, this._q, this._s);
     this.halo.setMatrixAt(this.n, this._m); this.halo.setColorAt(this.n, this._c);
+    this.segs.push([x0, y0, x1, y1, this._c.r, this._c.g, this._c.b]);   // havadaki toz aydınlatması için
     this.n++;
   }
   end() {
@@ -124,28 +129,91 @@ function refract(d, n, eta) {
 const reflect = (d, n) => { const k = 2 * (d[0] * n[0] + d[1] * n[1]); return [d[0] - k * n[0], d[1] - k * n[1]]; };
 const add = (p, d, t) => [p[0] + d[0] * t, p[1] + d[1] * t];
 const deg = (r) => (r * 180) / Math.PI;
+const V2s = (a) => a.map(([x, y]) => new THREE.Vector2(x, y));
 const rad = (d) => (d * Math.PI) / 180;
 
-sim.scene.add(new THREE.HemisphereLight(0xc8d6ff, 0x1a1f2b, 1.3));
-const dir = new THREE.DirectionalLight(0xffffff, 1.6);
-dir.position.set(5, 10, 12);
-sim.scene.add(dir);
-
-// Yıldızsı toz arka plan
+// --- Optik laboratuvarı: boyalı oda, titreşim yalıtımlı optik masa (M6 delik ızgarası), ışınların arkasında siyah perde levha,
+// sağ arkada ayrı bir He-Ne lazer düzeneği; havadaki toz ışınların içinden geçerken parlar ---
+const TABLE_Z = -0.1;
+const lab = opticsRoom(sim.scene, {
+  bench: BENCH, tableZ: TABLE_Z, back: -1.35,
+  board: { x: -0.55, lines: [['1/f = 1/dₒ + 1/dᵢ', '#1d4ed8', 60], ['m = −dᵢ / dₒ', '#b91c1c', 52], ['n₁·sin θ₁ = n₂·sin θ₂', '#111', 50]],
+    sketch: (c, Wc, Hc) => {
+      c.strokeStyle = '#1d4ed8'; c.lineWidth = 5; c.beginPath(); c.moveTo(560, Hc * 0.5); c.lineTo(860, Hc * 0.5); c.stroke();
+      c.beginPath(); c.ellipse(710, Hc * 0.5, 16, 110, 0, 0, Math.PI * 2); c.stroke();
+      c.strokeStyle = '#b91c1c'; c.lineWidth = 4; c.beginPath(); c.moveTo(590, Hc * 0.5 - 70); c.lineTo(710, Hc * 0.5 - 70); c.lineTo(840, Hc * 0.5 + 60); c.stroke();
+    } },
+});
+opticalTable(sim.scene, { top: BENCH, z: TABLE_Z });
 {
-  const n = 900, pos = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) pos.set([(Math.random() - 0.5) * 220, (Math.random() - 0.5) * 140, -40 - Math.random() * 60], i * 3);
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  sim.scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x51607f, size: 1.5, sizeAttenuation: false })));
+  // Siyah perde levha (ışın diyagramı koyu fonda okunsun): iki taban kıskacı ve arkadan direkler
+  const board = new THREE.Mesh(new RoundedBoxGeometry(1.44, 0.6, 0.006, 2, 0.002), hardboardMat());
+  board.position.set(0, BENCH + 0.3, -0.3);
+  sim.scene.add(board);
+  for (const x of [-0.6, 0.6]) {
+    const cl = new THREE.Mesh(new RoundedBoxGeometry(0.05, 0.03, 0.04, 2, 0.005), OM.anod);
+    cl.position.set(x, BENCH + 0.015, -0.3); sim.scene.add(cl);
+    const pm = postMount(0.52); pm.position.set(x, BENCH, -0.33); sim.scene.add(pm);
+  }
+  // Ayrı düzenek: He-Ne lazer → iris → ayna → ışın tutucu (görünür kırmızı ışın)
+  const AX = BENCH + 0.1, LX = 0.95;
+  const laser = laserHead({ len: 0.3, axisH: 0.1 });
+  laser.rotation.y = -Math.PI / 2; laser.position.set(LX, AX, -0.26); sim.scene.add(laser);
+  const iris = new THREE.Group();
+  iris.add(new THREE.Mesh(new THREE.TorusGeometry(0.016, 0.006, 10, 32), OM.anod));
+  const lever = new THREE.Mesh(new RoundedBoxGeometry(0.004, 0.018, 0.003, 1, 0.001), OM.steel); lever.position.set(0.016, 0.014, 0); iris.add(lever);
+  const ipm = postMount(0.1 - 0.022); ipm.position.y = -0.1; iris.add(ipm);
+  iris.position.set(LX, AX, -0.04); sim.scene.add(iris);
+  const mir = mirrorMount(0.1); mir.rotation.y = Math.PI * 0.75; mir.position.set(LX, AX, 0.12); sim.scene.add(mir);
+  const dump = new THREE.Group();
+  for (let i = 0; i < 6; i++) { const f = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.003, 28).rotateZ(Math.PI / 2), OM.anod); f.position.x = -i * 0.006; dump.add(f); }
+  dump.add(new THREE.Mesh(new THREE.CylinderGeometry(0.013, 0.013, 0.036, 24).rotateZ(Math.PI / 2), OM.anod));
+  const dpm = postMount(0.08); dpm.position.y = -0.1; dump.add(dpm);
+  dump.position.set(LX - 0.19, AX, 0.12); sim.scene.add(dump);
+  const b1 = glowBeam(0xff2a1a, 0.0009), b2 = glowBeam(0xff2a1a, 0.0009);
+  b1.userData.set(new THREE.Vector3(LX, AX, -0.255), new THREE.Vector3(LX, AX, 0.12));
+  b2.userData.set(new THREE.Vector3(LX, AX, 0.12), new THREE.Vector3(LX - 0.175, AX, 0.12));
+  sim.scene.add(b1, b2);
+  const spot = glowSprite(0xff3322, 0.03); spot.position.set(LX, AX, 0.12); sim.scene.add(spot);
+  const spot2 = glowSprite(0xff3322, 0.022); spot2.position.set(LX, AX, -0.25); sim.scene.add(spot2);
+  // Masada dağınık parçalar: yedek direkler, mercek kutusu
+  for (let i = 0; i < 3; i++) {
+    const r = new THREE.Mesh(new THREE.CylinderGeometry(0.00635, 0.00635, 0.1, 16).rotateZ(Math.PI / 2), OM.steel);
+    r.position.set(-0.95 + i * 0.02, BENCH + 0.0064, 0.3 + i * 0.03); r.rotation.y = 0.3 + i * 0.2; sim.scene.add(r);
+  }
+  const boxM = mat.plastic({ color: 0x2b4c7e, gloss: 0.3 });
+  const bx = new THREE.Mesh(new RoundedBoxGeometry(0.14, 0.04, 0.1, 2, 0.006), boxM); bx.position.set(-0.98, BENCH + 0.02, 0.1); bx.rotation.y = 0.25; sim.scene.add(bx);
+  const lid = new THREE.Mesh(new RoundedBoxGeometry(0.142, 0.006, 0.102, 2, 0.002), mat.plastic({ color: 0xe8e8e4, gloss: 0.3 })); lid.position.set(-0.98, BENCH + 0.043, 0.1); lid.rotation.y = 0.25; sim.scene.add(lid);
+}
+const content = new THREE.Group();
+content.position.set(0, AXIS_Y, 0);
+content.scale.setScalar(U);
+sim.scene.add(content);
+const M = {
+  alu: mat.brushedMetal({ color: 0xb9bdc2, rough: 0.3, scale: U }),
+  steel: mat.brushedMetal({ color: 0xd4d7db, rough: 0.2, scale: U }),
+  anod: mat.paintedMetal({ color: 0x1b1d21, wear: 0.05, scale: U }),
+  white: mat.plastic({ color: 0xf1f1ee, gloss: 0.05, scale: U }),
+};
+// Direk + taşıyıcı: masadan yüksekliğe kadar paslanmaz direk ve siyah eloksallı taban
+function post(x, yTop, z = 0, parent = content) {
+  const g = postMount((yTop - FLOOR) * U);   // metre ölçekli direk + tutucu + çatal
+  g.scale.setScalar(1 / U);
+  g.position.set(x, FLOOR, z);
+  parent.add(g);
+  return g;
 }
 
 const rays = new Rays(1400, 0.06);
-sim.scene.add(rays.group);
+content.add(rays.group);
 
-const glassMat = new THREE.MeshStandardMaterial({ color: 0x9fdcff, transparent: true, opacity: 0.28, roughness: 0.1, metalness: 0.1,
-  depthWrite: false, side: THREE.DoubleSide, emissive: 0x0b2a44 });
-const edgeMat = new THREE.LineBasicMaterial({ color: 0x9fdcff, transparent: true, opacity: 0.7 });
+// Cam (gerçek kırılma). depthWrite kapalı: ışın çizgileri camın içinde de görünsün
+const glassOf = (thickness, ior = 1.5) => {
+  const m = mat.glass({ thickness, rough: 0.02 });
+  m.ior = ior; m.depthWrite = false;
+  return m;
+};
+const glassMat = glassOf(0.8);
 
 function lensGeometry(R, converging, thick) {
   const pts = [], N = 18, t0 = 0.08;
@@ -157,11 +225,12 @@ function lensGeometry(R, converging, thick) {
   return g;
 }
 
-function makeArrow(color, opacity = 1) {
-  const mat = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.35, transparent: opacity < 1, opacity, side: THREE.DoubleSide });
+function makeArrow(color, glow = false) {
+  const m0 = glow ? mat.glow({ color, intensity: 1.2 }) : mat.plastic({ color, gloss: 0.4, scale: U });
+  if (!glow) { m0.emissive = new THREE.Color(color); m0.emissiveIntensity = 0.25; }
   const g = new THREE.Group();
-  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1, 12), mat);
-  const head = new THREE.Mesh(new THREE.ConeGeometry(0.38, 1, 16), mat);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1, 16), m0);
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.38, 1, 24), m0);
   g.add(shaft, head);
   g.userData = { shaft, head };
   return g;
@@ -180,32 +249,52 @@ const SC = 0.32; // dünya birimi / cm
 const LENS_R = 4.4;
 const XEND = 17;
 const gLens = new THREE.Group();
-sim.scene.add(gLens);
+content.add(gLens);
 {
-  const rail = new THREE.Mesh(new THREE.BoxGeometry(2 * XEND, 0.35, 1.4), new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.6, metalness: 0.4 }));
-  rail.position.y = -6.3;
+  // Optik ray: eloksallı alüminyum profil, üstünde kazınmış cm cetveli
+  // kırlangıç kuyruğu profil (kesit z–y düzleminde), x boyunca çekilmiş
+  const sh = new THREE.Shape(V2s([[-0.7, 0], [0.7, 0], [0.7, 0.12], [0.45, 0.2], [0.45, 0.35], [-0.45, 0.35], [-0.45, 0.2], [-0.7, 0.12]]));
+  const railG = new THREE.ExtrudeGeometry(sh, { depth: 2 * XEND, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.03, bevelSegments: 2 });
+  railG.rotateY(Math.PI / 2); railG.translate(-XEND, 0, 0);
+  const rail = new THREE.Mesh(railG, M.alu);
+  rail.position.y = FLOOR;
   gLens.add(rail);
+  for (const x of [-XEND + 1, XEND - 1]) {
+    const foot = new THREE.Mesh(new RoundedBoxGeometry(1.2, 0.2, 2.6, 2, 0.06), M.anod);
+    foot.position.set(x, FLOOR + 0.1, 0); gLens.add(foot);
+  }
+  const tickM = mat.plastic({ color: 0x1a1b1e, gloss: 0.2, scale: U });
   for (let x = -16; x <= 16; x += 2) {
-    const tick = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.02, 0.9), new THREE.MeshBasicMaterial({ color: x % 10 === 0 ? 0x94a3b8 : 0x475569 }));
-    tick.position.set(x, -6.11, 0);
+    const tick = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.02, x % 10 === 0 ? 0.9 : 0.5), tickM);
+    tick.position.set(x, -6.115, x % 10 === 0 ? 0 : 0.2);
     gLens.add(tick);
   }
   const axisGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-XEND, 0, 0), new THREE.Vector3(XEND, 0, 0)]);
   gLens.add(new THREE.Line(axisGeo, new THREE.LineDashedMaterial({ color: 0x64748b, dashSize: 0.4, gapSize: 0.3 })).computeLineDistances());
 }
 const lensMesh = new THREE.Mesh(lensGeometry(LENS_R, true, 0.5), glassMat);
+lensMesh.userData.noCast = true; lensMesh.userData.noAO = true;
 gLens.add(lensMesh);
-const lensPost = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1.8, 10), new THREE.MeshStandardMaterial({ color: 0x64748b }));
-lensPost.position.y = -5.3;
-gLens.add(lensPost);
+{
+  // Mercek tutucu: siyah halka + direk + ray taşıyıcısı
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(LENS_R + 0.15, 0.22, 16, 64), M.anod);
+  ring.rotation.y = Math.PI / 2; gLens.add(ring);
+  const lensPost = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 1.9, 16), M.steel);
+  lensPost.position.y = -5.3; gLens.add(lensPost);
+  const car = new THREE.Mesh(new RoundedBoxGeometry(1.4, 0.5, 1.8, 2, 0.08), M.anod);
+  car.position.y = -5.95; gLens.add(car);
+}
 const objArrow = makeArrow(0xfb923c);
-const imgArrow = makeArrow(0x4ade80);
+const imgArrow = makeArrow(0x4ade80, true);
 gLens.add(objArrow, imgArrow);
-const objPost = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 6.2, 8), new THREE.MeshStandardMaterial({ color: 0x475569 }));
+const objPost = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 6.2, 16), M.steel);
 objPost.position.y = -3.1;
 objArrow.add(objPost);
+const objCar = new THREE.Mesh(new RoundedBoxGeometry(1.4, 0.5, 1.8, 2, 0.08), M.anod);
+objCar.position.y = -5.95;
+objArrow.add(objCar);
 const focalDots = [0, 1, 2, 3].map(() => {
-  const m = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 10), new THREE.MeshBasicMaterial({ color: 0xfacc15 }));
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 10), mat.glow({ color: 0xfacc15, intensity: 1.5 }));
   gLens.add(m);
   return m;
 });
@@ -216,91 +305,125 @@ objLbl.el.style.color = '#fdba74';
 
 // ================= PRİZMA =================
 const gPrism = new THREE.Group();
-sim.scene.add(gPrism);
-let prismMesh = null, prismEdges = null, prismTri = [];
-const screenBox = new THREE.Mesh(new THREE.BoxGeometry(0.3, 14, 4), new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.9 }));
+content.add(gPrism);
+let prismMesh = null, prismTri = [];
+const prismGlass = glassOf(3, 1.52);
+// Beyaz mat ekran (spektrum üzerine düşer), iki direkle ayakta
+const screenBox = new THREE.Mesh(new RoundedBoxGeometry(0.3, 12.4, 5, 2, 0.1), M.white);
 screenBox.position.set(12.2, 0, 0);
 gPrism.add(screenBox);
-sim.label('Ekran', { parent: screenBox, position: [0, 7.6, 0], className: 'plain' });
-const lampBox = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.2, 1.2), new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.5, roughness: 0.4 }));
+{
+  const fr = new THREE.Mesh(new RoundedBoxGeometry(0.5, 0.5, 5.4, 2, 0.1), M.anod);
+  fr.position.set(12.2, -6.35, 0); gPrism.add(fr);
+  post(12.2, -6.2, 0, gPrism);
+}
+sim.label('Ekran', { parent: screenBox, position: [0, 7.0, 0], className: 'plain' });
+// Işık kaynağı: yarıklı lamba gövdesi (koyu boyalı metal, önde parlayan yarık)
+const lampBox = new THREE.Mesh(new RoundedBoxGeometry(2.2, 1.2, 1.2, 2, 0.15), mat.paintedMetal({ color: 0x2b2e33, wear: 0.15, scale: U }));
+{
+  const slit = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.7, 0.12), mat.glow({ color: 0xfff4e0, intensity: 6 }));
+  slit.position.x = 1.11; lampBox.add(slit);
+}
 gPrism.add(lampBox);
+const lampPost = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 1, 16), M.steel);
+gPrism.add(lampPost);
+// Prizma masası: direk üstünde yuvarlak siyah tabla
+const prismTable = new THREE.Group();
+{
+  const t = new THREE.Mesh(new THREE.CylinderGeometry(3.2, 3.2, 0.3, 48), M.anod);
+  t.position.y = -0.15; prismTable.add(t);
+  const r = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 1, 16), M.steel);
+  r.position.y = -0.5; r.name = 'rod'; prismTable.add(r);
+}
+gPrism.add(prismTable);
 const prismLbl = sim.label('', { parent: gPrism, position: [0, -4.5, 0], className: 'plain' });
 
 function buildPrism(A) {
-  if (prismMesh) { prismMesh.geometry.dispose(); prismEdges.geometry.dispose(); gPrism.remove(prismMesh, prismEdges); }
+  if (prismMesh) { prismMesh.geometry.dispose(); gPrism.remove(prismMesh); }
   const H = Math.min(7.5, 3.8 / Math.tan(rad(A) / 2));
   const S = 2 * H * Math.tan(rad(A) / 2);
   prismTri = [[-S / 2, -H / 3], [0, (2 * H) / 3], [S / 2, -H / 3]];
   const shape = new THREE.Shape(prismTri.map((p) => new THREE.Vector2(p[0], p[1])));
-  const geo = new THREE.ExtrudeGeometry(shape, { depth: 4, bevelEnabled: false });
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: 4, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.03, bevelSegments: 2 });
   geo.translate(0, 0, -2);
-  prismMesh = new THREE.Mesh(geo, glassMat);
-  prismEdges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat);
-  gPrism.add(prismMesh, prismEdges);
+  prismMesh = new THREE.Mesh(geo, prismGlass);
+  prismMesh.userData.noCast = true; prismMesh.userData.noAO = true;
+  gPrism.add(prismMesh);
+  // Prizma masası prizmanın tabanının altına
+  const yb = -H / 3 - 0.03;
+  prismTable.position.set(0, yb, 0);
+  const rod = prismTable.getObjectByName('rod');
+  rod.scale.y = yb - FLOOR; rod.position.y = -(yb - FLOOR) / 2;
   prismLbl.position.set(0, -H / 3 - 0.8, 2);
 }
 
 // ================= GÖKKUŞAĞI =================
 const DROP_R = 3.2;
 const gRain = new THREE.Group();
-sim.scene.add(gRain);
+content.add(gRain);
 {
-  const drop = new THREE.Mesh(new THREE.SphereGeometry(DROP_R, 48, 32), new THREE.MeshStandardMaterial({
-    color: 0x7cc4ff, transparent: true, opacity: 0.22, roughness: 0.05, depthWrite: false, emissive: 0x08223a }));
+  // Büyütülmüş su damlası modeli: su (n ≈ 1,33) küresi, altında halka tutucu
+  const water = mat.glass({ thickness: DROP_R * 2, rough: 0.01 });
+  water.ior = 1.333; water.depthWrite = false; water.attenuationColor = new THREE.Color(0xd6f1ff); water.attenuationDistance = 0.6;
+  const drop = new THREE.Mesh(new THREE.SphereGeometry(DROP_R, 64, 48), water);
+  drop.userData.noCast = true; drop.userData.noAO = true;
   gRain.add(drop);
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(DROP_R, 0.03, 6, 96), new THREE.MeshBasicMaterial({ color: 0x9fdcff }));
-  gRain.add(ring);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(DROP_R * 0.55, 0.12, 12, 64), M.steel);
+  ring.rotation.x = Math.PI / 2; ring.position.y = -DROP_R * 0.84; gRain.add(ring);
+  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 2.2, 12), M.steel);
+  arm.rotation.z = Math.PI / 2; arm.position.set(DROP_R * 0.55 + 1.1, -DROP_R * 0.84, 0); gRain.add(arm);
+  post(DROP_R * 0.55 + 2.2, -DROP_R * 0.84 + 0.4, 0, gRain);
   sim.label('Su damlası', { parent: gRain, position: [0, DROP_R + 0.6, 0], className: 'plain' });
-  // Arkadaki süs gökkuşağı
-  const cols = [700, 620, 580, 540, 490, 450, 410];
-  cols.forEach((nm, i) => {
-    const t = new THREE.Mesh(new THREE.TorusGeometry(34 - i * 0.9, 0.45, 6, 80, Math.PI),
-      new THREE.MeshBasicMaterial({ color: waveColor(nm), transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
-    t.position.set(0, -14, -45);
-    gRain.add(t);
-  });
 }
 const sunLbl = sim.label('☀️ Güneş ışığı', { parent: gRain, position: [-10, 5.5, 0], className: 'plain' });
 const rainLbl = sim.label('', { parent: gRain, position: [0, 0, 0], className: 'plain' });
 
 // ================= GÖZ =================
 const gEye = new THREE.Group();
-sim.scene.add(gEye);
+content.add(gEye);
 const EYE_C = 2.9, EYE_R = 3.1, RET_X = EYE_C + EYE_R - 0.05, GLASS_X = -3.6;
 {
-  const ball = new THREE.Mesh(new THREE.SphereGeometry(EYE_R, 48, 32), new THREE.MeshStandardMaterial({
-    color: 0xf1f5f9, transparent: true, opacity: 0.16, depthWrite: false, roughness: 0.4 }));
+  // Göz modeli (büyütülmüş kesit): saydam akrilik küre, kırmızı retina, iris, göz merceği; altında direk
+  const acrylic = mat.glass({ thickness: 0.3, rough: 0.04 });
+  acrylic.depthWrite = false; acrylic.side = THREE.DoubleSide;
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(EYE_R, 64, 40), acrylic);
+  ball.userData.noCast = true; ball.userData.noAO = true;
   ball.position.x = EYE_C;
   gEye.add(ball);
   const retina = new THREE.Mesh(new THREE.SphereGeometry(EYE_R - 0.04, 40, 24, 0, Math.PI * 2, 0, Math.PI * 0.3),
-    new THREE.MeshStandardMaterial({ color: 0xdc2626, emissive: 0x3b0a0a, side: THREE.DoubleSide, transparent: true, opacity: 0.35, depthWrite: false }));
+    (() => { const t = mat.tissue({ color: 0xc0392b, veins: 0.7, scale: 0.5 }); t.side = THREE.DoubleSide; return t; })());
   retina.rotation.z = -Math.PI / 2;
   retina.position.x = EYE_C;
   gEye.add(retina);
   const cornea = new THREE.Mesh(new THREE.SphereGeometry(1.35, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.32),
-    new THREE.MeshStandardMaterial({ color: 0xbfe6ff, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide }));
+    (() => { const g = mat.glass({ thickness: 0.2 }); g.depthWrite = false; g.ior = 1.376; return g; })());
   cornea.rotation.z = Math.PI / 2;
   cornea.position.x = 0.95;
   gEye.add(cornea);
-  const iris = new THREE.Mesh(new THREE.RingGeometry(0.75, 1.55, 40), new THREE.MeshStandardMaterial({ color: 0x3b82f6, side: THREE.DoubleSide, emissive: 0x0b1e44 }));
+  const irisM = mat.fabric({ color: 0x3a6fa8, scale: 2 }); irisM.side = THREE.DoubleSide;
+  const iris = new THREE.Mesh(new THREE.RingGeometry(0.75, 1.55, 64), irisM);
   iris.rotation.y = Math.PI / 2;
   iris.position.x = -0.15;
   gEye.add(iris);
-  const lens = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), new THREE.MeshStandardMaterial({ color: 0xfef3c7, transparent: true, opacity: 0.45, depthWrite: false }));
+  const lensM = mat.glass({ thickness: 1, tint: 0xfff1c9 }); lensM.depthWrite = false; lensM.ior = 1.41; lensM.attenuationDistance = 0.08;
+  const lens = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 24), lensM);
   lens.scale.set(0.42, 1.05, 1.05);
   lens.position.x = 0.1;
   gEye.add(lens);
   gEye.userData.lens = lens;
-  const nerve = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.55, 2.4, 16), new THREE.MeshStandardMaterial({ color: 0xfca5a5, roughness: 0.8 }));
+  const nerve = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.55, 2.4, 24), mat.tissue({ color: 0xe8b0a0, veins: 0.3, scale: 0.5 }));
   nerve.rotation.z = Math.PI / 2;
   nerve.position.set(EYE_C + EYE_R + 0.9, -0.4, 0);
   gEye.add(nerve);
+  const cup = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 0.8, 0.5, 32), M.anod);
+  cup.position.set(EYE_C, -EYE_R - 0.1, 0); gEye.add(cup);
+  post(EYE_C, -EYE_R - 0.3, 0, gEye);
   sim.label('Retina', { parent: gEye, position: [RET_X + 0.3, 2.6, 0], className: 'plain' });
   sim.label('Göz merceği', { parent: gEye, position: [0.1, -1.9, 0], className: 'plain' });
 }
-const spectacle = new THREE.Mesh(lensGeometry(1.9, true, 0.3), glassMat);
+const spectacle = new THREE.Mesh(lensGeometry(1.9, true, 0.3), glassOf(0.3));
 spectacle.position.x = GLASS_X;
-const frame = new THREE.Mesh(new THREE.TorusGeometry(1.95, 0.08, 8, 48), new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.6, roughness: 0.3 }));
+const frame = new THREE.Mesh(new THREE.TorusGeometry(1.95, 0.1, 12, 64), mat.plastic({ color: 0x1a1b1f, gloss: 0.8, scale: U }));
 frame.rotation.y = Math.PI / 2;
 frame.position.x = GLASS_X;
 gEye.add(spectacle, frame);
@@ -554,6 +677,8 @@ function drawPrism() {
     rays.seg(first.start, first.P, laserTg.value ? waveColor(589) : WHITE, { w: 1.4 });
     lampBox.position.set(first.start[0], first.start[1], 0);
     lampBox.rotation.z = Math.atan2(first.d0[1], first.d0[0]);
+    const lh = first.start[1] - 0.5 - FLOOR;
+    lampPost.position.set(first.start[0], FLOOR + lh / 2, 0); lampPost.scale.y = Math.max(lh, 0.01);
   }
   const n589 = nOf(mat, 589), A = rad(apexSl.value);
   const s = n589 * Math.sin(A / 2);
@@ -700,13 +825,13 @@ function clarityChartUpdate() {
 
 // ================= Mod geçişi =================
 const CAMS = {
-  mercek: [[0, 1.5, 30], [0, 0.5, 0]], prizma: [[0, 1.5, 30], [1.5, 0, 0]], gokkusagi: [[0, 1, 30], [0, 0, 0]], goz: [[0.5, 1.2, 19], [0.5, 0, 0]],
+  mercek: [[9, 14, 54], [2, -1, -3]], prizma: [[10, 14, 54], [3, -1, -3]], gokkusagi: [[8, 13, 52], [2, -1, -3]], goz: [[5, 8, 34], [1, -0.5, -2]],
 };
 function setMode(v) {
   mode = v;
   gLens.visible = v === 'mercek'; gPrism.visible = v === 'prizma'; gRain.visible = v === 'gokkusagi'; gEye.visible = v === 'goz';
   for (const [k, list] of Object.entries(secs)) list.forEach((s) => (s.parentElement.style.display = k === v ? '' : 'none'));
-  sim.moveCamera(...CAMS[v]);
+  sim.moveCamera(W(CAMS[v][0]), W(CAMS[v][1]));
   if (v === 'goz') clarityChartUpdate();
   mark();
 }
@@ -725,7 +850,27 @@ sim.onUpdate((dt) => {
     if (++chartTick % 20 === 0) clarityChartUpdate();
   }
 });
-sim.onRender(() => {
+// Havadaki toz: ışın çizgilerine yakın olanlar o ışının renginde parlar (içerik birimi, z = 0 ışın düzlemi)
+const dust = dustMotes({ count: 420, box: [-18, -7, -3.2, 18, 11, 3.2], size: 0.0042, seed: 11 });
+content.add(dust.points);
+const SIG2 = 0.55 * 0.55;
+function dustLight(x, y, z, out) {
+  let r = 0.012, g = 0.012, b = 0.013;
+  for (const sg of rays.segs) {
+    const dx = sg[2] - sg[0], dy = sg[3] - sg[1], L2 = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((x - sg[0]) * dx + (y - sg[1]) * dy) / L2));
+    const ex = x - (sg[0] + dx * t), ey = y - (sg[1] + dy * t);
+    const d2 = ex * ex + ey * ey + z * z;
+    if (d2 > 9 * SIG2) continue;
+    const k = Math.exp(-d2 / SIG2) * 1.6;
+    r += sg[4] * k; g += sg[5] * k; b += sg[6] * k;
+  }
+  out.setRGB(r, g, b);
+}
+let dustT = 0;
+sim.onRender((real) => {
+  dustT += Math.min(real || 0.016, 0.1);
+  dust.update(dustT, dustLight);
   if (!dirty) return;
   dirty = false;
   rays.begin();
@@ -747,7 +892,7 @@ sim.dom.addEventListener('pointerdown', (e) => {
 sim.dom.addEventListener('pointermove', (e) => {
   if (!dragging) return;
   const p = sim.pointOnPlane(e, zPlane);
-  if (p) { doSl.set(clamp(Math.round((-p.x / SC) * 2) / 2, 3, 50)); mark(); }
+  if (p) { doSl.set(clamp(Math.round((-(p.x / U) / SC) * 2) / 2, 3, 50)); mark(); }
 });
 window.addEventListener('pointerup', () => { if (dragging) { dragging = false; sim.controls.enabled = true; } });
 

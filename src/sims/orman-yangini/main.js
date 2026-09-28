@@ -1,22 +1,27 @@
 // Orman Yangını — Alexandridis tipi hücresel otomat: rüzgâr, eğim, nem ve bitki örtüsüne bağlı yayılma; yangın şeridi ve su uçağı.
-import { createSim, THREE, ImprovedNoise, fmt, clamp, lerp, seeded, instanced, disposeObject } from '@core';
+import { createSim, THREE, ImprovedNoise, fmt, clamp, lerp, seeded, instanced, mat, createTerrain, terrainMaterial, terrainSkirt, createVegetation, depthTexture, RoundedBoxGeometry, BufferGeometryUtils } from '@core';
+import { softDot, houseGeometries, plaster, roofTiles, treeGeometry, leafMat, barkMat } from './kit.js';
 
 const N = 80;            // N×N hücre
 const CELL_M = 20;       // bir hücre 20 m × 20 m
 const HA = (CELL_M * CELL_M) / 10000; // hücre başına hektar (0,04)
-const VEX = 1.4;         // dikey abartı (yalnız görünüm)
-const W = N;             // dünya genişliği (1 birim = 1 hücre)
-const HALF = W / 2;
+const HALF = N / 2;
+const SIZE = N * CELL_M; // 1.600 m
+const LOW = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
 
 const sim = createSim({
-  background: 0x9fb8cf,
-  camera: { position: [0, 60, 64], target: [0, 0, 3], fov: 45, far: 800 },
-  controls: { minDistance: 20, maxDistance: 180, maxPolarAngle: Math.PI * 0.46 },
-  fog: [140, 320],
+  // Öğleden sonra güneşi: ışık yangın cephesine çapraz vurur, ağaç gölgeleri uzun düşer (derinlik).
+  sky: { elevation: 24, azimuth: 236, clouds: 0.34, haze: 2.1, visibility: 3000, wind: [6, 0] },
+  ocean: { wind: 3, windDir: 270, fetch: 2, foam: 0.1 },
+  // Gölge haritası çekirdek tarafından her karede kameranın baktığı bölgeye göre sığdırılır (core/look.js).
+  shadows: true, shadowSize: 900,
+  camera: { position: [-560, 205, 760], target: [40, 60, 40], fov: 42, near: 1, far: 80000 },
+  controls: { minDistance: 30, maxDistance: 6000, maxPolarAngle: Math.PI * 0.47 },
   info: `
     <h3>Ne görüyorsun?</h3>
-    <p>${fmt(N * N * HA, 0)} hektarlık tepelik bir arazi: çam, meşe, çalı (maki) ve çayır alanları, bir göl, bir orman yolu ve bir köy.
-    Arazi 20 m × 20 m'lik hücrelere bölünmüştür. Her dakika yanan her hücre komşularını belli bir olasılıkla tutuşturur.</p>
+    <p>${fmt(N * N * HA, 0)} hektarlık tepelik bir Akdeniz ormanı (1,6 km × 1,6 km): kızılçam, meşe, maki çalılığı ve çayır alanları, bir göl,
+    bir orman yolu ve bir köy. Arazi 20 m × 20 m'lik hücrelere bölünmüştür; her ağaç kendi hücresinin durumunu gösterir
+    (yeşil, yanan, kömürleşmiş, ıslak). Her dakika yanan her hücre komşularını belli bir olasılıkla tutuşturur.</p>
     <h3>Model</h3>
     <p>Yayılma olasılığı Alexandridis ve ark. (2008) hücresel otomat modelinden uyarlanmıştır:
     <b>p = p<sub>h</sub> · (1+p<sub>bitki</sub>) · (1+p<sub>yoğunluk</sub>) · p<sub>rüzgâr</sub> · p<sub>eğim</sub></b>.</p>
@@ -38,20 +43,21 @@ const sim = createSim({
     <p>Türkiye'de orman yangınlarının büyük çoğunluğu insan kaynaklıdır (anız yakma, sigara, piknik ateşi, elektrik hatları).
     Ormanda ateş yakma; yangın görürsen <b>112</b>'yi ara. Kızılçam ormanları yazın çok kolay tutuşur ve yangına uyum sağlamıştır:
     kozalakları yangından sonra açılarak ormanı yeniler.</p>
-    <p><small>Hücre boyu 20 m, zaman adımı 1 dakika. Dikey ölçek görsel olarak ${fmt(VEX, 1)}× abartılmıştır. Model eğitim amaçlıdır; gerçek yangın davranışı yakıt nemi, alev boyu, taç yangını gibi pek çok etkene bağlıdır.</small></p>`,
+    <p><small>Hücre boyu 20 m, zaman adımı 1 dakika. Arazi, ağaçlar ve evler gerçek ölçektedir (dikey abartı yok). Model eğitim amaçlıdır; gerçek yangın davranışı yakıt nemi, alev boyu, taç yangını gibi pek çok etkene bağlıdır.</small></p>`,
 });
+const scene = sim.scene;
 
 // --- Bitki / hücre tipleri ---
 const V_WATER = 0, V_CAM = 1, V_MESE = 2, V_CALI = 3, V_CAYIR = 4, V_YOL = 5, V_SERIT = 6, V_EV = 7;
 const VEG = [
-  { name: 'Göl', burn: false, color: 0x3b6e8f },
-  { name: 'Çam', burn: true, pveg: 0.4, dur: 5, color: 0x3f5a2a },
-  { name: 'Meşe', burn: true, pveg: -0.2, dur: 8, color: 0x4d6230 },
-  { name: 'Çalı (maki)', burn: true, pveg: 0, dur: 3, color: 0x6f7d3c },
-  { name: 'Çayır', burn: true, pveg: -0.3, dur: 1, color: 0x9aa35a },
-  { name: 'Orman yolu', burn: false, color: 0xa88f6a },
-  { name: 'Yangın şeridi', burn: false, color: 0x8a6a48 },
-  { name: 'Ev', burn: true, pveg: 0, dur: 12, color: 0x9aa35a },
+  { name: 'Göl', burn: false },
+  { name: 'Çam', burn: true, pveg: 0.4, dur: 5 },
+  { name: 'Meşe', burn: true, pveg: -0.2, dur: 8 },
+  { name: 'Çalı (maki)', burn: true, pveg: 0, dur: 3 },
+  { name: 'Çayır', burn: true, pveg: -0.3, dur: 1 },
+  { name: 'Orman yolu', burn: false },
+  { name: 'Yangın şeridi', burn: false },
+  { name: 'Ev', burn: true, pveg: 0, dur: 12 },
 ];
 const PRESETS = {
   karisik: { label: 'Karışık', f: [0.36, 0.28, 0.2, 0.16] },
@@ -62,8 +68,7 @@ const PRESETS = {
 
 // --- Hücre dizileri ---
 const NN = N * N;
-const H = new Float32Array(NN);      // yükseklik (m)
-const Y = new Float32Array(NN);      // görüntü yüksekliği
+const H = new Float32Array(NN);      // yükseklik (m, model)
 const veg = new Uint8Array(NN);
 const origVeg = new Uint8Array(NN);
 const state = new Uint8Array(NN);    // 0 yanmaz, 1 yakıt, 2 yanıyor, 3 kül
@@ -71,54 +76,111 @@ const burnT = new Uint8Array(NN);
 const wet = new Float32Array(NN);    // dakika
 let burning = [];
 const idx = (i, j) => j * N + i;
+const cellX = (i) => (i - HALF + 0.5) * CELL_M, cellZ = (j) => (j - HALF + 0.5) * CELL_M;
 
-// --- Arazi ---
-const terrGeo = new THREE.PlaneGeometry(W, W, N - 1, N - 1);
-terrGeo.rotateX(-Math.PI / 2);
-const colors = new Float32Array(NN * 3);
-terrGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-const terrain = new THREE.Mesh(terrGeo, new THREE.MeshLambertMaterial({ vertexColors: true }));
-sim.scene.add(terrain);
-// Kenar "etek" (arazinin yan yüzü)
-const skirt = new THREE.Mesh(new THREE.BoxGeometry(W + 0.2, 1, W + 0.2), new THREE.MeshLambertMaterial({ color: 0x5b4636 }));
-sim.scene.add(skirt);
-const water = new THREE.Mesh(new THREE.PlaneGeometry(W, W), new THREE.MeshLambertMaterial({ color: 0x3b82b6, transparent: true, opacity: 0.85 }));
-water.rotation.x = -Math.PI / 2;
-sim.scene.add(water);
-
-let seed = 7;
-let waterLevel = 0;
+// --- Arazi yükseklik alanı (sürekli; hücre merkezlerinde modelle aynı) ---
+let seed = 7, waterLevel = 0, hMin = 0, hMax = 1;
+const noise = new ImprovedNoise();
+function rawH(x, z) { // x, z dünya metresi
+  const xn = (x / CELL_M + HALF - 0.5) / N, zn = (z / CELL_M + HALF - 0.5) / N, ox = seed * 17.31, oz = seed * 7.77;
+  return 0.62 * noise.noise(xn * 2.1 + ox, zn * 2.1 + oz, 0.37) + 0.27 * noise.noise(xn * 4.7 + oz, zn * 4.7 + ox, 1.7) + 0.11 * noise.noise(xn * 10 + ox, zn * 10, 4.1)
+    - 0.12 * (clamp(xn, -0.3, 1.3) + clamp(zn, -0.3, 1.3));
+}
+/** Görsel yükseklik (m, göl yüzeyi = 0): alan dışında tepeler yükselir (çanak), ince pürüz eklenir. */
+function hWorld(x, z) {
+  const out = Math.max(Math.abs(x), Math.abs(z)) - SIZE / 2;
+  const base = ((rawH(x, z) - hMin) / (hMax - hMin)) * 300 - waterLevel;
+  const rough = 1.6 * noise.noise(x * 0.021, z * 0.021, 7.3) + 0.7 * noise.noise(x * 0.07, z * 0.07, 2.2);
+  return base + rough + THREE.MathUtils.smoothstep(out, 0, 500) * 110;
+}
 function genTerrain() {
-  const noise = new ImprovedNoise();
-  const ox = seed * 17.31, oz = seed * 7.77;
   let mn = Infinity, mx = -Infinity;
-  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
-    const x = i / N, z = j / N;
-    let h = 0.62 * noise.noise(x * 2.1 + ox, z * 2.1 + oz, 0.37) + 0.27 * noise.noise(x * 4.7 + oz, z * 4.7 + ox, 1.7) + 0.11 * noise.noise(x * 10 + ox, z * 10, 4.1);
-    // Güneydoğuya doğru hafif alçalan eğim (köy vadide)
-    h += -0.12 * (x + z);
-    H[idx(i, j)] = h;
-    mn = Math.min(mn, h); mx = Math.max(mx, h);
-  }
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) { const h = rawH(cellX(i), cellZ(j)); H[idx(i, j)] = h; mn = Math.min(mn, h); mx = Math.max(mx, h); }
+  hMin = mn; hMax = mx;
   for (let k = 0; k < NN; k++) H[k] = ((H[k] - mn) / (mx - mn)) * 300; // 0–300 m rölyef
   const sorted = Float32Array.from(H).sort();
   waterLevel = sorted[Math.floor(NN * 0.05)];
-  const pos = terrGeo.attributes.position;
-  for (let k = 0; k < NN; k++) {
-    Y[k] = (Math.max(H[k], waterLevel) / CELL_M) * VEX;
-    pos.setY(k, (H[k] / CELL_M) * VEX);
-  }
-  pos.needsUpdate = true;
-  terrGeo.computeVertexNormals();
-  water.position.y = (waterLevel / CELL_M) * VEX + 0.05;
-  skirt.position.y = -1.5;
-  skirt.scale.y = 3;
+}
+
+// Hücre durum haritası (arazi malzemesine): R kül, G ıslak, B çıplak toprak (yol/şerit), A yanıyor
+const cellData = new Uint8Array(NN * 4);
+const cellTex = new THREE.DataTexture(cellData, N, N, THREE.RGBAFormat);
+cellTex.magFilter = cellTex.minFilter = THREE.LinearFilter; cellTex.needsUpdate = true;
+const fireU = { uCellMap: { value: cellTex }, uCellO: { value: new THREE.Vector2(-SIZE / 2, -SIZE / 2) }, uCellS: { value: SIZE }, uFireT: { value: 0 } };
+function burnTerrainMaterial(opts) {
+  const m = terrainMaterial(opts), orig = m.onBeforeCompile;
+  m.onBeforeCompile = (sh, r) => {
+    orig(sh, r);
+    Object.assign(sh.uniforms, fireU);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform sampler2D uCellMap; uniform vec2 uCellO; uniform float uCellS, uFireT; vec4 gCell; float gAsh;')
+      .replace('diffuseColor.rgb = c;', `diffuseColor.rgb = c;
+        {
+          vec2 cuv = (vTW.xz - uCellO)/uCellS;
+          gCell = (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0) ? texture2D(uCellMap, cuv) : vec4(0.0);
+          float an = fbm3(tP*0.3, 3), fn = vn3(tP*1.7);
+          float bare = smoothstep(0.35, 0.6, gCell.b + 0.25*(an - 0.5));
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.46, 0.37, 0.27)*(0.75 + 0.45*an)*(0.85 + 0.3*fn), bare);
+          gAsh = smoothstep(0.3, 0.6, gCell.r + 0.3*(an - 0.5));
+          vec3 ash = mix(vec3(0.035, 0.03, 0.028), vec3(0.2, 0.19, 0.18), smoothstep(0.55, 0.85, fbm3(tP*0.9, 3)))*(0.7 + 0.6*fn);
+          diffuseColor.rgb = mix(diffuseColor.rgb, ash, gAsh);
+          diffuseColor.rgb *= 1.0 - 0.4*gCell.g;
+        }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        {
+          float fl = fbm3(tP*0.12 + vec3(0.0, uFireT*0.9, uFireT*0.3), 3);
+          float emb = smoothstep(0.45, 0.8, vn3(tP*0.8 + uFireT*0.2));
+          totalEmissiveRadiance += vec3(1.0, 0.3, 0.05)*gCell.a*(3.0*fl*fl + 2.0*emb)*2.5;
+        }`)
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 1.0, gAsh);');
+  };
+  m.customProgramCacheKey = () => 'orman-yangini-terrain';
+  return m;
+}
+function writeCell(k) {
+  const o = k * 4;
+  cellData[o] = state[k] === 3 || (state[k] === 2 && burnT[k] < VEG[veg[k]].dur) ? 255 : 0;
+  cellData[o + 1] = wet[k] > 0 ? 255 : 0;
+  cellData[o + 2] = veg[k] === V_YOL || veg[k] === V_SERIT ? 255 : 0;
+  cellData[o + 3] = state[k] === 2 ? 255 : 0;
+  cellDirty = true;
+}
+let cellDirty = false;
+
+// Arazi ağları (yeniden üretilebilir): alan (sık ağ) + çevre + ufka etek
+const landGroup = new THREE.Group();
+scene.add(landGroup);
+let terrain = null;
+// Alan içi zemin: orman örtüsü altında koyu gölge (ağaçlar zemine oturur), açıklıklarda kurumuş çayır.
+const domainMat = burnTerrainMaterial({ water: 0, grass: 0x6f7a36, dry: 0xa89359, soil: 0x6e5438, forest: 0.95, forestCol: 0x2b3a1c, rock: 0x847a6c, sand: 0xb7a37a });
+function buildLand() {
+  landGroup.children.forEach((c) => c.geometry.dispose());
+  landGroup.clear();
+  terrain = createTerrain(hWorld, { size: [SIZE + 40, SIZE + 40], res: LOW ? [240, 240] : [330, 330], material: domainMat });
+  landGroup.add(terrain);
+  const inside = (x, z) => Math.min(THREE.MathUtils.smoothstep(Math.abs(x), SIZE / 2 + 20, SIZE / 2 - 20), THREE.MathUtils.smoothstep(Math.abs(z), SIZE / 2 + 20, SIZE / 2 - 20));
+  // Alan dışı: uzak tepeler orman gölgesiyle koyulaşır → ufukta hava perspektifi okunur
+  const opts = { water: 0, grass: 0x6b7639, dry: 0xa08d5c, forest: 0.95, forestCol: 0x2f4020 };
+  landGroup.add(createTerrain((x, z) => hWorld(x, z) - 3 * inside(x, z), { size: [10000, 10000], res: [220, 220], materialOptions: opts }));
+  landGroup.add(terrainSkirt(hWorld, { inner: 5000, outer: 60000, material: terrainMaterial(opts) }));
+  sim.ocean.setDepth(depthTexture(hWorld, [-1200, -1200, 1200, 1200], 256), [-1200, -1200, 1200, 1200]);
+}
+// Çevre ormanı (alan dışı): motorun bitki örtüsü
+let outerVeg = null;
+function buildOuterVeg() {
+  if (outerVeg) { outerVeg.group.removeFromParent(); outerVeg.group.traverse((o) => o.geometry?.dispose()); }
+  outerVeg = createVegetation(hWorld, {
+    rect: [-4200, -4200, 4200, 4200], trees: LOW ? 4000 : 9000, shrubs: LOW ? 2000 : 5000, rocks: 300, seed: seed + 3, water: 1,
+    // Koyu ve doygun yaprak rengi: zemin gölgesiyle birlikte okunur bir orman kütlesi oluşur
+    kinds: { pine: 0.6, broad: 0.3, cypress: 0.1 }, leafA: 0x22381a, leafB: 0x4a5826,
+    forest: (x, z) => (Math.max(Math.abs(x), Math.abs(z)) < SIZE / 2 + 40 ? 0 : 0.55 + 0.35 * Math.sin(x * 0.004 + 1.3) * Math.cos(z * 0.005)),
+  });
+  scene.add(outerVeg.group);
 }
 
 let village = { i: 60, j: 50, houses: [] };
 function genVegetation(presetKey) {
   const f = PRESETS[presetKey].f;
-  const noise = new ImprovedNoise();
   const o = seed * 3.3;
   const score = new Float32Array(NN);
   for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
@@ -135,9 +197,11 @@ function genVegetation(presetKey) {
     veg[k] = q < cum[0] ? V_CAM : q < cum[1] ? V_MESE : q < cum[2] ? V_CALI : V_CAYIR;
   });
   // Orman yolu (kıvrımlı, 4-bağlantılı)
+  roadPts.length = 0;
   let pj = Math.round(N * 0.3);
   for (let i = 0; i < N; i++) {
-    const tj = Math.round(N * 0.3 + Math.sin(i * 0.09 + seed) * 7 + i * 0.25);
+    const tjf = N * 0.3 + Math.sin(i * 0.09 + seed) * 7 + i * 0.25, tj = Math.round(tjf);
+    roadPts.push([i, tjf]);
     while (pj !== tj) { setRoad(i, pj); pj += Math.sign(tj - pj); }
     setRoad(i, pj);
   }
@@ -164,125 +228,127 @@ function genVegetation(presetKey) {
   }
   origVeg.set(veg);
 }
+const roadPts = [];
 function setRoad(i, j) {
   if (i < 0 || j < 0 || i >= N || j >= N) return;
   const k = idx(i, j);
   if (veg[k] !== V_WATER) veg[k] = V_YOL;
 }
 
-// --- Ağaçlar (instanced) ---
-const treeGeos = {
-  [V_CAM]: new THREE.ConeGeometry(0.36, 1.35, 6).translate(0, 0.75, 0),
-  [V_MESE]: new THREE.IcosahedronGeometry(0.46, 0).scale(1, 0.85, 1).translate(0, 0.62, 0),
-  [V_CALI]: new THREE.IcosahedronGeometry(0.32, 0).scale(1, 0.55, 1).translate(0, 0.14, 0),
-};
-const TREE_COL = { [V_CAM]: 0x1f4d2b, [V_MESE]: 0x3f6b2a, [V_CALI]: 0x5c7a2e };
-const treeMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+// --- Ağaçlar: her hücrede gerçek boyda birkaç ağaç (taç + gövde ayrı; durum rengi örnek başına) ---
+const KINDS = { [V_CAM]: { kind: 'pine', per: LOW ? 2 : 4, leaf: 0x24391c }, [V_MESE]: { kind: 'oak', per: LOW ? 2 : 3, leaf: 0x3d4f22 }, [V_CALI]: { kind: 'shrub', per: LOW ? 3 : 5, leaf: 0x4a5527 } };
+const trunkMat = barkMat(0x4a3b2c);
+const TG = {};
+for (const v of [V_CAM, V_MESE, V_CALI]) TG[v] = { geo: treeGeometry(KINDS[v].kind, v * 3 + 1), mat: leafMat(KINDS[v].leaf) };
 let treeMeshes = {};
-const treeOf = new Int32Array(NN).fill(-1);
-const tBase = []; // [x,y,z,s,rot]
+const cellTrees = new Array(NN);   // hücre → [başlangıç, adet]
+const tInfo = [];                   // [v][n] = [x, y, z, s, rot, tone]
 function buildTrees() {
-  Object.values(treeMeshes).forEach((m) => { m.removeFromParent(); m.dispose(); });
+  Object.values(treeMeshes).forEach(({ crown, trunk }) => { crown.removeFromParent(); trunk.removeFromParent(); crown.dispose(); trunk.dispose(); });
   treeMeshes = {};
-  treeOf.fill(-1);
   const rnd = seeded(seed * 101 + 3);
   const counts = { [V_CAM]: 0, [V_MESE]: 0, [V_CALI]: 0 };
-  for (let k = 0; k < NN; k++) if (counts[veg[k]] !== undefined) counts[veg[k]]++;
+  for (let k = 0; k < NN; k++) if (counts[origVeg[k]] !== undefined) counts[origVeg[k]] += KINDS[origVeg[k]].per;
   for (const v of [V_CAM, V_MESE, V_CALI]) {
-    const m = instanced(treeGeos[v], treeMat, Math.max(1, counts[v]));
-    m.count = counts[v];
-    m.userData.n = 0;
-    treeMeshes[v] = m;
-    sim.scene.add(m);
+    const n = Math.max(1, counts[v]);
+    const crown = instanced(TG[v].geo.crown, TG[v].mat, n), trunk = instanced(TG[v].geo.trunk, trunkMat, n);
+    crown.count = trunk.count = counts[v];
+    crown.frustumCulled = trunk.frustumCulled = false;
+    crown.userData.n = 0;
+    treeMeshes[v] = { crown, trunk };
+    tInfo[v] = [];
+    scene.add(crown, trunk);
   }
-  tBase.length = 0;
   for (let k = 0; k < NN; k++) {
-    const m = treeMeshes[veg[k]];
-    if (!m) continue;
-    const i = k % N, j = (k / N) | 0;
-    const n = m.userData.n++;
-    treeOf[k] = n;
-    tBase[k] = [i - HALF + 0.5 + (rnd() - 0.5) * 0.5, Y[k] - 0.05, j - HALF + 0.5 + (rnd() - 0.5) * 0.5, 0.8 + rnd() * 0.45, rnd() * 6.28, rnd()];
+    const v = origVeg[k], T = treeMeshes[v];
+    cellTrees[k] = null;
+    if (!T) continue;
+    const i = k % N, j = (k / N) | 0, per = KINDS[v].per, start = T.crown.userData.n;
+    for (let q = 0; q < per; q++) {
+      const x = cellX(i) + (rnd() - 0.5) * CELL_M * 0.9, z = cellZ(j) + (rnd() - 0.5) * CELL_M * 0.9;
+      tInfo[v][start + q] = [x, hWorld(x, z) - 0.25, z, 0.75 + rnd() * 0.5, rnd() * 6.28, rnd()];
+    }
+    T.crown.userData.n += per;
+    cellTrees[k] = [start, per];
     setTree(k);
   }
-  for (const m of Object.values(treeMeshes)) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
+  for (const T of Object.values(treeMeshes)) for (const m of [T.crown, T.trunk]) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
 }
-const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _v = new THREE.Vector3(), _c = new THREE.Color();
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _v = new THREE.Vector3(), _c = new THREE.Color(), _c2 = new THREE.Color();
 const UP = new THREE.Vector3(0, 1, 0);
 function setTree(k) {
-  const v = origVeg[k];
-  const m = treeMeshes[v];
-  if (!m || treeOf[k] < 0) return;
-  const b = tBase[k];
-  let sx = b[3], sy = b[3];
-  if (veg[k] === V_SERIT) { sx = sy = 0.0001; _c.setHex(0x000000); }
-  else if (state[k] === 2) _c.setHex(b[5] > 0.5 ? 0xff5a14 : 0xffa826);
-  else if (state[k] === 3) { _c.setHex(0x1c1917); sx *= 0.55; sy *= 0.85; }
-  else { _c.setHex(TREE_COL[v]); _c.offsetHSL(0, 0, (b[5] - 0.5) * 0.08); if (wet[k] > 0) _c.lerp(_v2c.setHex(0x3b6e8f), 0.35); }
-  _q.setFromAxisAngle(UP, b[4]);
-  _m.compose(_v.set(b[0], b[1], b[2]), _q, _s.set(sx, sy, sx));
-  m.setMatrixAt(treeOf[k], _m);
-  m.setColorAt(treeOf[k], _c);
-  m.instanceMatrix.needsUpdate = true;
-  m.instanceColor.needsUpdate = true;
+  const v = origVeg[k], T = treeMeshes[v], ct = cellTrees[k];
+  if (!T || !ct) return;
+  for (let q = 0; q < ct[1]; q++) {
+    const n = ct[0] + q, b = tInfo[v][n];
+    let s = b[3], cs = 1;
+    _c2.setRGB(0.8, 0.8, 0.8);
+    if (veg[k] === V_SERIT) { s = 0.0001; }
+    else if (state[k] === 2) { _c.setRGB(0.32, 0.1, 0.03).multiplyScalar(0.6 + 0.6 * b[5]); _c2.setRGB(0.12, 0.09, 0.07); cs = 0.9; }
+    else if (state[k] === 3) { _c.setRGB(0.045, 0.04, 0.036); _c2.setRGB(0.04, 0.035, 0.03); cs = v === V_CALI ? 0.25 : 0.55; }
+    else { _c.setRGB(1, 1, 1).multiplyScalar(0.85 + 0.3 * b[5]); if (wet[k] > 0) _c.multiply(_v2c.setRGB(0.7, 0.82, 0.95)); }
+    _q.setFromAxisAngle(UP, b[4]);
+    _m.compose(_v.set(b[0], b[1], b[2]), _q, _s.set(s * cs, s * (state[k] === 3 ? 0.9 : 1) * (cs < 1 ? 1 : 1), s * cs));
+    T.crown.setMatrixAt(n, _m); T.crown.setColorAt(n, _c);
+    _m.compose(_v, _q, _s.set(s, s, s));
+    T.trunk.setMatrixAt(n, _m); T.trunk.setColorAt(n, _c2);
+  }
+  T.crown.instanceMatrix.needsUpdate = T.trunk.instanceMatrix.needsUpdate = true;
+  T.crown.instanceColor.needsUpdate = T.trunk.instanceColor.needsUpdate = true;
 }
 const _v2c = new THREE.Color();
+function paint(k) { writeCell(k); setTree(k); }
 
-function setGround(k) {
-  const v = veg[k];
-  if (state[k] === 2) _c.setHex(0xff6a1a);
-  else if (state[k] === 3) _c.setHex(0x2a2522);
-  else {
-    _c.setHex(VEG[v].color);
-    if (v !== V_WATER && H[k] > 250) _c.lerp(_v2c.setHex(0x8f8a78), (H[k] - 250) / 60);
-    if (wet[k] > 0) _c.lerp(_v2c.setHex(0x3b6e8f), 0.45);
+// Orman yolu: toprak şerit (yumuşak eğri, araziye oturur)
+let roadMesh = null;
+const roadMat = mat.asphalt({ color: 0x8a7458, scale: 0.6 });
+function buildRoad() {
+  if (roadMesh) { roadMesh.removeFromParent(); roadMesh.geometry.dispose(); }
+  const pos = [], idx2 = [];
+  const pts = roadPts.map(([i, jf]) => new THREE.Vector3(cellX(i), 0, (jf - HALF + 0.5) * CELL_M));
+  const curve = new THREE.CatmullRomCurve3(pts), NS = 400;
+  for (let s = 0; s <= NS; s++) {
+    const p = curve.getPoint(s / NS), t = curve.getTangent(s / NS);
+    const sx = -t.z, sz = t.x, L = Math.hypot(sx, sz) || 1;
+    for (const u of [-2.6, 2.6]) { const x = p.x + sx / L * u, z = p.z + sz / L * u; pos.push(x, Math.max(hWorld(x, z), 0.2) + 0.25, z); }
+    if (s < NS) { const a = s * 2; idx2.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
   }
-  colors[k * 3] = _c.r; colors[k * 3 + 1] = _c.g; colors[k * 3 + 2] = _c.b;
-  colorDirty = true;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx2); g.computeVertexNormals();
+  roadMesh = new THREE.Mesh(g, roadMat);
+  roadMesh.userData.noCast = true;
+  scene.add(roadMesh);
 }
-let colorDirty = false;
-function paint(k) { setGround(k); setTree(k); }
 
-// --- Köy evleri ---
+// --- Köy evleri: gerçek boyda, kiremit çatılı; yanınca kararır, çatı çöker ---
 const houseGroup = new THREE.Group();
-sim.scene.add(houseGroup);
-const wallMat = new THREE.MeshLambertMaterial({ color: 0xf1e3c8 });
-const roofMat = new THREE.MeshLambertMaterial({ color: 0xb4432f });
-const burntMat = new THREE.MeshLambertMaterial({ color: 0x24201d });
+scene.add(houseGroup);
+const HGEO = [houseGeometries({ w: 9, d: 8, floors: 1, roof: 'gable' }), houseGeometries({ w: 10, d: 8, floors: 2, roof: 'gable' })];
+const hWall = plaster(0xece2cc), hRoof = roofTiles(0xa4492c), hGlass = mat.plastic({ color: 0x1d2630, gloss: 1 }), hTrim = mat.wood({ color: 0x6b4a2e });
 let villageLabel;
 function buildHouses() {
-  disposeObject(houseGroup);
-  sim.scene.add(houseGroup);
   houseGroup.clear();
-  for (const h of village.houses) {
-    const i = h.k % N, j = (h.k / N) | 0;
+  village.houses.forEach((h, n) => {
+    const i = h.k % N, j = (h.k / N) | 0, x = cellX(i), z = cellZ(j), G = HGEO[n % 2];
     const g = new THREE.Group();
-    const w = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.6, 0.7), wallMat);
-    w.position.y = 0.3;
-    const r = new THREE.Mesh(new THREE.ConeGeometry(0.72, 0.45, 4), roofMat);
-    r.position.y = 0.82; r.rotation.y = Math.PI / 4;
-    g.add(w, r);
-    g.position.set(i - HALF + 0.5, Y[h.k], j - HALF + 0.5);
+    const walls = new THREE.Mesh(G.walls, hWall.clone()), roof = new THREE.Mesh(G.roof, hRoof), glass = new THREE.Mesh(G.glass, hGlass), trim = new THREE.Mesh(G.trim, hTrim);
+    g.add(walls, roof, glass, trim);
+    const y = Math.min(hWorld(x - 5, z - 5), hWorld(x + 5, z - 5), hWorld(x - 5, z + 5), hWorld(x + 5, z + 5));
+    g.position.set(x, y - 0.3, z); g.rotation.y = n * 0.9 + 0.3;
     houseGroup.add(g);
-    h.mesh = g;
-  }
+    h.mesh = g; h.walls = walls; h.roof = roof;
+  });
   if (villageLabel) villageLabel.removeFromParent();
-  villageLabel = sim.label('🏘 Köy', { position: [village.i - HALF + 0.5, Y[idx(village.i, village.j)] + 3, village.j - HALF + 0.5] });
+  villageLabel = sim.label('🏘 Köy', { position: [cellX(village.i), hWorld(cellX(village.i), cellZ(village.j)) + 45, cellZ(village.j)] });
+}
+function burnHouse(h) {
+  h.walls.material.color.setHex(0x2a2522);
+  h.roof.visible = false;
 }
 
-// --- Parçacıklar: alev ve duman ---
-function softDot() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 64;
-  const g = c.getContext('2d');
-  const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  gr.addColorStop(0, 'rgba(255,255,255,1)');
-  gr.addColorStop(0.45, 'rgba(255,255,255,.5)');
-  gr.addColorStop(1, 'rgba(255,255,255,0)');
-  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
-  return new THREE.CanvasTexture(c);
-}
+// --- Parçacıklar: alev, duman, su (metre cinsinden boy, yumuşak yuvarlak doku) ---
 const DOT = softDot();
+const PU = { map: { value: DOT }, scale: { value: 600 } };
 function particleSystem(max, additive) {
   const geo = new THREE.BufferGeometry();
   const P = new Float32Array(max * 3), C = new Float32Array(max * 3), A = new Float32Array(max), S = new Float32Array(max);
@@ -290,23 +356,23 @@ function particleSystem(max, additive) {
   geo.setAttribute('color', new THREE.BufferAttribute(C, 3));
   geo.setAttribute('alpha', new THREE.BufferAttribute(A, 1));
   geo.setAttribute('size', new THREE.BufferAttribute(S, 1));
-  const mat = new THREE.ShaderMaterial({
-    uniforms: { map: { value: DOT }, scale: { value: 300 } },
+  const m = new THREE.ShaderMaterial({
+    uniforms: PU,
     vertexShader: `attribute float alpha; attribute float size; attribute vec3 color; varying float vA; varying vec3 vC; uniform float scale;
       void main(){ vA=alpha; vC=color; vec4 mv=modelViewMatrix*vec4(position,1.0); gl_PointSize=size*scale/max(-mv.z,1.0); gl_Position=projectionMatrix*mv; }`,
     fragmentShader: `uniform sampler2D map; varying float vA; varying vec3 vC;
       void main(){ vec4 t=texture2D(map, gl_PointCoord); gl_FragColor=vec4(vC, t.a*vA); }`,
     transparent: true, depthWrite: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
   });
-  const pts = new THREE.Points(geo, mat);
+  const pts = new THREE.Points(geo, m);
   pts.frustumCulled = false;
-  sim.scene.add(pts);
+  scene.add(pts);
   const life = new Float32Array(max), maxLife = new Float32Array(max), vel = new Float32Array(max * 3);
   return { pts, geo, P, C, A, S, life, maxLife, vel, max, next: 0 };
 }
-const flames = particleSystem(900, true);
-const smoke = particleSystem(700, false);
-const drops = particleSystem(500, false);
+const smoke = particleSystem(LOW ? 600 : 1000, false);
+const flames = particleSystem(LOW ? 900 : 1600, true);
+const drops = particleSystem(600, false);
 function spawn(ps, x, y, z, vx, vy, vz, lifeS, size, r, g, b) {
   const n = ps.next; ps.next = (n + 1) % ps.max;
   ps.P[n * 3] = x; ps.P[n * 3 + 1] = y; ps.P[n * 3 + 2] = z;
@@ -315,52 +381,80 @@ function spawn(ps, x, y, z, vx, vy, vz, lifeS, size, r, g, b) {
   ps.C[n * 3] = r; ps.C[n * 3 + 1] = g; ps.C[n * 3 + 2] = b;
 }
 
-// --- Rüzgâr oku ---
+// --- Rüzgâr oku (veri katmanı) ---
+// Rüzgâr oku: araziye yakın, ince ve yarı saydam — harita oku gibi. Bilgi değeri korunur,
+// gökyüzünde asılı çöp olmaktan çıkar (renk/yön bilgisi etikette de yazılı).
 const windArrow = new THREE.Group();
-const arrowMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1, 10).rotateZ(-Math.PI / 2).translate(0.5, 0, 0), arrowMat);
-const head = new THREE.Mesh(new THREE.ConeGeometry(1.1, 2.4, 12).rotateZ(-Math.PI / 2), arrowMat);
+const arrowMat = new THREE.MeshBasicMaterial({ color: 0xfff2e0, transparent: true, opacity: 0.45, depthWrite: false });
+const shaft = new THREE.Mesh(new THREE.CylinderGeometry(3.2, 3.2, 1, 10).rotateZ(-Math.PI / 2).translate(0.5, 0, 0), arrowMat);
+const head = new THREE.Mesh(new THREE.ConeGeometry(10, 24, 12).rotateZ(-Math.PI / 2), arrowMat);
 windArrow.add(shaft, head);
-windArrow.position.set(-HALF + 6, 26, -HALF + 4);
-sim.scene.add(windArrow);
-const windLabel = sim.label('', { parent: windArrow, position: [0, 3.2, 0] });
-// Pusula harfleri
-for (const [t, x, z] of [['K', 0, -HALF - 3], ['G', 0, HALF + 3], ['D', HALF + 3, 0], ['B', -HALF - 3, 0]]) sim.label(t, { position: [x, 2, z], className: 'plain big' });
+const WIND_ARROW_POS = [-SIZE / 2 + 150, -SIZE / 2 + 120];
+windArrow.position.set(WIND_ARROW_POS[0], hWorld(WIND_ARROW_POS[0], WIND_ARROW_POS[1]) + 26, WIND_ARROW_POS[1]);
+scene.add(windArrow);
+const windLabel = sim.label('', { parent: windArrow, position: [0, 30, 0] });
+// Ok her rüzgâr değişiminde araziye göre yüksekliğini tazeler (arazi eğimli)
+function seatWindArrow() { windArrow.position.y = hWorld(WIND_ARROW_POS[0], WIND_ARROW_POS[1]) + 26; }
+// Yön etiketleri: yükseklik sabit değil, arazi yüzeyine göre oturur
+const compassLabels = [];
+for (const [t, x, z] of [['K', 0, -SIZE / 2 - 60], ['G', 0, SIZE / 2 + 60], ['D', SIZE / 2 + 60, 0], ['B', -SIZE / 2 - 60, 0]]) {
+  const L = sim.label(t, { position: [x, hWorld(x, z) + 40, z], className: 'plain big' });
+  compassLabels.push({ L, x, z });
+}
 
-// --- Su uçağı ---
+// --- Su uçağı (CL-415 benzeri amfibi): gövde, yüksek kanat, iki motor, kuyruk, kanat altı şamandıralar ---
 const plane = new THREE.Group();
+const props = [];
 {
-  const y = new THREE.MeshLambertMaterial({ color: 0xfacc15 }), r = new THREE.MeshLambertMaterial({ color: 0xdc2626 });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.35, 6, 10).rotateZ(Math.PI / 2), y);
-  const wing = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.15, 9), r);
-  wing.position.set(0.3, 0.55, 0);
-  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.4, 0.15), r);
-  tail.position.set(-2.7, 0.8, 0);
-  const stab = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.12, 3), y);
-  stab.position.set(-2.7, 1.4, 0);
-  plane.add(body, wing, tail, stab);
+  const yel = mat.paintedMetal({ color: 0xf2c200, wear: 0.15 }), red = mat.paintedMetal({ color: 0xc8231c, wear: 0.15 }), dark = mat.paintedMetal({ color: 0x2a2d31, wear: 0.3 });
+  const prof = [[0, 0.02], [0.6, 0.9], [2, 1.35], [5, 1.5], [11, 1.45], [15, 1.0], [19.5, 0.35], [19.8, 0.02]];
+  const body = new THREE.Mesh(new THREE.LatheGeometry(prof.map(([x, r]) => new THREE.Vector2(r, x)), 32), yel);
+  body.rotation.z = Math.PI / 2; body.position.x = 9.9; body.scale.set(1, 1, 0.85);
+  plane.add(body);
+  const belly = new THREE.Mesh(new THREE.LatheGeometry(prof.map(([x, r]) => new THREE.Vector2(r * 1.02, x)), 32, Math.PI * 0.62, Math.PI * 0.76), red);
+  belly.rotation.z = Math.PI / 2; belly.position.x = 9.9; belly.scale.set(1, 1, 0.85);
+  plane.add(belly);
+  const wingS = new THREE.Shape(); wingS.moveTo(0, 0); wingS.bezierCurveTo(0.3, 0.35, 1.2, 0.42, 3.2, 0.12); wingS.lineTo(3.3, 0); wingS.bezierCurveTo(2, -0.08, 0.6, -0.12, 0, 0);
+  const wing = new THREE.Mesh(new THREE.ExtrudeGeometry(wingS, { depth: 28.6, bevelEnabled: false }), yel);
+  wing.position.set(-2, 1.6, -14.3); plane.add(wing);
+  for (const s of [-1, 1]) {
+    const nac = new THREE.Mesh(new THREE.LatheGeometry([[0.02, -3], [0.6, -2.5], [0.75, -1], [0.7, 1.5], [0.3, 3]].map(([y, r]) => new THREE.Vector2(r, y)).map((v) => new THREE.Vector2(v.y, v.x)), 20), yel);
+    nac.rotation.z = Math.PI / 2; nac.position.set(-1.5, 1.6, s * 4.6); plane.add(nac);
+    const prop = new THREE.Mesh(new THREE.CircleGeometry(2, 24).rotateY(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false }));
+    prop.position.set(-4.6, 1.6, s * 4.6); plane.add(prop); props.push(prop);
+    const flt = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 2.4, 4, 10).rotateZ(Math.PI / 2), yel);
+    flt.position.set(-0.5, -0.6, s * 12.5); plane.add(flt);
+    const strut = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.2, 6), dark); strut.position.set(-0.5, 0.5, s * 12.5); plane.add(strut);
+  }
+  const fin = new THREE.Shape(); fin.moveTo(0, 0); fin.lineTo(3.2, 0); fin.lineTo(2.2, 5.5); fin.lineTo(0.9, 5.5); fin.closePath();
+  const finM = new THREE.Mesh(new THREE.ExtrudeGeometry(fin, { depth: 0.25, bevelEnabled: true, bevelSize: 0.08, bevelThickness: 0.08, bevelSegments: 1 }), red);
+  finM.position.set(15.8, 0.8, -0.12); plane.add(finM);
+  const stab = new THREE.Mesh(new RoundedBoxGeometry(2.2, 0.2, 10, 1, 0.08), yel); stab.position.set(18.2, 5.8, 0); plane.add(stab);
+  const cockpit = new THREE.Mesh(new RoundedBoxGeometry(1.6, 0.7, 1.9, 2, 0.25), mat.plastic({ color: 0x14202c, gloss: 1 })); cockpit.position.set(1.4, 1.25, 0); plane.add(cockpit);
+  plane.scale.setScalar(1);
   plane.visible = false;
-  sim.scene.add(plane);
+  scene.add(plane);
 }
 const flight = { active: false, t: 0, from: new THREE.Vector3(), to: new THREE.Vector3(), target: null, dropped: false };
 let planeCooldown = 0; // dakika
 const REFILL_MIN = 12;
 const DROP_R = 2.6; // hücre (≈50 m)
+const FLIGHT_S = 10; // gerçek saniye (geçiş)
 
 function sendPlane(i, j) {
   if (flight.active) { sim.toast('Uçak zaten görevde.', 'warn'); return; }
   if (planeCooldown > 0) { sim.toast(`✈️ Uçak su alıyor: ${Math.ceil(planeCooldown)} dk sonra hazır.`, 'warn'); return; }
   const k = idx(i, j);
-  const tx = i - HALF + 0.5, tz = j - HALF + 0.5, ty = Y[k] + 9;
+  const tx = cellX(i), tz = cellZ(j), ty = Math.max(hWorld(tx, tz), 0) + 45;
   // Uçak rüzgâra karşı yaklaşır
   const dx = -wind.x, dz = -wind.z, L = Math.hypot(dx, dz) || 1;
   const ux = L > 0.01 ? dx / L : 1, uz = L > 0.01 ? dz / L : 0;
-  flight.from.set(tx - ux * 70, ty + 6, tz - uz * 70);
-  flight.to.set(tx + ux * 70, ty + 6, tz + uz * 70);
-  flight.target = { i, j, x: tx, y: ty, z: tz };
+  flight.from.set(tx - ux * 900, ty + 60, tz - uz * 900);
+  flight.to.set(tx + ux * 900, ty + 60, tz + uz * 900);
+  flight.target = { i, j, x: tx, y: ty, z: tz, k };
   flight.active = true; flight.t = 0; flight.dropped = false;
   plane.visible = true;
-  plane.rotation.set(0, -Math.atan2(uz, ux), 0);
+  plane.rotation.set(0, Math.atan2(uz, -ux), 0);
 }
 function applyDrop(ci, cj) {
   let put = 0;
@@ -398,11 +492,14 @@ function computeWind() {
   }
   // Ok
   windArrow.rotation.y = -Math.atan2(wind.z, wind.x);
-  const len = 3 + windSpeed.value * 0.25;
+  const len = 60 + windSpeed.value * 4;
   shaft.scale.x = len;
-  head.position.x = len + 1.1;
-  windArrow.visible = windSpeed.value > 0.5;
+  head.position.x = len + 16;
+  windArrow.visible = showArrow.value && windSpeed.value > 0.5;
+  seatWindArrow();
   windLabel.setText(`💨 Rüzgâr ${fmt(windSpeed.value, 0)} km/sa · ${compass(windDir.value)}`);
+  sim.sky.set({ wind: [wind.x * Math.max(wind.V, 1), wind.z * Math.max(wind.V, 1)] });
+  sim.ocean.set({ wind: 1.5 + wind.V * 0.5, windDir: windDir.value });
 }
 const DIRS = ['kuzey', 'kuzeydoğu', 'doğu', 'güneydoğu', 'güney', 'güneybatı', 'batı', 'kuzeybatı'];
 const compass = (d) => `${DIRS[Math.round(d / 45) % 8]}dan`.replace('kuzeydan', 'kuzeyden').replace('doğudan', 'doğudan').replace('batıdan', 'batıdan').replace('güneydan', 'güneyden');
@@ -420,7 +517,7 @@ function ignite(k) {
     const h = village.houses.find((x) => x.k === k);
     if (h && !h.burned) {
       h.burned = true;
-      h.mesh.children.forEach((c) => (c.material = burntMat));
+      burnHouse(h);
       sim.toast('🏚 Köyde bir ev yandı!', 'bad');
     }
   }
@@ -464,7 +561,7 @@ function step() {
         if (state[sk] === 1 && wet[sk] <= 0 && Math.random() < 0.5 * moisture()) { next.push(sk); spotted++; }
       }
     }
-    if (--burnT[k] <= 0) { state[k] = 3; paint(k); }
+    if (--burnT[k] <= 0) { state[k] = 3; paint(k); } else if (burnT[k] === VEG[veg[k]].dur - 1) writeCell(k);
   }
   burning = burning.filter((k) => state[k] === 2);
   for (const k of next) ignite(k);
@@ -508,10 +605,10 @@ const humidity = ui.slider({ label: 'Bağıl nem', min: 5, max: 90, step: 1, val
 const spotting = ui.toggle({ label: 'Kıvılcım sıçraması (közler uçar)', value: true });
 
 ui.section('🌲 Orman');
-const presetSel = ui.select({ label: 'Bitki örtüsü', options: Object.entries(PRESETS).map(([value, p]) => ({ value, label: p.label })), value: 'karisik', onChange: () => rebuild() });
+const presetSel = ui.select({ label: 'Bitki örtüsü', options: Object.entries(PRESETS).map(([value, p]) => ({ value, label: p.label })), value: 'karisik', onChange: () => rebuild(false) });
 const density = ui.segmented({ label: 'Orman yoğunluğu', options: [{ value: 'seyrek', label: 'Seyrek' }, { value: 'normal', label: 'Normal' }, { value: 'sik', label: 'Sık' }], value: 'normal' });
 ui.buttons([
-  { label: '🗺 Yeni arazi', onClick: () => { seed = (seed * 31 + 11) % 997; rebuild(); } },
+  { label: '🗺 Yeni arazi', onClick: () => { seed = (seed * 31 + 11) % 997; rebuild(true); } },
   { label: '🧹 Şeritleri sil', onClick: () => clearBreaks() },
 ]);
 ui.buttons([
@@ -528,6 +625,22 @@ const stVillage = ui.stat({ label: 'Köy (sağlam ev)' });
 const stPlane = ui.stat({ label: 'Su uçağı' });
 const chart = ui.chart({ title: 'Yanan alan (ha) — zamanla', series: [{ name: 'Toplam yanan', color: '#f97316', fill: true }, { name: 'Aktif yangın', color: '#ef4444' }], maxPoints: 240 });
 const riskCard = ui.text('', 'card');
+
+ui.section('👁 Görünüm');
+const showArrow = ui.toggle({ label: 'Rüzgâr oku', value: true, onChange: () => computeWind() });
+ui.toggle({ label: 'Etiketler', value: true, onChange: (v) => document.querySelectorAll('.label-layer .lbl').forEach((e) => (e.style.display = v ? '' : 'none')) });
+ui.buttons([
+  { label: '🔭 Genel', onClick: () => sim.moveCamera([-560, 205, 760], [40, 60, 40]) },
+  { label: '🔥 Alev cephesi', onClick: () => frontView() },
+  { label: '🏘 Köy', onClick: () => { const x = cellX(village.i), z = cellZ(village.j), y = hWorld(x, z); sim.moveCamera([x - 150, y + 70, z + 170], [x, y + 5, z]); } },
+]);
+
+function frontView() {
+  let k = burning.length ? burning[0] : idx(20, 46), bs = -Infinity;
+  for (const b of burning) { const s = (b % N) * wind.x + ((b / N) | 0) * wind.z; if (s > bs) { bs = s; k = b; } }
+  const x = cellX(k % N), z = cellZ((k / N) | 0), y = hWorld(x, z);
+  sim.moveCamera([x + wind.x * 260 + 120, y + 110, z + wind.z * 260 + 200], [x, y + 10, z]);
+}
 
 function humidityTone() {
   const h = humidity.value;
@@ -561,10 +674,10 @@ function updateStats() {
 
 // --- Etkileşim ---
 function cellFromHit(p) {
-  const i = Math.floor(p.x + HALF), j = Math.floor(p.z + HALF);
+  const i = Math.floor(p.x / CELL_M + HALF), j = Math.floor(p.z / CELL_M + HALF);
   return i >= 0 && j >= 0 && i < N && j < N ? [i, j] : null;
 }
-sim.onClick([terrain], (hit) => {
+sim.onClick(() => [terrain], (hit) => {
   const c = cellFromHit(hit.point);
   if (!c) return;
   if (modeSeg.value === 'fire') {
@@ -592,7 +705,7 @@ function stamp(fi, fj) {
 function drawAt(e) {
   const hits = sim.raycast(e, [terrain]);
   if (!hits.length) return;
-  const fi = hits[0].point.x + HALF, fj = hits[0].point.z + HALF;
+  const fi = hits[0].point.x / CELL_M + HALF, fj = hits[0].point.z / CELL_M + HALF;
   if (lastPt) {
     const d = Math.hypot(fi - lastPt[0], fj - lastPt[1]);
     const n = Math.ceil(d / 0.3);
@@ -649,25 +762,34 @@ sim.onUpdate((dt) => {
   if (n >= 40) stepAcc = 0;
 });
 
-let uiTick = 0;
+let uiTick = 0, tWall = 0;
+const _sz = new THREE.Vector2();
 sim.onRender((real) => {
+  tWall += real;
   const dtp = sim.paused ? 0 : real * Math.min(sim.speed, 3);
-  if (colorDirty) { terrGeo.attributes.color.needsUpdate = true; colorDirty = false; }
-  // Alevler ve duman
+  fireU.uFireT.value = tWall;
+  sim.renderer.getDrawingBufferSize(_sz);
+  PU.scale.value = _sz.y / (2 * Math.tan(THREE.MathUtils.degToRad(sim.camera.fov) / 2));
+  if (cellDirty) { cellTex.needsUpdate = true; cellDirty = false; }
+  outerVeg?.update(tWall, 0.4 + wind.V * 0.12);
+  // Alevler ve duman (m)
   const nb = burning.length;
   if (dtp > 0 && nb) {
-    const fl = Math.min(nb * 2, 60), sm = Math.min(Math.ceil(nb / 3), 14);
+    const fl = Math.min(nb * 3, LOW ? 60 : 110), sm = Math.min(Math.ceil(nb / 2), LOW ? 10 : 18);
+    const lean = 1.5 + wind.V * 0.6;
     for (let q = 0; q < fl; q++) {
       const k = burning[(Math.random() * nb) | 0];
-      const x = (k % N) - HALF + Math.random(), z = ((k / N) | 0) - HALF + Math.random();
-      const big = veg[k] === V_CAM || veg[k] === V_MESE ? 1.4 : 0.8;
-      spawn(flames, x, Y[k] + 0.2, z, wind.x * 0.4, 1.4 + Math.random() * 1.6, wind.z * 0.4, 0.35 + Math.random() * 0.4, (1.4 + Math.random()) * big, 1, 0.45 + Math.random() * 0.4, 0.1);
+      const x = cellX(k % N) + (Math.random() - 0.5) * CELL_M, z = cellZ((k / N) | 0) + (Math.random() - 0.5) * CELL_M;
+      const tall = veg[k] === V_CAM ? 1.6 : veg[k] === V_MESE ? 1.3 : veg[k] === V_EV ? 1.4 : 0.7;
+      const hot = 0.6 + Math.random() * 0.8;
+      spawn(flames, x, hWorld(x, z) + 1 + Math.random() * 6 * tall, z, wind.x * lean, (6 + Math.random() * 8) * tall, wind.z * lean, 0.5 + Math.random() * 0.6, (7 + Math.random() * 7) * tall, 5 * hot, (1.5 + Math.random() * 1.2) * hot, 0.25 * hot);
     }
     for (let q = 0; q < sm; q++) {
       const k = burning[(Math.random() * nb) | 0];
-      const x = (k % N) - HALF + Math.random(), z = ((k / N) | 0) - HALF + Math.random();
-      const gcol = 0.25 + Math.random() * 0.2;
-      spawn(smoke, x, Y[k] + 1.5, z, wind.x * (0.6 + wind.V * 0.35), 2.2 + Math.random(), wind.z * (0.6 + wind.V * 0.35), 5 + Math.random() * 3, 3 + Math.random() * 2, gcol, gcol, gcol * 1.05);
+      const x = cellX(k % N) + (Math.random() - 0.5) * CELL_M, z = cellZ((k / N) | 0) + (Math.random() - 0.5) * CELL_M;
+      const g = 0.16 + Math.random() * 0.12;
+      // Sütun: güçlü yukarı kaldırma + uzun ömür → dikey yangın kolonu, sonra rüzgârla yatay yayılır
+      spawn(smoke, x, hWorld(x, z) + 10, z, wind.x * (1.5 + wind.V * 0.9), 26 + Math.random() * 16, wind.z * (1.5 + wind.V * 0.9), 34 + Math.random() * 20, 20 + Math.random() * 14, g * 1.05, g, g * 0.92);
     }
   }
   for (const ps of [flames, smoke, drops]) {
@@ -678,24 +800,31 @@ sim.onRender((real) => {
       ps.life[n] -= dtp;
       const f = Math.max(0, ps.life[n] / ps.maxLife[n]);
       ps.P[n * 3] += ps.vel[n * 3] * dtp; ps.P[n * 3 + 1] += ps.vel[n * 3 + 1] * dtp; ps.P[n * 3 + 2] += ps.vel[n * 3 + 2] * dtp;
-      if (ps === smoke) { ps.A[n] = Math.min(1, (1 - f) * 4) * f * 0.55; ps.S[n] += dtp * 1.6; }
-      else if (ps === flames) { ps.A[n] = f * 0.9; ps.C[n * 3 + 1] *= 1 - dtp * 1.5; }
-      else { ps.A[n] = f * 0.8; ps.vel[n * 3 + 1] -= 18 * dtp; }
+      if (ps === smoke) {
+        ps.A[n] = Math.min(1, (1 - f) * 5) * f * 0.62; ps.S[n] += dtp * 7;
+        // Kaldırma kuvveti yükseklikle artar: sütun yukarı uzanır, üstte yatay dağılır
+        ps.vel[n * 3 + 1] = ps.vel[n * 3 + 1] * (1 - dtp * 0.04) + dtp * 5.5;
+        // yükseldikçe açılır (seyreltilmiş duman güneşte daha açık görünür)
+        const lift = Math.min(1, dtp * 0.03); ps.C[n * 3] += (0.55 - ps.C[n * 3]) * lift; ps.C[n * 3 + 1] += (0.52 - ps.C[n * 3 + 1]) * lift; ps.C[n * 3 + 2] += (0.5 - ps.C[n * 3 + 2]) * lift;
+      } else if (ps === flames) { ps.A[n] = Math.min(1, (1 - f) * 6) * f; ps.C[n * 3 + 1] *= 1 - dtp * 1.6; ps.C[n * 3 + 2] *= 1 - dtp * 2; ps.S[n] *= 1 - dtp * 0.5; }
+      else { ps.A[n] = f * 0.85; ps.vel[n * 3 + 1] -= 12 * dtp; ps.S[n] += dtp * 6; }
     }
     if (any) { ps.geo.attributes.position.needsUpdate = true; ps.geo.attributes.alpha.needsUpdate = true; ps.geo.attributes.size.needsUpdate = true; ps.geo.attributes.color.needsUpdate = true; }
   }
   // Uçak (gerçek zamanlı animasyon; duraklatılınca bekler)
+  props.forEach((p) => { p.rotation.x += real * 40; });
   if (flight.active && !sim.paused) {
-    flight.t += real / 3.2;
+    flight.t += real / FLIGHT_S;
     const t = Math.min(flight.t, 1);
     plane.position.lerpVectors(flight.from, flight.to, t);
-    plane.position.y = flight.from.y - Math.sin(Math.PI * t) * 5;
+    plane.position.y = flight.from.y - Math.sin(Math.PI * t) * 55;
+    plane.rotation.z = -Math.cos(Math.PI * t) * 0.12;
     if (!flight.dropped && t >= 0.47) {
       flight.dropped = true;
       applyDrop(flight.target.i, flight.target.j);
     }
-    if (flight.dropped && t < 0.62) {
-      for (let q = 0; q < 14; q++) spawn(drops, plane.position.x + (Math.random() - 0.5) * 2, plane.position.y - 0.6, plane.position.z + (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 3, -2, (Math.random() - 0.5) * 3, 0.8, 1.6 + Math.random(), 0.75, 0.88, 1);
+    if (flight.dropped && t < 0.6) {
+      for (let q = 0; q < 26; q++) spawn(drops, plane.position.x + (Math.random() - 0.5) * 6, plane.position.y - 1.5, plane.position.z + (Math.random() - 0.5) * 6, (Math.random() - 0.5) * 6 - wind.x * 2, -8 - Math.random() * 6, (Math.random() - 0.5) * 6 - wind.z * 2, 1.6 + Math.random(), 4 + Math.random() * 4, 0.82, 0.88, 0.95);
     }
     if (flight.t >= 1) { flight.active = false; plane.visible = false; }
   }
@@ -715,7 +844,7 @@ function resetFire() {
     const v = veg[k];
     if (v === V_CAM || v === V_MESE || v === V_CALI) fuel0++;
   }
-  for (let k = 0; k < NN; k++) setGround(k);
+  for (let k = 0; k < NN; k++) writeCell(k);
   buildTrees();
   village.houses.forEach((h) => { h.burned = false; });
   buildHouses();
@@ -736,16 +865,20 @@ function resetFire() {
     const si = start % N, sj = (start / N) | 0;
     for (const [di, dj] of [[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]]) if (si + di >= 0 && sj + dj >= 0 && si + di < N && sj + dj < N) ignite(idx(si + di, sj + dj));
   }
+  // Açılış karesi için yangına biraz zaman ver (yanmış iz + duman sütunu)
+  if (warmup) { for (let q = 0; q < 22; q++) step(); warmup = false; }
   updateStats();
 }
-function rebuild() {
-  genTerrain();
+let warmup = true;
+function rebuild(newLand) {
+  if (newLand || !terrain) { genTerrain(); buildLand(); buildOuterVeg(); }
   genVegetation(presetSel.value);
+  buildRoad();
   resetFire();
 }
 
 sim.onReset(() => resetFire());
 computeWind();
 humidityTone();
-rebuild();
+rebuild(true);
 sim.toast('🔥 Batıda bir yangın başladı. Rüzgâr doğudaki köye doğru esiyor!', 'warn');

@@ -1,20 +1,20 @@
 // Zaman Makinesi Şehir — temsili bir İstanbul kıyı semtinin 1900 → 2050 dönüşümü (konut, yeşil alan, ulaşım).
-import { createSim, THREE, fmt, clamp, lerp, seeded, instanced } from '@core';
+import { createSim, THREE, fmt, clamp, lerp, seeded } from '@core';
+import { buildWorld, slopeY, ROADS } from './world.js';
 
 const Y0 = 1900, Y1 = 2050;
 const LOTS = 10;       // her model parsel ≈ 10 gerçek parsel/bina
 const LOT_M2 = 400;    // gerçek parsel alanı (m²)
-const FLOOR_H = 0.3;   // 1 kat = 3 m = 0,3 birim
 
 const sim = createSim({
-  background: 0xa9cfee,
-  camera: { position: [10, 23, 42], target: [0, 1, -4], fov: 46 },
-  controls: { maxDistance: 110, minDistance: 8 },
-  fog: [80, 170],
+  sky: { elevation: 33, azimuth: 200, clouds: 0.32, haze: 1.1, visibility: 11000, wind: [5, 2] },
+  ocean: { wind: 5, windDir: 210, fetch: 12, chop: 0.65, foam: 0.25 },
+  camera: { position: [62, 13, 114], target: [-14, 17, -6], fov: 50, near: 1, far: 80000 },
+  controls: { maxDistance: 2600, minDistance: 25, maxPolarAngle: 1.47 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>İstanbul'daki pek çok kıyı semtinden esinlenen <b>temsili</b> bir mahalle: denize inen bir yamaç, sahil yolu, iskele,
-    tepede cami ve koru. Zaman çizelgesini kaydırdıkça bahçeli iki katlı ahşap evler apartmanlara, bazı parseller yüksek
+    tepede cami ve koru. Zaman çizelgesini kaydırdıkça bahçeli iki-üç katlı eski evler apartmanlara, bazı parseller yüksek
     binalara dönüşür; tramvay yerini otomobile, sonra raylı sisteme ve bisiklet yollarına bırakır. Vapurlar hep oradadır.</p>
     <h3>Dene</h3>
     <ul>
@@ -118,168 +118,18 @@ function stats(y, plan) {
   return { pop, homes, greenPP: green / Math.max(1, pop), avgFloor: floors / Math.max(1, nb), shares: sharesAt(y, plan) };
 }
 
-// --- Sahne: arazi, su, yollar ---
-{
-  const g = new THREE.PlaneGeometry(170, 120, 120, 90).rotateX(-Math.PI / 2).translate(0, 0, -35);
-  const pos = g.attributes.position;
-  for (let i = 0; i < pos.count; i++) pos.setY(i, Math.max(-3, hillY(pos.getZ(i))));
-  g.computeVertexNormals();
-  sim.scene.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x8a9a6a, roughness: 1 })));
-}
-const water = new THREE.Mesh(new THREE.PlaneGeometry(200, 60).rotateX(-Math.PI / 2).translate(0, -0.25, 38), new THREE.MeshStandardMaterial({ color: 0x2a6f97, roughness: 0.25, metalness: 0.1 }));
-sim.scene.add(water);
-// Karşı kıyı silueti
-{
-  const g = new THREE.Group(), m = new THREE.MeshStandardMaterial({ color: 0x7b8c74, roughness: 1 });
-  for (let k = 0; k < 9; k++) { const s = new THREE.Mesh(new THREE.SphereGeometry(9, 12, 8), m); s.scale.set(1.6, 0.35, 0.7); s.position.set(-60 + k * 15, 0, 66 + (k % 2) * 4); g.add(s); }
-  sim.scene.add(g);
-}
-const asphalt = new THREE.MeshStandardMaterial({ color: 0x55585e, roughness: 0.95 });
-const ROADS_Z = [5.9, (plots[12].z + plots[24].z) / 2, (plots[36].z + plots[48].z) / 2];
-ROADS_Z.forEach((z, i) => {
-  const road = new THREE.Mesh(new THREE.BoxGeometry(80, 0.08, i ? 1.3 : 2.2), asphalt);
-  road.position.set(0, hillY(z) + 0.02, z);
-  sim.scene.add(road);
-});
-const quay = new THREE.Mesh(new THREE.BoxGeometry(80, 0.6, 1.4), new THREE.MeshStandardMaterial({ color: 0xb8b2a4 }));
-quay.position.set(0, -0.1, 7.6);
-sim.scene.add(quay);
-// İskele
-const pier = new THREE.Group();
-pier.add(new THREE.Mesh(new THREE.BoxGeometry(3, 0.3, 4).translate(0, 0, 2), new THREE.MeshStandardMaterial({ color: 0x8b6b4a })));
-pier.add(new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.2, 1.4).translate(0, 0.75, 3.3), new THREE.MeshStandardMaterial({ color: 0xe8dcc4 })));
-pier.add(new THREE.Mesh(new THREE.ConeGeometry(1.7, 0.7, 4).rotateY(Math.PI / 4).translate(0, 1.7, 3.3), new THREE.MeshStandardMaterial({ color: 0x9a4a36 })));
-pier.position.set(5, 0.05, 7.6);
-sim.scene.add(pier);
-sim.label('⚓ İskele', { parent: pier, position: [0, 2.6, 3.3], className: 'plain' });
-
-// Tramvay rayları, raylı sistem hattı, bisiklet yolları
-const tramRails = new THREE.Mesh(new THREE.BoxGeometry(80, 0.03, 0.5), new THREE.MeshStandardMaterial({ color: 0x9ca3af, metalness: 0.6 }));
-tramRails.position.set(0, hillY(5.3) + 0.08, 5.3);
-const railLine = new THREE.Group();
-railLine.add(new THREE.Mesh(new THREE.BoxGeometry(80, 0.35, 1.1), new THREE.MeshStandardMaterial({ color: 0x6b7280 })));
-railLine.position.set(0, hillY(ROADS_Z[2]) - 0.05, ROADS_Z[2] - 1.35);
-const station = new THREE.Mesh(new THREE.BoxGeometry(5, 0.9, 1.6), new THREE.MeshStandardMaterial({ color: 0xdbeafe, transparent: true, opacity: 0.85 }));
-station.position.set(1.5, 0.6, -0.9);
-railLine.add(station);
-const stationLbl = sim.label('Ⓜ İstasyon', { parent: railLine, position: [1.5, 1.8, -0.9] });
-const bikeMat = new THREE.MeshStandardMaterial({ color: 0x16a34a });
-const bikeLanes = ROADS_Z.slice(0, 2).map((z, i) => {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(80, 0.05, 0.35), bikeMat);
-  m.position.set(0, hillY(z) + 0.06, z + (i ? 0.75 : -1.25));
-  return m;
-});
-sim.scene.add(tramRails, railLine, ...bikeLanes);
-
-// --- Binalar (örnekli) ---
-const N = plots.length;
-const mk = (geo, mat, n = N) => { const m = instanced(geo, mat, n); sim.scene.add(m); return m; };
-const houseBody = mk(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ roughness: 0.9 }));
-const houseRoof = mk(new THREE.ConeGeometry(0.75, 0.5, 4).rotateY(Math.PI / 4).translate(0, 0.25, 0), new THREE.MeshStandardMaterial({ color: 0x9a4a36, roughness: 0.8, flatShading: true }));
-const aptBody = mk(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ roughness: 0.85 }));
-const towerBody = mk(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ roughness: 0.3, metalness: 0.35 }));
-const roofTop = mk(new THREE.BoxGeometry(1, 0.08, 1), new THREE.MeshStandardMaterial({ color: 0x4d9a3e, roughness: 1 }));
-const lotTiles = mk(new THREE.BoxGeometry(2.3, 0.06, 2.3), new THREE.MeshStandardMaterial({ roughness: 1 }));
-const TREES = N * 4;
-const trees = mk(new THREE.IcosahedronGeometry(0.45, 0), new THREE.MeshStandardMaterial({ color: 0x3f7a35, roughness: 0.9, flatShading: true }), TREES);
-// Cami
-const mosque = new THREE.Group();
-{
-  const stone = new THREE.MeshStandardMaterial({ color: 0xe7e2d6, roughness: 0.8 }), lead = new THREE.MeshStandardMaterial({ color: 0x8e9aa6, roughness: 0.5 });
-  mosque.add(new THREE.Mesh(new THREE.BoxGeometry(2, 1.1, 2).translate(0, 0.55, 0), stone));
-  mosque.add(new THREE.Mesh(new THREE.SphereGeometry(0.85, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2).translate(0, 1.1, 0), lead));
-  mosque.add(new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 3.2, 10).translate(1.2, 1.6, 1.2), stone));
-  mosque.add(new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.7, 10).translate(1.2, 3.55, 1.2), lead));
-  const mp = plots.find((p) => p.mosque);
-  mosque.position.set(mp.x, mp.y, mp.z);
-}
-sim.scene.add(mosque);
-
-const HOUSE_COL = [0xd9a066, 0xc98b8b, 0x9fb3c8, 0xe8d6a8, 0xb89c7d];
-const APT_COL = [0xefe6d2, 0xe2d4b7, 0xd8d0c4, 0xf2dfc4, 0xcfc6b8];
-const tm = new THREE.Matrix4(), tc = new THREE.Color(), q = new THREE.Quaternion(), yAx = new THREE.Vector3(0, 1, 0), v = new THREE.Vector3(), s3 = new THREE.Vector3();
-const place = (mesh, i, x, y, z, sx, sy, sz, rot = 0) => mesh.setMatrixAt(i, tm.compose(v.set(x, y, z), q.setFromAxisAngle(yAx, rot), s3.set(sx, sy, sz)));
-const pickMap = new Map(); // mesh → [plot indeksleri]
-
-function buildScene(y, plan) {
-  const cnt = { hb: 0, ap: 0, tw: 0, rt: 0, tr: 0 };
-  const idx = { hb: [], ap: [], tw: [] };
-  const tree = (x, yy, z, sc = 1) => { if (cnt.tr < TREES) place(trees, cnt.tr++, x, yy + 0.55 * sc, z, sc, sc * 1.2, sc); };
-  plots.forEach((p, i) => {
-    const st = plotAt(p, y, plan);
-    p.state = st;
-    const ground = st.type === 'grove' || st.type === 'park' || st.type === 'house' || st.type === 'hist' ? 0x6f9a4e : st.type === 'green' ? 0x86a66a : 0xa8a39a;
-    place(lotTiles, i, p.x, p.y + 0.01, p.z, 1, 1, 1);
-    lotTiles.setColorAt(i, tc.setHex(ground));
-    if (st.type === 'house' || st.type === 'hist') {
-      const k = cnt.hb++;
-      place(houseBody, k, p.x - 0.25, p.y, p.z + 0.3, 1.3, 2 * FLOOR_H * 1.6, 1.1, p.rot);
-      houseBody.setColorAt(k, tc.setHex(HOUSE_COL[Math.floor(p.col * 5)]));
-      place(houseRoof, k, p.x - 0.25, p.y + 2 * FLOOR_H * 1.6, p.z + 0.3, 1.25, 1, 1.05, p.rot);
-      idx.hb.push(i);
-      tree(p.x + 0.65, p.y, p.z - 0.6, 0.9);
-      if (p.v > 0.4) tree(p.x - 0.7, p.y, p.z - 0.7, 0.75);
-    } else if (st.type === 'apt' || st.type === 'green') {
-      const k = cnt.ap++, h = st.floors * FLOOR_H;
-      place(aptBody, k, p.x, p.y, p.z, 1.9, h, 1.8, p.rot * 0.3);
-      aptBody.setColorAt(k, tc.setHex(st.type === 'green' ? 0xf4f1ea : APT_COL[Math.floor(p.col * 5)]));
-      idx.ap.push(i);
-      if (st.type === 'green') { place(roofTop, cnt.rt++, p.x, p.y + h + 0.04, p.z, 1.85, 1, 1.75); tree(p.x + 1, p.y, p.z + 0.9, 0.7); }
-    } else if (st.type === 'tower') {
-      const k = cnt.tw++;
-      place(towerBody, k, p.x, p.y, p.z, 1.6, st.floors * FLOOR_H, 1.6);
-      towerBody.setColorAt(k, tc.setHex(p.col > 0.5 ? 0x7f9bb3 : 0x9aa9b8));
-      idx.tw.push(i);
-    } else if (st.type === 'grove' || st.type === 'park') {
-      for (let t = 0; t < (st.type === 'grove' ? 4 : 3); t++) tree(p.x + ((t % 2) - 0.5) * 1.1, p.y, p.z + (Math.floor(t / 2) - 0.5) * 1.1, st.type === 'grove' ? 1.1 : 0.85);
-    }
-  });
-  houseBody.count = houseRoof.count = cnt.hb;
-  aptBody.count = cnt.ap; towerBody.count = cnt.tw; roofTop.count = cnt.rt; trees.count = cnt.tr;
-  pickMap.set(houseBody, idx.hb).set(aptBody, idx.ap).set(towerBody, idx.tw);
-  for (const m of [houseBody, houseRoof, aptBody, towerBody, roofTop, lotTiles, trees]) {
-    m.instanceMatrix.needsUpdate = true;
-    if (m.instanceColor) m.instanceColor.needsUpdate = true;
-    m.computeBoundingSphere();
-  }
-}
-
-// --- Araçlar: tramvay, otomobiller, tren, vapurlar ---
-const tram = new THREE.Group();
-tram.add(new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.7, 0.55).translate(0, 0.45, 0), new THREE.MeshStandardMaterial({ color: 0xb91c1c })));
-tram.add(new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.08, 0.6).translate(0, 0.84, 0), new THREE.MeshStandardMaterial({ color: 0xf5f5dc })));
-tram.position.set(0, hillY(5.3) + 0.08, 5.3);
-const train = new THREE.Group();
-for (let k = 0; k < 4; k++) train.add(new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.6, 0.6).translate(k * 2.4, 0.5, 0), new THREE.MeshStandardMaterial({ color: k % 2 ? 0xf1f5f9 : 0xe2e8f0 })));
-train.add(new THREE.Mesh(new THREE.BoxGeometry(9.5, 0.12, 0.62).translate(3.6, 0.45, 0), new THREE.MeshStandardMaterial({ color: 0xdc2626 })));
-train.position.copy(railLine.position).add(new THREE.Vector3(0, 0.18, 0));
-const CAR_MAX = 90;
-const cars = instanced(new THREE.BoxGeometry(0.7, 0.32, 0.36).translate(0, 0.2, 0), new THREE.MeshStandardMaterial({ roughness: 0.5 }), CAR_MAX);
-const carState = [];
-const CAR_COL = [0xef4444, 0x3b82f6, 0xf8fafc, 0x111827, 0xfacc15, 0x9ca3af];
-for (let k = 0; k < CAR_MAX; k++) {
-  const lane = k % 5, road = lane < 2 ? 0 : lane < 4 ? 1 : 2, dir = lane % 2 ? 1 : -1;
-  carState.push({ x: rnd() * 80 - 40, z: ROADS_Z[road] + (road === 0 ? (dir > 0 ? 0.45 : -0.1) : dir * 0.3), dir, sp: 3 + rnd() * 2 });
-  cars.setColorAt(k, tc.setHex(CAR_COL[k % CAR_COL.length]));
-}
-const ferries = [0, 1].map((k) => {
-  const f = new THREE.Group();
-  f.add(new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.7, 1.3).translate(0, 0.2, 0), new THREE.MeshStandardMaterial({ color: 0xf8fafc })));
-  f.add(new THREE.Mesh(new THREE.BoxGeometry(3, 0.55, 1.1).translate(0, 0.8, 0), new THREE.MeshStandardMaterial({ color: 0xe5e7eb })));
-  const chim = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.9, 10).translate(0, 1.4, 0), new THREE.MeshStandardMaterial({ color: 0x111111 }));
-  f.add(chim);
-  f.userData = { chim, phase: k * Math.PI };
-  sim.scene.add(f);
-  return f;
-});
-sim.scene.add(tram, train, cars);
+// --- Sahne (world.js): yamaç, deniz, rıhtım, iskele, cami, dönem mimarisi, taşıtlar ---
+plots.forEach((p) => { p.x *= 10; p.z *= 10; });
+const world = buildWorld(sim, plots);
 
 // --- Etiketler ---
-const eraLbl = sim.label('', { position: [0, 13, -14], className: 'big' });
+const eraLbl = sim.label('', { position: [-30, 125, -160], className: 'big' });
 const tagLbls = [
-  sim.label('', { position: [-12, 4, 6.2], className: 'plain' }),
-  sim.label('', { position: [14, 7, ROADS_Z[2]], className: 'plain' }),
+  sim.label('', { position: [-150, 12, 51], className: 'plain' }),
+  sim.label('', { position: [170, slopeY(ROADS.r2) + 14, ROADS.r2], className: 'plain' }),
 ];
+const stationLbl = sim.label('Ⓜ İstasyon', { position: [15, slopeY(ROADS.r2) + 9, ROADS.r2] });
+const pierLbl = sim.label('⚓ İskele', { position: [world.PIER.x, 14, world.PIER.z1 - 8], className: 'plain' });
 
 // --- Dönem kartları ---
 const ERAS = [
@@ -313,7 +163,7 @@ const plan = ui.segmented({
 });
 ui.section('Görünüm');
 const showVeh = ui.toggle({ label: 'Araçları göster', value: true, onChange: () => update() });
-const showLbl = ui.toggle({ label: 'Etiketler', value: true, onChange: (x) => [eraLbl, stationLbl, ...tagLbls].forEach((l) => (l.visible = x)) });
+const showLbl = ui.toggle({ label: 'Etiketler', value: true, onChange: (x) => { [eraLbl, pierLbl, ...tagLbls].forEach((l) => (l.visible = x)); update(); } });
 
 ui.section('Dönem');
 const eraCard = ui.text('', 'card');
@@ -342,13 +192,15 @@ function drawCharts() {
 }
 
 sim.formatTime = () => `Yıl ${Math.round(yearF)}`;
-let lastKey = '', cur = null;
+let lastKey = '', lastSig = '', cur = null;
 function update() {
   const y = Math.round(yearF), pl = plan.value;
   const key = `${y}|${pl}`;
   if (key !== lastKey) {
     lastKey = key;
-    buildScene(y, pl);
+    const states = plots.map((p) => (p.state = plotAt(p, y, pl)));
+    const sig = states.map((s) => s.type[0] + s.floors).join('') + '|' + pl + Math.floor(y / 3) + (y >= 1950) + (y >= 1960) + (y >= 1965);
+    if (sig !== lastSig) { lastSig = sig; world.rebuild(states, y, pl); }
     cur = stats(y, pl);
     const era = [...ERAS].reverse().find((e) => y >= e[0]);
     eraLbl.setText(`${y} · ${era[1]}`);
@@ -361,20 +213,16 @@ function update() {
       <span style="width:92px">${m.name}</span><span style="flex:1;height:8px;border-radius:4px;background:rgba(148,163,184,.2)">
       <span style="display:block;height:8px;border-radius:4px;width:${cur.shares[i]}%;background:${m.color}"></span></span><b style="width:34px;text-align:right">%${fmt(cur.shares[i])}</b></div>`).join(''));
   }
-  const veh = showVeh.value;
-  tram.visible = veh && y < 1962;
-  tramRails.visible = y < 1962;
-  railLine.visible = y >= 2008;
-  station.visible = stationLbl.visible = y >= 2008;
-  stationLbl.visible = y >= 2008 && showLbl.value;
-  train.visible = veh && y >= 2012;
+  const lbl = showLbl.value;
+  stationLbl.visible = y >= 2008 && lbl;
   const bike = cur.shares[5];
-  bikeLanes.forEach((b, i) => (b.visible = bike > (i ? 4 : 0.8)));
-  cars.count = veh ? Math.min(CAR_MAX, Math.round((cur.shares[2] / 100) * cur.pop / 180)) : 0;
-  ferries.forEach((f) => { f.visible = veh; f.userData.chim.material.color.setHex(y < 1960 ? 0x111111 : 0xf59e0b); });
+  world.bikeA.visible = bike > 0.8;
+  world.bikeB.visible = bike > 4;
+  nCars = Math.round((cur.shares[2] / 100) * cur.pop / 180);
   tagLbls[0].setText(y < 1962 ? '🚋 Tramvay' : bike > 0.8 ? '🚲 Bisiklet yolu' : '🚗 Sahil yolu');
   tagLbls[1].setText(y >= 2008 ? '🚆 Raylı sistem' : '');
 }
+let nCars = 0;
 
 sim.onUpdate((dt) => {
   if (playing) {
@@ -382,34 +230,27 @@ sim.onUpdate((dt) => {
     if (Math.round(yearF) !== year.value) { year.set(Math.round(yearF)); update(); }
     if (yearF >= Y1) { playing = false; sim.toast(`2050 · Plan ${plan.value} tamamlandı`, 'good'); }
   }
-  // Araç hareketi
-  const t = sim.time;
-  tram.position.x = ((t * 2.2) % 80) - 40;
-  train.position.x = ((t * 6) % 90) - 50;
-  for (let k = 0; k < cars.count; k++) {
-    const c = carState[k];
-    c.x += c.dir * c.sp * Math.min(dt, 0.25);
-    if (c.x > 40) c.x -= 80; else if (c.x < -40) c.x += 80;
-    tm.makeRotationY(c.dir > 0 ? 0 : Math.PI).setPosition(c.x, hillY(c.z) + 0.05, c.z);
-    cars.setMatrixAt(k, tm);
-  }
-  cars.instanceMatrix.needsUpdate = true;
-  ferries.forEach((f, k) => {
-    const a = t * 0.12 + f.userData.phase;
-    f.position.set(Math.cos(a) * 22, 0.05, 12.6 + Math.sin(a) * 1.2 + k * 1.6);
-    f.rotation.y = Math.sin(a) > 0 ? Math.PI : 0;
-  });
+});
+sim.onRender((rdt) => {
+  world.update(sim.time, sim.paused ? 0 : Math.min(rdt, 0.1) * sim.speed, { veh: showVeh.value, y: Math.round(yearF), nCars });
 });
 
-sim.onClick(() => [houseBody, aptBody, towerBody], (hit) => {
-  const p = plots[pickMap.get(hit.object)?.[hit.instanceId]];
-  if (!p) return;
-  const s = p.state;
-  const name = { house: 'Ahşap ev', hist: 'Korunan tarihi ahşap ev', apt: 'Apartman', tower: 'Yüksek bina', green: 'Yeşil çatılı yeni bina' }[s.type];
-  const built = s.type === 'house' || s.type === 'hist' ? '1900 öncesi' : s.type === 'tower' && p.tT <= yearF ? p.tT : s.type === 'apt' && !(yearF >= p.tF && yearF > 2025) ? p.tA : p.tF;
+// Binaya tıkla: en yakın parselin durumu
+sim.onClick(() => world.buildings(), (hit) => {
+  const P = hit.point;
+  let best = null, bd = 16;
+  for (const p of plots) { const d = Math.max(Math.abs(p.x - P.x), Math.abs(p.z - P.z)); if (d < bd) { bd = d; best = p; } }
+  if (!best || !best.state || best.state.floors === 0) return;
+  const s = best.state;
+  const name = { house: 'Eski ev (taş bodrumlu, kiremit çatılı)', hist: 'Korunan tarihi ev', apt: 'Apartman', tower: 'Yüksek bina', green: 'Yeşil çatılı yeni bina', mosque: 'Mahalle camii' }[s.type];
+  if (s.type === 'mosque') { sim.toast(`<b>${name}</b> · tek kubbeli, tek minareli klasik plan`); return; }
+  const built = s.type === 'house' || s.type === 'hist' ? '1900 öncesi' : s.type === 'tower' && best.tT <= yearF ? best.tT : s.type === 'apt' && !(yearF >= best.tF && yearF > 2025) ? best.tA : best.tF;
   sim.toast(`<b>${name}</b> · ${s.floors} kat · yapım: ${built}`);
 });
 
 sim.onReset(() => { playing = true; yearF = Y0; year.set(Y0); plan.set('A'); lastKey = ''; drawCharts(); update(); });
+// ?yil=1985 → o yıldan duraklatılmış başla (inceleme / ekran görüntüsü için)
+const qy = /[?&]yil=(\d{4})/.exec(location.search);
+if (qy) { yearF = clamp(+qy[1], Y0, Y1); year.set(Math.round(yearF)); playing = false; }
 drawCharts();
 update();

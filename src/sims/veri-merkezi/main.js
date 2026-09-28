@@ -1,5 +1,6 @@
 // Yapay Zekâ Veri Merkezi — BT yükü, PUE, buharlaşmalı soğutmanın su tüketimi, şebeke karbon yoğunluğu ve eşdeğerler.
-import { createSim, THREE, fmt, clamp, rand, seeded, heatColor, instanced, smoothstep } from '@core';
+import { createSim, THREE, fmt, clamp, rand, seeded, heatColor, instanced, smoothstep, mat, procedural, landscape, createTerrain, terrainSkirt, createVegetation, RoundedBoxGeometry, BufferGeometryUtils } from '@core';
+import { rackMaterial, rackGeometry, raisedFloor, cableTray, ledStrip, haze } from './serverhall.js';
 import { COOLING, GRIDS, overheads, pue, wue, facility } from './model.js';
 import { xyPlot } from './plot.js';
 
@@ -13,13 +14,13 @@ const GEMINI_WH = 0.24; // Google (2025): medyan Gemini Apps metin istemi
 const IEA_2024 = 415, IEA_2030 = 945; // TWh
 
 const sim = createSim({
-  background: 0x0b1220,
-  camera: { position: [-18, 20, 25], target: [0.3, 1.5, -1], fov: 50 },
-  controls: { maxDistance: 120, minDistance: 5 },
-  fog: [70, 180],
+  sky: { elevation: 34, azimuth: 205, clouds: 0.35, haze: 1, visibility: 12000 },
+  camera: { position: [-5.6, 3.7, 7.2], target: [0.8, 0.9, -1.2], fov: 56, near: 0.03, far: 60000 },
+  controls: { maxDistance: 120, minDistance: 1.5 },
+  look: { aoRadius: 0.35 },
   info: `
     <h3>Ne görüyorsun?</h3>
-    <p>Bir veri merkezi salonunun kesiti. Raflardaki sunucular (yapay zekâ raflarında GPU'lar) çektikleri elektriğin
+    <p>Bir veri merkezi salonunun içi (dışarıdaki soğutma kulesi, chiller ve trafo merkezi için Görünüm düğmelerini kullan). Raflardaki sunucular (yapay zekâ raflarında GPU'lar) çektikleri elektriğin
     <b>neredeyse tamamını ısıya</b> çevirir. Soğuk hava raf önündeki <b>soğuk koridordan</b> girer, ısınıp arkadaki
     <b>sıcak koridora</b> çıkar. Isı dışarı ya kompresörlü soğutucularla (chiller), ya serin dış havayla, ya da su
     <b>buharlaştırılarak</b> (soğutma kulesi) atılır. Sıvı soğutmada su, doğrudan çiplerin üstündeki plakalardan geçer.</p>
@@ -53,13 +54,21 @@ const sim = createSim({
 });
 
 const scene = sim.scene;
-scene.add(new THREE.AmbientLight(0x6070a0, 0.5));
 
-// --- Zemin ve salon ---
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshStandardMaterial({ color: 0x1b2433, roughness: 1 }));
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.02;
-scene.add(ground);
+// --- Dış saha: düz arazi, asfalt avlu, çim ---
+{
+  const flat = (x, z) => { const r = Math.max(Math.abs(x), Math.abs(z)); return -0.05 + smoothstep(120, 900, r) * (hills(x, z) + 60); };
+  const hills = landscape({ seed: 12, size: 900, height: 220, base: -30 });
+  scene.add(createTerrain(flat, { size: [6000, 6000], res: [160, 160], materialOptions: { water: -500, grass: 0x5a6a30, dry: 0x958a5a, forest: 0.8 } }));
+  scene.add(terrainSkirt(flat, { inner: 3000, outer: 50000 }));
+  const yard = new THREE.Mesh(new THREE.PlaneGeometry(64, 52).rotateX(-Math.PI / 2), mat.asphalt({ color: 0x4a4b4f }));
+  yard.position.set(2, 0.01, 2); yard.receiveShadow = true; yard.userData.noFit = true; yard.userData.noCast = true;
+  scene.add(yard);
+  const trees = createVegetation(flat, { rect: [-160, -160, 160, 160], trees: 260, rocks: 0, seed: 4, water: -10, kinds: { broad: 0.6, cypress: 0.4 },
+    forest: (x, z) => (Math.abs(x - 2) < 36 && Math.abs(z - 2) < 30 ? 0 : 0.8) });
+  scene.add(trees.group);
+  sim.onRender(() => trees.update(performance.now() / 1000, 0.5));
+}
 
 const rowZ = [];
 {
@@ -71,34 +80,71 @@ const HALL_W = PER_ROW * RW + 4, HALL_D = rowZ[ROWS - 1] + RD / 2 + AISLE;
 const Z0 = -HALL_D / 2, X0 = -(PER_ROW * RW) / 2;
 const hall = new THREE.Group();
 scene.add(hall);
+const coldAisle = (z) => {
+  for (let a = 0; a <= ROWS; a += 2) {
+    const zc = Z0 + (a === 0 ? AISLE / 2 : rowZ[a - 1] + RD / 2 + AISLE / 2);
+    if (Math.abs(z - zc) < AISLE / 2) return true;
+  }
+  return false;
+};
 {
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(HALL_W, HALL_D), new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.8 }));
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = 0.01;
-  hall.add(floor);
-  const wallM = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.9, transparent: true, opacity: 0.85 });
-  const back = new THREE.Mesh(new THREE.BoxGeometry(HALL_W, HALL_H, 0.2), wallM);
-  back.position.set(0, HALL_H / 2, Z0 - 0.1);
-  const side = new THREE.Mesh(new THREE.BoxGeometry(0.2, HALL_H, HALL_D), wallM);
-  side.position.set(HALL_W / 2 + 0.1, HALL_H / 2, 0);
-  hall.add(back, side);
-  // koridor şeritleri
+  // yükseltilmiş döşeme (soğuk koridorlarda delikli karolar), duvarlar, çatı, kolonlar
+  hall.add(raisedFloor(-HALL_W / 2, Z0, HALL_W / 2, Z0 + HALL_D, (x, z) => Math.abs(x) < PER_ROW * RW / 2 && coldAisle(z)));
+  const wallIn = mat.concrete({ color: 0xcfd2d3, stains: 0.12 });
+  const add = (g, m, cast = true) => { const o = new THREE.Mesh(g, m); o.castShadow = cast; o.receiveShadow = true; o.userData.noFit = true; hall.add(o); return o; };
+  const T = 0.3;
+  add(new THREE.BoxGeometry(HALL_W + 2 * T, HALL_H, T).translate(0, HALL_H / 2, Z0 - T / 2), wallIn);
+  add(new THREE.BoxGeometry(HALL_W + 2 * T, HALL_H, T).translate(0, HALL_H / 2, Z0 + HALL_D + T / 2), wallIn);
+  add(new THREE.BoxGeometry(T, HALL_H, HALL_D).translate(-HALL_W / 2 - T / 2, HALL_H / 2, 0), wallIn);
+  add(new THREE.BoxGeometry(T, HALL_H, HALL_D).translate(HALL_W / 2 + T / 2, HALL_H / 2, 0), wallIn);
+  // dış cephe: yatay metal paneller (duvarın dış yüzünde ince kabuk), çatı ve parapet
+  const clad = procedural({
+    key: 'vm-clad', bump: 0.02, params: { color: 0xb9bec2, roughness: 0.5, metalness: 0.35 },
+    pattern: `
+      float band = fract(p.y/0.9);
+      float seam = 1.0 - smoothstep(0.0, 0.03, min(band, 1.0 - band));
+      float n = fbm3(p*0.3, 3);
+      col *= (0.9 + 0.15*n)*(1.0 - 0.35*seam*aaW(p*1.1));
+      h = -seam;`,
+  });
+  const S2 = T + 0.06;
+  add(new THREE.BoxGeometry(HALL_W + 2 * S2, HALL_H + 0.6, 0.05).translate(0, (HALL_H + 0.6) / 2, Z0 - S2), clad);
+  add(new THREE.BoxGeometry(HALL_W + 2 * S2, HALL_H + 0.6, 0.05).translate(0, (HALL_H + 0.6) / 2, Z0 + HALL_D + S2), clad);
+  add(new THREE.BoxGeometry(0.05, HALL_H + 0.6, HALL_D + 2 * S2).translate(-HALL_W / 2 - S2, (HALL_H + 0.6) / 2, 0), clad);
+  add(new THREE.BoxGeometry(0.05, HALL_H + 0.6, HALL_D + 2 * S2).translate(HALL_W / 2 + S2, (HALL_H + 0.6) / 2, 0), clad);
+  const roof = add(new THREE.BoxGeometry(HALL_W + 2 * T, 0.25, HALL_D + 2 * T).translate(0, HALL_H + 0.125, 0), mat.concrete({ color: 0x9c9a94, stains: 0.5 }));
+  roof.userData.roof = true;
+  // tavan: kablo tavaları (her raf sırası üstünde), LED şerit armatürler
+  for (let r = 0; r < ROWS; r++) {
+    const z = Z0 + rowZ[r];
+    hall.add(cableTray([X0 - 0.6, z - 0.25], [-X0 + 0.6, z - 0.25], RH + 0.45, 0.4, r % 2 ? 0x9aa3ab : 0xd7b21f));
+    hall.add(cableTray([X0 - 0.6, z + 0.3], [-X0 + 0.6, z + 0.3], RH + 0.8, 0.3, 0x9aa3ab));
+  }
   for (let a = 0; a <= ROWS; a++) {
     const zc = Z0 + (a === 0 ? AISLE / 2 : rowZ[a - 1] + RD / 2 + AISLE / 2);
-    const cold = a % 2 === 0;
-    const strip = new THREE.Mesh(new THREE.PlaneGeometry(PER_ROW * RW, AISLE * 0.9), new THREE.MeshBasicMaterial({ color: cold ? 0x1d4ed8 : 0xb91c1c, transparent: true, opacity: 0.35 }));
-    strip.rotation.x = -Math.PI / 2;
-    strip.position.set(0, 0.02, zc);
-    hall.add(strip);
+    for (const x of [-2.6, 2.6]) hall.add(ledStrip(3.2, x, HALL_H - 0.05, zc, Math.PI / 2));
   }
+  // iç aydınlatma (tavan armatürleri; gölgesiz nokta ışıklar)
+  for (const x of [-3.5, 3.5]) for (const z of [-5, 0, 5]) {
+    const L = new THREE.PointLight(0xe8f0ff, 5.5, 14, 2);
+    L.position.set(x, HALL_H - 0.4, z);
+    hall.add(L);
+  }
+  // soğuk koridor pusu
+  hall.userData.haze = haze(90, [X0, 0.05, Z0 + 0.2, -X0, 1.0, Z0 + HALL_D - 0.2]);
+  hall.add(hall.userData.haze);
 }
 
 // --- Raflar ---
-const rackMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.5, metalness: 0.4 });
-const racks = instanced(new THREE.BoxGeometry(RW * 0.94, RH, RD), rackMat, NR);
-const ledGeo = new THREE.PlaneGeometry(RW * 0.8, RH * 0.85);
-const leds = instanced(ledGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 }), NR);
-const tops = instanced(new THREE.BoxGeometry(RW * 0.94, 0.06, RD * 0.5), new THREE.MeshBasicMaterial({ color: 0xffffff }), NR);
+const rackMat = rackMaterial({ w: RW, h: RH });
+const racks = instanced(rackGeometry(RW, RH, RD), rackMat, NR);
+// raf durum ışığı: kapı kenarında dikey ışık çubuğu (renk = yük, ısı ölçeği)
+const ledGeo = new THREE.BoxGeometry(0.02, RH * 0.8, 0.01);
+const leds = instanced(ledGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(1.8, 1.8, 1.8) }), NR);
+// raf üstü tür ışığı: mor = yapay zekâ (GPU) rafı, mavi = klasik
+const tops = instanced(new THREE.BoxGeometry(RW * 0.7, 0.025, 0.04), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.8, 1.8, 1.8) }), NR);
+racks.castShadow = racks.receiveShadow = true; racks.userData.noFit = true;
+leds.userData.noCast = tops.userData.noCast = true;
 hall.add(racks, leds, tops);
 const rackInfo = [];
 {
@@ -108,51 +154,61 @@ const rackInfo = [];
     for (let i = 0; i < PER_ROW; i++) {
       const k = r * PER_ROW + i;
       const x = X0 + (i + 0.5) * RW, z = Z0 + rowZ[r];
-      M.makeTranslation(x, RH / 2, z); racks.setMatrixAt(k, M);
-      M.makeTranslation(x, RH / 2 + 0.05, z + (facesNeg ? -1 : 1) * (RD / 2 + 0.005));
       R.makeRotationY(facesNeg ? Math.PI : 0);
-      leds.setMatrixAt(k, M.multiply(R));
-      M.makeTranslation(x, RH + 0.03, z); tops.setMatrixAt(k, M);
+      M.makeTranslation(x, 0, z); racks.setMatrixAt(k, M.clone().multiply(R));
+      M.makeTranslation(x + (facesNeg ? 1 : -1) * (RW / 2 - 0.035), 0.12 + RH * 0.4, z + (facesNeg ? -1 : 1) * (RD / 2 + 0.006));
+      leds.setMatrixAt(k, M);
+      M.makeTranslation(x, RH + 0.02, z + (facesNeg ? -1 : 1) * (RD / 2 - 0.05)); tops.setMatrixAt(k, M);
       rackInfo.push({ x, z, facesNeg, h: rnd(), ph: rnd() * 6.28 });
     }
   }
 }
 
-// Sıvı soğutma boruları (satır üstünde)
-const pipeMat = new THREE.MeshStandardMaterial({ color: 0x0e7490, emissive: 0x06b6d4, emissiveIntensity: 0.5, roughness: 0.4 });
+// Sıvı soğutma boruları (satır üstünde; akış ışıması) ve CDU
+const pipeMat = new THREE.MeshStandardMaterial({ color: 0x0e7490, emissive: 0x06b6d4, emissiveIntensity: 0.5, roughness: 0.35, metalness: 0.3 });
 const pipes = new THREE.Group();
 for (let r = 0; r < ROWS; r++) {
   for (const dz of [-0.2, 0.2]) {
-    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, PER_ROW * RW + 2, 8), pipeMat);
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, PER_ROW * RW + 2, 12), pipeMat);
     p.rotation.z = Math.PI / 2;
-    p.position.set(1, RH + 0.25, Z0 + rowZ[r] + dz);
+    p.position.set(1, RH + 0.18, Z0 + rowZ[r] + dz);
     pipes.add(p);
   }
 }
 {
-  const cdu = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2, 1.6), new THREE.MeshStandardMaterial({ color: 0x0891b2 }));
+  const cdu = new THREE.Mesh(new RoundedBoxGeometry(0.9, 2, 1.6, 2, 0.03), mat.paintedMetal({ color: 0x2b7a8c, wear: 0.1 }));
   cdu.position.set(X0 + PER_ROW * RW + 1.3, 1, 0);
+  cdu.castShadow = true;
   pipes.add(cdu);
 }
 hall.add(pipes);
 
-// Hava soğutma üniteleri (CRAH) arka duvar boyunca
+// Hava soğutma üniteleri (CRAH) duvar boyunca: panelli dolap, üstte ızgara
 const crahs = new THREE.Group();
 for (let a = 0; a <= ROWS; a += 2) {
-  const u = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.2, 0.8), new THREE.MeshStandardMaterial({ color: 0x94a3b8 }));
   const zc = Z0 + (a === 0 ? AISLE / 2 : rowZ[a - 1] + RD / 2 + AISLE / 2);
-  u.position.set(X0 - 1.1, 1.1, zc);
-  crahs.add(u);
+  const u = new THREE.Mesh(new RoundedBoxGeometry(0.9, 2.2, 1.6, 2, 0.03), mat.paintedMetal({ color: 0xdcdcd6, wear: 0.08 }));
+  u.position.set(X0 - 1.35, 1.1, zc); u.castShadow = true;
+  const grille = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.9, 1.3), mat.brushedMetal({ color: 0x80868c, rough: 0.5 }));
+  grille.position.set(X0 - 0.89, 1.4, zc);
+  crahs.add(u, grille);
 }
 hall.add(crahs);
 
-// --- Hava akış parçacıkları ---
+// --- Hava akış parçacıkları (yumuşak ışık lekeleri: mavi soğuk, kırmızı sıcak) ---
 const airPos = new Float32Array(NAIR * 3), airCol = new Float32Array(NAIR * 3);
 const airGeo = new THREE.BufferGeometry();
 airGeo.setAttribute('position', new THREE.BufferAttribute(airPos, 3));
 airGeo.setAttribute('color', new THREE.BufferAttribute(airCol, 3));
-const air = new THREE.Points(airGeo, new THREE.PointsMaterial({ size: 3, sizeAttenuation: false, vertexColors: true, transparent: true, opacity: 0.85, depthWrite: false }));
-air.frustumCulled = false;
+const softTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const x = c.getContext('2d'), gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,0.6)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+const air = new THREE.Points(airGeo, new THREE.PointsMaterial({ size: 0.13, map: softTex, vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
+air.frustumCulled = false; air.userData.noFit = true;
 hall.add(air);
 const airS = new Float32Array(NAIR), airRack = new Uint16Array(NAIR), airH = new Float32Array(NAIR), airDx = new Float32Array(NAIR);
 function spawnAir(i) {
@@ -169,76 +225,119 @@ scene.add(outside);
 const TOWER_POS = new THREE.Vector3(HALL_W / 2 + 6, 0, -5);
 {
   const pts = [];
-  for (let i = 0; i <= 16; i++) {
-    const y = (i / 16) * 9;
+  for (let i = 0; i <= 24; i++) {
+    const y = (i / 24) * 9;
     pts.push(new THREE.Vector2(2.2 + 1.3 * Math.pow((y - 6) / 6, 2), y));
   }
-  const tower = new THREE.Mesh(new THREE.LatheGeometry(pts, 28), new THREE.MeshStandardMaterial({ color: 0xa8b3c2, roughness: 0.9, side: THREE.DoubleSide }));
-  tower.position.copy(TOWER_POS);
+  const tower = new THREE.Mesh(new THREE.LatheGeometry(pts, 48), mat.concrete({ color: 0xc2bfb6, stains: 0.7 }));
+  tower.material.side = THREE.DoubleSide;
+  tower.position.copy(TOWER_POS); tower.castShadow = true; tower.receiveShadow = true;
   outside.add(tower);
+  // ayaklar (hava girişi) ve havuz kenarı
+  for (let k = 0; k < 16; k++) {
+    const a = (k / 16) * Math.PI * 2;
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.2, 0.18), mat.concrete({ color: 0xb0ada5 }));
+    leg.position.set(TOWER_POS.x + Math.cos(a) * 3.3, 0.6, TOWER_POS.z + Math.sin(a) * 3.3);
+    outside.add(leg);
+  }
+  const basin = new THREE.Mesh(new THREE.TorusGeometry(3.9, 0.18, 8, 48).rotateX(Math.PI / 2), mat.concrete({ color: 0xa9a59c }));
+  basin.position.set(TOWER_POS.x, 0.18, TOWER_POS.z);
+  outside.add(basin);
 }
 const vapPos = new Float32Array(NVAP * 3), vapAge = new Float32Array(NVAP);
 const vapGeo = new THREE.BufferGeometry();
 vapGeo.setAttribute('position', new THREE.BufferAttribute(vapPos, 3));
-const vapor = new THREE.Points(vapGeo, new THREE.PointsMaterial({ color: 0xf1f5f9, size: 1.4, transparent: true, opacity: 0.45, depthWrite: false }));
-vapor.frustumCulled = false;
+const vapor = new THREE.Points(vapGeo, new THREE.PointsMaterial({ color: 0xf1f5f9, size: 2.6, map: softTex, transparent: true, opacity: 0.32, depthWrite: false }));
+vapor.frustumCulled = false; vapor.userData.noFit = true;
 outside.add(vapor);
 for (let i = 0; i < NVAP; i++) { vapAge[i] = Math.random() * 6; vapPos[i * 3 + 1] = -100; }
 
 const chillers = new THREE.Group();
 const fans = [];
-for (let i = 0; i < 3; i++) {
-  const c = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.6, 2), new THREE.MeshStandardMaterial({ color: 0x64748b }));
-  c.position.set(HALL_W / 2 + 3 + i * 3.6, 0.8, HALL_D / 2 + 3);
-  const fan = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.75, 0.08, 6), new THREE.MeshStandardMaterial({ color: 0x1e293b }));
-  fan.position.set(0, 0.85, 0);
-  const blade = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.04, 0.18), new THREE.MeshStandardMaterial({ color: 0xcbd5e1 }));
-  blade.position.y = 0.06;
-  fan.add(blade);
-  c.add(fan);
-  fans.push(fan);
-  chillers.add(c);
+{
+  const body = mat.paintedMetal({ color: 0xd3d5d2, wear: 0.15 });
+  const coil = procedural({ key: 'vm-coil', bump: 0.03, params: { color: 0x7d8286, roughness: 0.5, metalness: 0.6 },
+    pattern: `float f = sin(p.x*120.0 + p.z*120.0); col *= 0.75 + 0.25*f*aaW(p*20.0); h = f*0.5 + 0.5;` });
+  const bladeG = (() => {
+    const gs = [];
+    for (let b = 0; b < 5; b++) gs.push(new THREE.BoxGeometry(0.62, 0.015, 0.16).rotateX(0.35).translate(0.33, 0, 0).rotateY((b / 5) * Math.PI * 2).toNonIndexed());
+    return BufferGeometryUtils.mergeGeometries(gs);
+  })();
+  for (let i = 0; i < 3; i++) {
+    const c = new THREE.Group();
+    c.position.set(HALL_W / 2 + 3 + i * 3.6, 0, HALL_D / 2 + 3);
+    const box = new THREE.Mesh(new RoundedBoxGeometry(3.2, 1.7, 2, 2, 0.04), body); box.position.y = 0.95; box.castShadow = true;
+    const cl = new THREE.Mesh(new THREE.BoxGeometry(3.0, 1.2, 2.04), coil); cl.position.y = 0.95;
+    const shroud = new THREE.Mesh(new THREE.CylinderGeometry(0.78, 0.78, 0.25, 32, 1, true), mat.paintedMetal({ color: 0x2c2f33 }));
+    shroud.material.side = THREE.DoubleSide; shroud.position.y = 1.9;
+    const fan = new THREE.Mesh(bladeG, mat.brushedMetal({ color: 0xb8bcc0, rough: 0.4 }));
+    fan.position.set(0, 1.85, 0);
+    const guard = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.01, 4, 32).rotateX(Math.PI / 2), mat.paintedMetal({ color: 0x2c2f33 }));
+    guard.position.y = 2.02;
+    c.add(box, cl, shroud, fan, guard);
+    c.traverse((o) => { o.userData.noFit = true; });
+    fans.push(fan);
+    chillers.add(c);
+  }
 }
 outside.add(chillers);
 
 const substation = new THREE.Group();
 substation.position.set(-HALL_W / 2 - 5, 0, -6);
+const lineMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.08, 0.08, 0.08), transparent: true, opacity: 0.8 });
 {
-  const tr = new THREE.Mesh(new THREE.BoxGeometry(3, 2.4, 2.2), new THREE.MeshStandardMaterial({ color: 0x475569 }));
-  tr.position.y = 1.2;
+  const tr = new THREE.Mesh(new RoundedBoxGeometry(3, 2.4, 2.2, 2, 0.05), mat.paintedMetal({ color: 0x7c8a80, wear: 0.2 }));
+  tr.position.y = 1.2; tr.castShadow = true;
   substation.add(tr);
+  // soğutma kanatları
+  for (let k = 0; k < 9; k++) { const f = new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.8, 0.6), tr.material); f.position.set(-1.2 + k * 0.3, 1.2, 1.4); substation.add(f); }
   for (const dx of [-0.8, 0, 0.8]) {
-    const ins = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.14, 0.9, 8), new THREE.MeshStandardMaterial({ color: 0xb45309 }));
-    ins.position.set(dx, 2.85, 0);
+    const ins = new THREE.Mesh(new THREE.LatheGeometry([[0.12, 0], [0.2, 0.08], [0.1, 0.16], [0.2, 0.26], [0.1, 0.34], [0.2, 0.44], [0.1, 0.52], [0.18, 0.62], [0.08, 0.72], [0.08, 0.9]].map(([a, b]) => new THREE.Vector2(a, b)), 16), mat.ceramic({ color: 0x8a4a2a }));
+    ins.position.set(dx, 2.4, 0);
     substation.add(ins);
   }
-  // direkler ve hat
-  const poleM = new THREE.MeshStandardMaterial({ color: 0x94a3b8 });
+  const pole = mat.concrete({ color: 0xb5b1a8 });
+  const pts = [new THREE.Vector3(0, 3.3, 0)];
   for (let k = 1; k <= 3; k++) {
-    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.2, 10, 6), poleM);
-    p.position.set(-k * 14, 5, -k * 6);
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(3, 0.15, 0.15), poleM);
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.22, 10, 10), pole);
+    p.position.set(-k * 14, 5, -k * 6); p.castShadow = true;
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(3, 0.15, 0.15), mat.paintedMetal({ color: 0x6b6f73 }));
     arm.position.set(-k * 14, 9.6, -k * 6);
     substation.add(p, arm);
+    pts.push(new THREE.Vector3(-k * 14, 9.6, -k * 6));
   }
+  // hat: sarkan iletken (katener) — ince tüp
+  const cat = [];
+  for (let s = 0; s < pts.length - 1; s++) for (let u = 0; u <= 12; u++) {
+    const t = u / 12, a = pts[s], b = pts[s + 1];
+    cat.push(new THREE.Vector3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t - Math.sin(t * Math.PI) * 0.6, a.z + (b.z - a.z) * t));
+  }
+  substation.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(cat), 80, 0.03, 5), lineMat));
+  const feed = new THREE.CatmullRomCurve3([new THREE.Vector3(1.5, 2, 0), new THREE.Vector3(3.3, 3.2, 2), new THREE.Vector3(5.2, 3.8, 4)]);
+  substation.add(new THREE.Mesh(new THREE.TubeGeometry(feed, 20, 0.04, 5), lineMat));
+  substation.traverse((o) => { o.userData.noFit = true; });
 }
 outside.add(substation);
-const lineMat = new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.8 });
-{
-  const pts = [new THREE.Vector3(0, 3.2, 0)];
-  for (let k = 1; k <= 3; k++) pts.push(new THREE.Vector3(-k * 14, 9.6, -k * 6));
-  substation.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
-  const feed = [new THREE.Vector3(1.5, 2, 0), new THREE.Vector3(5, 3.8, 4)];
-  substation.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(feed), lineMat));
-}
 
 // Etiketler
 const lblCold = sim.label('Soğuk koridor', { parent: hall, position: [X0 + 1.5, 0.2, Z0 + rowZ[ROWS - 1] + RD / 2 + AISLE / 2], className: 'plain' });
 const lblHot = sim.label('Sıcak koridor', { parent: hall, position: [X0 + PER_ROW * RW + 0.3, 2.6, Z0 + rowZ[0] + RD / 2 + AISLE / 2], className: 'plain' });
 const lblTower = sim.label('', { parent: outside, position: [TOWER_POS.x + 4.5, 5.5, TOWER_POS.z + 1] });
 const lblGrid = sim.label('', { parent: substation, position: [0, 4.2, 0] });
-const lblHall = sim.label('', { parent: hall, position: [0, HALL_H + 0.8, Z0] });
+const lblHall = sim.label('', { parent: hall, position: [0, HALL_H - 0.6, Z0 + 1] });
 const lblChill = sim.label('Chiller', { parent: chillers, position: [HALL_W / 2 + 6.6, 2.6, HALL_D / 2 + 3], className: 'plain' });
+// Kamera salonun içindeyken dış etiketler gizlenir; dışarıdayken çatı gizlenmez (gerçek bina)
+let labelsOn = true;
+const insideHall = () => { const p = sim.camera.position; return Math.abs(p.x) < HALL_W / 2 && Math.abs(p.z) < HALL_D / 2 && p.y < HALL_H; };
+sim.onRender(() => {
+  const inn = insideHall();
+  lblTower.visible = lblGrid.visible = lblChill.visible = labelsOn && !inn;
+  lblCold.visible = lblHot.visible = labelsOn && inn;
+  lblHall.visible = labelsOn;
+  rackMat.userData.uniforms.uTime.value = performance.now() / 1000;
+  rackMat.userData.uniforms.uAct.value = 0.3 + (st?.util ?? 70) / 100;
+  hall.userData.haze.userData.update(performance.now() / 1000);
+});
 
 // --- Durum ---
 const st = { itMW: 50, ai: 50, util: 70, type: 'klasik', T: 20, grid: 'wld', g: 471 };
@@ -294,9 +393,14 @@ const wuePlot = xyPlot(ui, { title: 'Buharlaşmalı soğutmada su – sıcaklık
 ui.section('Bağlam: dünya ve yapay zekâ');
 const ctx = ui.text('', '');
 
-ui.section('Görünüm', { open: false });
+ui.section('Görünüm');
 const tAir = ui.toggle({ label: 'Hava akışı', value: true, onChange: (v) => (air.visible = v) });
-ui.toggle({ label: 'Etiketler', value: true, onChange: (v) => [lblCold, lblHot, lblTower, lblGrid, lblHall, lblChill].forEach((l) => (l.visible = v)) });
+ui.toggle({ label: 'Etiketler', value: true, onChange: (v) => { labelsOn = v; } });
+ui.toggle({ label: 'Raf durum ışıkları (yük, raf türü)', value: true, onChange: (v) => { leds.visible = tops.visible = v; } });
+ui.buttons([
+  { label: '🗄️ Salonun içi', onClick: () => sim.moveCamera([-5.6, 3.7, 7.2], [0.8, 0.9, -1.2]) },
+  { label: '🏭 Tesis ve avlu', onClick: () => sim.moveCamera([-26, 19, 30], [3, 2, -2]) },
+]);
 
 // --- Hesap ve görselleştirme ---
 const COLORS = { klasik: '#f97316', serbest: '#22c55e', evap: '#38bdf8', sivi: '#a78bfa' };
@@ -304,7 +408,7 @@ let aiFlags = [];
 function paintRacks() {
   aiFlags = rackInfo.map((r) => r.h < st.ai / 100);
   const c = new THREE.Color();
-  aiFlags.forEach((ai, k) => tops.setColorAt(k, c.setHex(ai ? 0x7e22ce : 0x0369a1)));
+  aiFlags.forEach((ai, k) => tops.setColorAt(k, c.setHex(ai ? 0xa855f7 : 0x0ea5e9).multiplyScalar(1.8)));
   tops.instanceColor.needsUpdate = true;
 }
 
@@ -377,7 +481,7 @@ sim.onUpdate((dt, t) => {
       const load = clamp(base + 0.12 * Math.sin(t * (aiFlags[k] ? 3 : 1.3) + r.ph), 0, 1);
       heatColor(load, col);
       if (aiFlags[k]) col.lerp(new THREE.Color(0xe879f9), 0.25);
-      leds.setColorAt(k, col);
+      leds.setColorAt(k, col.multiplyScalar(1.6));
     }
     leds.instanceColor.needsUpdate = true;
   }

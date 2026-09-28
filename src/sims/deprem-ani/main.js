@@ -1,14 +1,21 @@
 // Deprem Anı Simülatörü — dört odada sarsıntı anı kararları, düşen eşyalar ve AFAD önerilerine dayalı geri bildirim.
-import { createSim, THREE, clamp, rand, fmt, disposeObject, smoothstep, instanced } from '@core';
+import { createSim, THREE, clamp, rand, fmt, disposeObject, smoothstep, instanced, mat, makePerson } from '@core';
 import { buildRoom, ROOMS, W, D } from './rooms.js';
+import { buildOutside } from './outside.js';
+import { floorMirror } from './mirror.js';
 
+const LOW = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+const CAM = { position: [1.35, 2.02, 4.7], target: [-0.15, 0.95, -1.1] };
 const sim = createSim({
-  background: 0x1b2233,
-  camera: { position: [6.4, 7.4, 8.8], target: [-0.3, 0.5, -0.4], fov: 44 },
-  controls: { minDistance: 6, maxDistance: 17, maxPolarAngle: 1.3, minPolarAngle: 0.35, minAzimuthAngle: 0.08, maxAzimuthAngle: 1.45, enablePan: false },
+  // Gerçek gökyüzü: güneş arka duvardaki pencereden içeri girer (gölgeli ışık lekesi), dışarıda kent ve bahçe
+  sky: { elevation: 21, azimuth: 336, clouds: 0.3, haze: 1.1, visibility: 5000, wind: [5, 2] },
+  shadows: true,
+  camera: { ...CAM, fov: 46, near: 0.05, far: 12000 },
+  // Kamera odanın açık (kesit) tarafında, eşikte; tavanın altında kalacak şekilde sınırlı
+  controls: { minDistance: 2.6, maxDistance: 6.2, minPolarAngle: 1.25, maxPolarAngle: 1.62, minAzimuthAngle: -0.55, maxAzimuthAngle: 0.6, enablePan: false },
   info: `
     <h3>Ne görüyorsun?</h3>
-    <p>Kesitli bir oda (bebek evi gibi) ve içinde sen varsın. Sarsıntı başlayınca birkaç saniye içinde nereye gideceğine
+    <p>Bir apartmanın 2. katındaki oda; kamera odanın kesit tarafında, eşikte duruyor ve içinde sen varsın. Sarsıntı başlayınca birkaç saniye içinde nereye gideceğine
     karar vermelisin. Seçenekleri üstteki düğmelerden ya da odadaki etiketlere / eşyalara tıklayarak seçebilirsin.
     Sarsıntıda sabitlenmemiş dolaplar devrilir, raflardaki eşyalar düşer, camlar kırılabilir, avize sallanır.</p>
     <h3>Dene</h3>
@@ -36,33 +43,86 @@ const SHAKE_DUR = 13; // sn
 // --- Sahne kökü: sarsılan grup ---
 const shaker = new THREE.Group();
 sim.scene.add(shaker);
-const ambient = new THREE.AmbientLight(0xffffff, 0.35);
-sim.scene.add(ambient);
 
-// --- Çocuk karakter ---
-const avatar = new THREE.Group();
-{
-  const shirt = new THREE.MeshLambertMaterial({ color: 0xf97316 });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xf2c29b });
-  const pants = new THREE.MeshLambertMaterial({ color: 0x1e3a8a });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.17, 0.3, 4, 12), shirt);
-  body.position.y = 0.72;
-  const legs = new THREE.Mesh(new THREE.CapsuleGeometry(0.14, 0.3, 4, 10), pants);
-  legs.position.y = 0.3;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 20, 14), skin);
-  head.position.y = 1.1;
-  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.165, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0x3f2a1d }));
-  hair.position.y = 1.12;
-  avatar.add(legs, body, head, hair);
-  avatar.userData.arms = [-1, 1].map((s) => {
-    const sh = new THREE.Group();
-    sh.position.set(s * 0.21, 0.9, 0);
-    const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.3, 4, 8), shirt);
-    arm.position.y = -0.18;
-    sh.add(arm);
-    avatar.add(sh);
-    return sh;
+// Dış dünya (bir kez): bahçe, cadde, karşı apartmanlar, tepeler — oda ile birlikte sarsılır
+const outside = buildOutside({ low: LOW });
+shaker.add(outside.group);
+const mirror = floorMirror(sim, { scale: LOW ? 0.4 : 0.5 });
+
+// İç mekân ortam ışığı: gökyüzü ışığı odaya yalnız pencereden girer; iç yüzeylerde ortam yansıması kısılır,
+// pozlama iç mekâna göre açılır (dışarısı fotoğraftaki gibi parlak kalır). Gece: loş mavimsi ay ışığı ortamı.
+// Gece ortamı: loş, mavimsi ay ışığı odası (stüdyo 'night' ışık kutularıyla aynı düzen). Açılışta BİR kez ve gökyüzü
+// ortamıyla aynı küp boyunda (64) pişirilir: gece turuna geçişte yeni PMREM üretilmez, oda malzemeleri yeniden derlenmez.
+const NIGHT_ENV = (() => {
+  const env = new THREE.Scene(), f = 0.35 * 0.45;
+  const cool = new THREE.Color(0.86, 0.93, 1), warm = new THREE.Color(1, 0.93, 0.84), white = new THREE.Color(1, 1, 1);
+  const tint = (w) => white.clone().lerp(w > 0 ? warm : cool, Math.abs(w));
+  env.add(new THREE.Mesh(new THREE.BoxGeometry(40, 20, 40), new THREE.MeshBasicMaterial({ color: new THREE.Color(0.027, 0.027, 0.03), side: THREE.BackSide })));
+  env.children[0].position.y = 8;
+  const panel = (w, h, x, y, z, ry, rx, e, col) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: col.clone().multiplyScalar(e), side: THREE.DoubleSide }));
+    m.position.set(x, y, z); m.rotation.set(rx, ry, 0); env.add(m);
+  };
+  panel(14, 10, 0, 17.9, 0, 0, Math.PI / 2, 3.2 * f, tint(-0.15));
+  panel(3, 14, -19.9, 7, 0, Math.PI / 2, 0, 2.2 * f, tint(-0.6));
+  panel(3, 14, 19.9, 7, 4, -Math.PI / 2, 0, 1.6 * f, tint(0.7));
+  panel(18, 6, 0, 5, -19.9, 0, 0, 0.9 * f, tint(0));
+  panel(40, 40, 0, -1.9, 0, 0, -Math.PI / 2, 0.22 * f, new THREE.Color(0x2a2f45));
+  const pm = new THREE.PMREMGenerator(sim.renderer);
+  const tex = pm.fromScene(env, 0.035, 0.1, 100, { size: 64 }).texture;
+  pm.dispose();
+  env.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
+  return tex;
+})();
+// Başucu lambası ışığı sahnede HEP vardır (gündüz odalarında kısık): ışık sayısı değişince tüm sahne (kent dahil)
+// yeniden derlenir — yazılım WebGL'de gece turunun belleği taşırmasının ana nedeni buydu.
+const nightLamp = new THREE.PointLight(0xffb866, 0, 7, 2);
+nightLamp.position.set(0, -50, 0);
+shaker.add(nightLamp);
+// Güneşli döşemeden sekip tavana/üst duvarlara çarpan ılık dolgu ışığı (yalnız aşağıdan: yarıküre ışığının 'zemin' rengi)
+const bounce = new THREE.HemisphereLight(0x000000, 0xd9c4a6, 0);
+sim.scene.add(bounce);
+const skyExposure = sim.sky.exposure.bind(sim.sky);
+const IN_ENV = { day: 0.6, night: 1.9 };
+let roomMats = [], envSeen = null, isNight = false;
+function setMood(def) {
+  isNight = !!def.night;
+  sim.sky.set(def.sky);
+  outside.setLit(isNight ? 1 : 0);
+  bounce.intensity = isNight ? 0.06 : 0.8;
+  sim.sky.exposure = () => (isNight ? 1.7 : skyExposure() * 1.7);   // gündüz: güneşli parke patlamasın (1,85 → 1,7)
+  envSeen = null;
+}
+function collectRoomMats() {
+  const set = new Set();
+  room.group.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) if (m && (m.isMeshStandardMaterial) && !m.userData.fullEnv) set.add(m);
   });
+  for (const m of person.crowd.materials) if (m && m.isMeshStandardMaterial) set.add(m);   // figür de iç mekân ortamıyla aydınlansın
+  roomMats = [...set];
+  envSeen = null;
+}
+sim.onRender(() => {
+  if (!room) return;
+  const env = isNight ? NIGHT_ENV : sim.scene.environment;
+  if (env && env !== envSeen) {
+    envSeen = env;
+    for (const m of roomMats) { m.envMap = env; m.envMapIntensity = isNight ? IN_ENV.night : IN_ENV.day; }
+  }
+  // Kent karoları ayrıntıyı tembel üretir: yeni parçalar gölge çerçevesini büyütmesin
+  if (sim.frame % 45 === 0) outside.group.traverse((o) => { if (o.isMesh) o.userData.noFit = true; });
+  outside.update(performance.now() / 1000, 0.5);
+  mirror.render(isNight ? null : room.floorAnchor, room.floor);   // gece: ayna zemin kapalı (ek sahne çizimi yok)
+});
+
+// --- Karakter ("Sen"): motorun eklemli insan figürü (@core makePerson; yüz, eller, giysi, poz iskeleti) ---
+// Orijin ayak tabanı ortası, yaw 0 → +z'ye bakar. Oturma yüksekliği her odanın başlangıcında (start.seat) verilir.
+const avatar = new THREE.Group();
+const person = makePerson({ seed: 7, sex: 'm', height: 1.66, build: 0.95, outfit: 'casual', sleeves: 'short', pose: 'sit', seat: 0.43,
+  skin: 0xd9a27e, hair: { style: 'short', color: 0x2e1f16 }, colors: { top: 0xd9621e, bottom: 0x2b3f66, shoe: 0xeeeeee } });
+avatar.add(person);
+{
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.32, 0.42, 32), new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.85, side: THREE.DoubleSide }));
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.02;
@@ -70,21 +130,33 @@ const avatar = new THREE.Group();
   avatar.add(ring);
   avatar.userData.ring = ring;
 }
-const youLabel = sim.label('Sen', { parent: avatar, position: [0, 1.45, 0], className: 'plain' });
+const youLabel = sim.label('Sen', { parent: avatar, position: [0, 1.95, 0], className: 'plain' });
+sim.onRender(() => person.update(performance.now() / 1000));   // nefes, baş hareketi, koşu döngüsü (duraklatılsa da canlı)
 
+// Oyun pozu → figür pozu; y: gövde kökünün yüksekliği (yatak), lab: "Sen" etiketinin yüksekliği
 const POSES = {
-  stand: { y: 0, sy: 1, rz: 0, arm: 0.08, dx: 0 },
-  sit: { y: 0.18, sy: 0.82, rz: 0, arm: 0.5, dx: 0 },
-  crouch: { y: 0, sy: 0.55, rz: 0, arm: 2.7, dx: 0 },
-  lie: { y: 0.66, sy: 1, rz: Math.PI / 2, arm: 0.1, dx: 0.62 },
-  pillow: { y: 0.66, sy: 1, rz: Math.PI / 2, arm: 2.6, dx: 0.62 },
-  gone: { y: 0, sy: 1, rz: 0, arm: 0.08, dx: 0 },
+  stand: { fig: 'stand', y: 0, lab: 1.95 },
+  sit: { fig: 'sit', y: 0, lab: 1.55 },
+  crouch: { fig: 'crouch', y: 0, lab: 1.4 },
+  lie: { fig: 'lie', y: 0.69, lab: 0.7 },     // yorgan üstü (0,65) + figürün sırt payı; baş −x'te yastığa
+  pillow: { fig: 'lie', y: 0.69, lab: 0.7 },
+  gone: { fig: 'stand', y: 0, lab: 1.95 },
 };
-const av = { x: 0, z: 0, path: [], pose: 'stand', cur: { ...POSES.stand }, gone: false, facing: 0 };
+const RUN_SPEED = 2.6;   // m/s — yolu izleme hızı (koşu adımı yerinde, ayak kaymaz)
+const av = { x: 0, z: 0, path: [], pose: 'stand', cur: { y: 0, lab: 1.95 }, gone: false, facing: 0, yaw: 0, fig: '', seat: 0.43, faceTo: null };
 
-function placeAvatar(pos, pose) {
+function setFig(p) {
+  if (p === av.fig) return;
+  av.fig = p;
+  person.setPose(p, av.seat);
+  person.crowd.speed(0, p === 'run' ? RUN_SPEED : 0);
+}
+
+function placeAvatar(pos, pose, yaw = Math.PI, seat = 0.43) {
   av.x = pos[0]; av.z = pos[1]; av.path = []; av.pose = pose; av.gone = false;
-  Object.assign(av.cur, POSES[pose]);
+  av.facing = av.yaw = yaw; av.seat = seat; av.fig = ''; av.faceTo = null;
+  av.cur.y = POSES[pose].y; av.cur.lab = POSES[pose].lab;
+  setFig(POSES[pose].fig);
   avatar.visible = true;
   avatar.userData.ring.visible = false;
   youLabel.visible = true;
@@ -94,29 +166,34 @@ function updateAvatar(dt) {
   const moving = av.path.length > 0;
   if (moving) {
     const [tx, tz] = av.path[0];
-    const dx = tx - av.x, dz = tz - av.z, d = Math.hypot(dx, dz), step = 2.6 * dt;
-    av.facing = Math.atan2(dx, dz);
+    const dx = tx - av.x, dz = tz - av.z, d = Math.hypot(dx, dz), step = RUN_SPEED * dt;
+    if (d > 1e-4) av.facing = Math.atan2(dx, dz);
     if (d <= step) { av.x = tx; av.z = tz; av.path.shift(); }
     else { av.x += (dx / d) * step; av.z += (dz / d) * step; }
     if (!av.path.length && av.pose === 'gone') av.gone = true;
+    // Varış: çömelme/masa yanında gidilen noktaya dönük kal; sadece masa hedefleri (fig) kendi yönünü verir
+    if (!av.path.length && av.faceTo != null) av.facing = av.faceTo;
   }
   const tgt = POSES[moving ? 'stand' : av.pose];
+  setFig(moving ? 'run' : tgt.fig);
   const k = 1 - Math.exp(-dt * 10);
-  for (const key of ['y', 'sy', 'rz', 'arm', 'dx']) av.cur[key] += (tgt[key] - av.cur[key]) * k;
-  avatar.position.set(av.x + av.cur.dx, av.cur.y, av.z);
-  avatar.scale.set(1, av.cur.sy, 1);
-  avatar.rotation.set(0, av.cur.rz > 0.3 ? 0 : av.facing, av.cur.rz);
-  const [l, r] = avatar.userData.arms;
-  const walk = moving ? Math.sin(sim.time * 14) * 0.5 : 0;
-  l.rotation.z = -av.cur.arm; r.rotation.z = av.cur.arm;
-  l.rotation.x = walk; r.rotation.x = -walk;
+  av.cur.y += (tgt.y - av.cur.y) * k;
+  av.cur.lab += (tgt.lab - av.cur.lab) * k;
+  // Yatarken baş −x'e (yastığa); diğer pozlarda gidiş yönü — en kısa yoldan yumuşak dönüş
+  const want = !moving && tgt.fig === 'lie' ? Math.PI / 2 : av.facing;
+  let dy = want - av.yaw;
+  dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+  av.yaw += dy * (1 - Math.exp(-dt * 12));
+  avatar.position.set(av.x, av.cur.y, av.z);
+  person.rotation.y = av.yaw;
+  youLabel.position.y = av.cur.lab;
   avatar.visible = !av.gone;
   youLabel.visible = !av.gone && phase !== 'final';
 }
 
 // --- Kırık cam parçaları ---
 const SHARDS = 60;
-const shardMesh = instanced(new THREE.CircleGeometry(0.07, 3), new THREE.MeshBasicMaterial({ color: 0xdff6ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide }), SHARDS);
+const shardMesh = instanced(new THREE.CircleGeometry(0.07, 3), new THREE.MeshStandardMaterial({ color: 0xe8f6ff, roughness: 0.04, metalness: 0.2, transparent: true, opacity: 0.55, side: THREE.DoubleSide }), SHARDS);
 shardMesh.frustumCulled = false;
 const shards = Array.from({ length: SHARDS }, () => ({ p: new THREE.Vector3(), v: new THREE.Vector3(), r: new THREE.Euler(), on: false }));
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(1, 1, 1);
@@ -147,21 +224,20 @@ function loadRoom(i) {
   roundIdx = i;
   const def = ROOMS[i];
   room = buildRoom(def);
+  if (!def.night) mirror.attach(room.floor.material, def.floor === 'wood' ? 1.3 : 1.0);
+  nightLamp.intensity = room.nightLamp ? 2.6 : 0;
+  if (room.nightLamp) nightLamp.position.fromArray(room.nightLamp); else nightLamp.position.set(0, -50, 0);
   shaker.add(room.group);
   room.group.add(shardMesh);
   room.group.add(avatar);
   hideShards();
   shaker.position.set(0, 0, 0);
   shaker.rotation.set(0, 0, 0);
-  // Işık: gece karanlık ve mavimsi
-  const { hemi, sun } = sim.scene.userData;
-  sim.scene.background.setHex(def.night ? 0x0a0f1f : 0x1b2233);
-  hemi.intensity = def.night ? 0.35 : 1.4;
-  hemi.color.setHex(def.night ? 0x8090c0 : 0xdfe8ff);
-  sun.intensity = def.night ? 0.45 : 2.2;
-  sun.color.setHex(def.night ? 0x9fb4ff : 0xffffff);
-  ambient.intensity = def.night ? 0.2 : 0.35;
-  placeAvatar(def.start.pos, def.start.pose);
+  // Işık: gökyüzü (gün saati / gece), iç mekân ortamı
+  setMood(def);
+  collectRoomMats();
+  sim.moveCamera(CAM.position, CAM.target);
+  placeAvatar(def.start.pos, def.start.pose, def.start.yaw ?? Math.PI, def.start.seat ?? 0.43);
   for (const t of room.tall) { t.th = 0; t.om = 0; t.falling = false; t.fallAt = rand(3, 6); applyTall(t); }
   roundSel.set(def.key);
 }
@@ -221,7 +297,11 @@ function choose(key) {
   if (s.pos[0] < -W) path.push([-3.3, s.pos[1]]);
   if (s.pos[1] < -D) path.push([s.pos[0], -2.5]);
   if (av.pose === 'lie' && s.key !== 'yatak') path.push([av.x + 1.1, av.z + 0.2]);
-  path.push(s.pos);
+  // Figürün duracağı yer: masa/sıra hedeflerinde (fig) masanın kenarında, dizler masanın altında çömelir
+  // (1,66 m'lik figür 0,63 m'lik masa altı boşluğuna sığmaz; tabla içinden geçmesin). Diğer çömelmelerde yüz odaya dönük.
+  const [fx, fz] = s.fig || s.pos;
+  path.push([fx, fz]);
+  av.faceTo = s.fig ? s.fig[2] : s.pose === 'crouch' ? Math.atan2(CAM.position[0] - fx, CAM.position[2] - fz) : null;
   if (!(s.pose === 'pillow' && av.pose === 'lie')) av.path = path;
   av.pose = s.pose;
   if (s.pose === 'pillow' && room.pillow) room.pillow.userData.toHead = true;
@@ -459,8 +539,8 @@ sim.onUpdate((dt) => {
   if (room.door) room.door.rotation.y = -0.5 + (phase === 'shake' ? 0.35 * env * Math.sin(shakeT * 5) : 0);
   if (room.pillow?.userData.toHead) {
     const p = room.pillow.position;
-    p.x += (av.x - 0.45 - p.x) * Math.min(1, dt * 5);
-    p.y += (0.86 - p.y) * Math.min(1, dt * 5);
+    p.x += (av.x - 0.62 - p.x) * Math.min(1, dt * 5);   // figürün başı kalçadan ≈0,6 m −x'te
+    p.y += (0.92 - p.y) * Math.min(1, dt * 5);
   }
   for (const [i, s] of shards.entries()) {
     if (s.on) { _q.setFromEuler(s.r); _m.compose(s.p, _q, _s); shardMesh.setMatrixAt(i, _m); }

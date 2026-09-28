@@ -1,5 +1,7 @@
 // Sanal Laboratuvar: Titrasyon — büret, erlenmeyer, manyetik karıştırıcı; tam yük dengesiyle pH, indikatör rengi, pH–hacim eğrisi.
-import { createSim, THREE, RoundedBoxGeometry, fmt, clamp, lerp, smoothstep, rand, textPlane } from '@core';
+import { createSim, THREE, RoundedBoxGeometry, fmt, clamp, lerp, smoothstep, rand, textPlane, mat } from '@core';
+import { labRoom, glassGeometry, liquidGeometry, glassMesh, liquidMesh, reagentBottle, epoxy } from './labkit.js';
+import { dressLab } from './dressing.js';
 
 const KW = 1e-14;
 const KA_ACETIC = 1.8e-5;
@@ -23,9 +25,10 @@ const ACIDS = {
 const A = () => ACIDS[st.acid];
 
 const sim = createSim({
-  background: 0x121826,
-  camera: { position: [5.8, 5.0, 11.4], target: [0.5, 4.2, 0], fov: 45 },
-  controls: { minDistance: 4, maxDistance: 26 },
+  studio: { color: 0xb9b4aa, mood: 'lab', warmth: 0.12, fill: 1.3, key: { el: 52, az: 152, power: 1.15 }, radius: 24 },
+  look: { aoRadius: 0.05 },
+  camera: { position: [0.45, 1.26, 0.62], target: [-0.2, 1.08, -0.12], fov: 42, near: 0.01, far: 200 },
+  controls: { minDistance: 0.18, maxDistance: 2.6 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Erlendeki asidi büretteki NaOH ile (ya da NaOH'u büretteki HCl ile) nötralleştiriyorsun. Her damladan sonra pH,
@@ -52,7 +55,6 @@ const sim = createSim({
     laboratuvarlarda her gün kullanılır. Gerçek bir büret 0,05 mL hassasiyetle, gözü menisküsün hizasında tutarak okunur.</p>
     <p><small>Aktiflik katsayıları, sıcaklık etkisi ve CO₂ emilimi ihmal edilmiştir; karışmanın anlık olduğu varsayılır.</small></p>`,
 });
-sim.renderer.localClippingEnabled = true;
 
 // --- Kimya ---
 const st = { acid: 'HCl', Ca: 0.1, Va: 25, Cb: 0.1, ind: 'fenol', Vb: 0, burUsed: 0, open: false };
@@ -85,115 +87,65 @@ function indColor(pH, out = new THREE.Color()) {
 }
 const _c = new THREE.Color();
 
-// --- Sahne: oda, masa ---
-{
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const g = c.getContext('2d');
-  g.fillStyle = '#9aa7b8'; g.fillRect(0, 0, 256, 256);
-  for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
-    const v = 214 + Math.floor(Math.random() * 16);
-    g.fillStyle = `rgb(${v},${v + 4},${v + 10})`;
-    g.fillRect(x * 64 + 2, y * 64 + 2, 60, 60);
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(10, 4);
-  const wall = new THREE.Mesh(new THREE.PlaneGeometry(40, 16), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 }));
-  wall.position.set(0, 6, -3.4);
-  sim.scene.add(wall);
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 20), new THREE.MeshStandardMaterial({ color: 0x3a4254, roughness: 0.9 }));
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = -3.2;
-  sim.scene.add(floor);
-}
-const bench = new THREE.Mesh(new RoundedBoxGeometry(16, 0.4, 6.4, 3, 0.08), new THREE.MeshStandardMaterial({ color: 0x1f2633, roughness: 0.35 }));
-bench.position.set(0, -0.2, -0.2);
-sim.scene.add(bench);
-const cabinet = new THREE.Mesh(new THREE.BoxGeometry(15.4, 2.8, 5.8), new THREE.MeshStandardMaterial({ color: 0xb8c2d0, roughness: 0.7 }));
-cabinet.position.set(0, -1.8, -0.4);
-sim.scene.add(cabinet);
-const fill = new THREE.PointLight(0xfff1dd, 18, 30, 1.6);
-fill.position.set(-4, 8, 5);
-sim.scene.add(fill);
+// --- Sahne: modellenmiş laboratuvar (metre); düzenek "content" grubunda (1 birim = 4,5 mm → gerçek boy) ---
+const U = 0.045;
+const BENCH = 0.9;
+labRoom(sim.scene, { width: 3.4, depth: 0.78, benchH: BENCH, style: 'lab', wallZ: -0.36, top: epoxy({ color: 0x454a51 }), shelf: false, window: false });
+dressLab(sim.scene, { wz: -0.36, benchH: BENCH, width: 3.4 });
+const content = new THREE.Group();
+content.scale.setScalar(U);
+content.position.set(0, BENCH, 0);
+sim.scene.add(content);
+const W = (y) => BENCH + y * U; // içerik yüksekliği → dünya
 
-// Temas gölgesi (ucuz sahte gölge)
-const shadowTex = (() => {
-  const c = document.createElement('canvas');
-  c.width = c.height = 64;
-  const g = c.getContext('2d');
-  const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  gr.addColorStop(0, 'rgba(0,0,0,.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
-  return new THREE.CanvasTexture(c);
-})();
-function contactShadow(x, z, sx, sz) {
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(sx, sz), new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false }));
-  m.rotation.x = -Math.PI / 2;
-  m.position.set(x, 0.005, z);
-  sim.scene.add(m);
-}
+const steel = mat.brushedMetal({ color: 0xcfd3d8, rough: 0.25, scale: U });
+const castIron = mat.paintedMetal({ color: 0x2c3a46, wear: 0.25, scale: U });
+const blackPl = mat.plastic({ color: 0x1b1e22, gloss: 0.35, scale: U });
 
-const glassMat = new THREE.MeshPhongMaterial({ color: 0xdff3ff, transparent: true, opacity: 0.28, shininess: 120, specular: 0xffffff, side: THREE.DoubleSide, depthWrite: false });
-const metalMat = new THREE.MeshStandardMaterial({ color: 0x9ca3af, metalness: 0.8, roughness: 0.3 });
-
-// --- Manyetik karıştırıcı ---
+// --- Manyetik karıştırıcı: emaye gövde, seramik tabla, düğmeler, LED ---
 const stirrer = new THREE.Group();
-stirrer.add(new THREE.Mesh(new RoundedBoxGeometry(2.4, 0.35, 2.2, 3, 0.08), new THREE.MeshStandardMaterial({ color: 0xe5e7eb, roughness: 0.5 })));
-stirrer.children[0].position.y = 0.175;
-const plate = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.95, 0.02, 48), new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.3 }));
-plate.position.y = 0.355;
-stirrer.add(plate);
-const knob = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.12, 24), new THREE.MeshStandardMaterial({ color: 0x334155 }));
-knob.rotation.x = Math.PI / 2;
-knob.position.set(0.7, 0.17, 1.14);
-stirrer.add(knob);
-const led = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 8), new THREE.MeshBasicMaterial({ color: 0x22c55e }));
-led.position.set(-0.8, 0.2, 1.12);
-stirrer.add(led);
-sim.scene.add(stirrer);
-contactShadow(0, 0, 3.4, 3.1);
-
-// --- Erlenmeyer ---
-const flask = new THREE.Group();
-flask.position.y = FLASK_Y;
-sim.scene.add(flask);
-const glass = new THREE.Mesh(new THREE.LatheGeometry([[0, 0], [0.74, 0], [0.8, 0.05], [0.3, 2.02], [0.3, 2.6], [0.35, 2.66]].map(([x, y]) => new THREE.Vector2(x, y)), 48), glassMat);
-glass.renderOrder = 3;
-flask.add(glass);
-// Sıvı: tam koni + kırpma düzlemi; yüzey diski ölçeklenir
-const L0 = 0.02, LH = 1.98, LR0 = 0.76, LR1 = 0.26;
-const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), FLASK_Y + 0.2);
-const liqMat = new THREE.MeshPhongMaterial({ color: 0xeef6ff, transparent: true, opacity: 0.3, shininess: 60, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: [clipPlane] });
-const liquid = new THREE.Mesh(new THREE.LatheGeometry([[0, L0], [0.72, L0], [LR0, 0.06], [LR1, L0 + LH]].map(([x, y]) => new THREE.Vector2(x, y)), 48), liqMat);
-liquid.renderOrder = 1;
-flask.add(liquid);
-const swirlTex = (() => {
-  const c = document.createElement('canvas');
-  c.width = c.height = 128;
-  const g = c.getContext('2d');
-  g.fillStyle = '#fff'; g.fillRect(0, 0, 128, 128);
-  g.strokeStyle = 'rgba(0,0,0,.18)'; g.lineWidth = 3;
-  for (let k = 0; k < 4; k++) {
-    g.beginPath();
-    for (let a = 0; a < 5; a += 0.05) { const r = a * 11; g.lineTo(64 + r * Math.cos(a + k * Math.PI / 2), 64 + r * Math.sin(a + k * Math.PI / 2)); }
-    g.stroke();
+{
+  const body = new THREE.Mesh(new RoundedBoxGeometry(2.4, 0.35, 2.2, 4, 0.1), mat.paintedMetal({ color: 0xc9cccd, wear: 0.04, scale: U }));
+  body.position.y = 0.175; stirrer.add(body);
+  const panel = new THREE.Mesh(new RoundedBoxGeometry(2.1, 0.2, 0.05, 2, 0.02), mat.plastic({ color: 0x2b3440, gloss: 0.5, scale: U }));
+  panel.position.set(0, 0.17, 1.1); stirrer.add(panel);
+  for (const x of [0.55, 0.85]) {
+    const k = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.13, 0.12, 32), blackPl);
+    k.rotation.x = Math.PI / 2; k.position.set(x, 0.17, 1.16); stirrer.add(k);
+    const tick = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.09, 0.01), mat.plastic({ color: 0xffffff, scale: U }));
+    tick.position.set(x, 0.2, 1.225); stirrer.add(tick);
   }
-  return new THREE.CanvasTexture(c);
-})();
-const surfMat = new THREE.MeshPhongMaterial({ color: 0xeef6ff, map: swirlTex, transparent: true, opacity: 0.45, shininess: 100, depthWrite: false });
-const surface = new THREE.Mesh(new THREE.CircleGeometry(1, 48), surfMat);
-surface.rotation.x = -Math.PI / 2;
-surface.renderOrder = 2;
-flask.add(surface);
-const stirBar = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.36, 4, 12), new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.4 }));
+}
+const plate = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.97, 0.04, 64), mat.ceramic({ color: 0xc4c5c1, scale: U }));
+Object.assign(plate.material, { roughness: 0.5, clearcoat: 0.12, clearcoatRoughness: 0.45 }); // saten seramik: tavan paneli yansıması patlamasın
+plate.position.y = 0.37;
+stirrer.add(plate);
+const ledMat = mat.glow({ color: 0x22c55e, intensity: 5 });
+const led = new THREE.Mesh(new THREE.SphereGeometry(0.035, 16, 8), ledMat);
+led.position.set(-0.8, 0.17, 1.13);
+stirrer.add(led);
+content.add(stirrer);
+
+// --- Erlenmeyer (cam cidarlı) + sıvı (menisküslü, karıştırınca girdap) ---
+const flask = new THREE.Group();
+flask.position.y = FLASK_Y + 0.04;
+content.add(flask);
+const GT = 0.05; // cam kalınlığı (birim)
+const glass = glassMesh(glassGeometry([[0, 0], [0.72, 0], [0.8, 0.06], [0.79, 0.14], [0.3, 2.02], [0.3, 2.56], [0.35, 2.62]], GT, 72), { thickness: 0.06 });
+flask.add(glass);
+const L0 = 0.02 + GT, LH = 1.94, LR0 = 0.76 - GT, LR1 = 0.26 - GT * 0.4;
+const liqMat0 = liquidMesh(new THREE.BufferGeometry(), 0xffffff, 1).material;
+liqMat0.thickness = 1.2;
+const liquid = new THREE.Mesh(new THREE.BufferGeometry(), liqMat0);
+liquid.userData.noCast = true; liquid.userData.noAO = true;
+flask.add(liquid);
+const stirBar = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, 0.38, 6, 16), mat.plastic({ color: 0xf8fafc, gloss: 0.6, scale: U }));
 stirBar.rotation.z = Math.PI / 2;
 const stirPivot = new THREE.Group();
-stirPivot.position.y = 0.075;
+stirPivot.position.y = GT + 0.07;
 stirPivot.add(stirBar);
 flask.add(stirPivot);
-const flaskLabel = sim.label('', { parent: flask, position: [0, -0.15, 0.95], className: 'plain' });
+const flaskLabel = sim.label('', { parent: flask, position: [0, -0.2, 1.0], className: 'plain' });
 
 const rAt = (h) => LR0 - ((LR0 - LR1) * h) / LH;
 const volAt = (h) => (Math.PI / 3) * h * (LR0 * LR0 + LR0 * rAt(h) + rAt(h) ** 2);
@@ -204,166 +156,218 @@ function liquidHeight(mL) {
   for (let i = 0; i < 30; i++) { const m = (a + b) / 2; if (volAt(m) < v) a = m; else b = m; }
   return (a + b) / 2;
 }
-let surfaceY = FLASK_Y + 0.2; // dünya koordinatında sıvı yüzeyi
+// Erlen üzerindeki beyaz emaye baskı: hacim çizgileri (25–100 mL) ve yazı alanı → cam gövde okunur
+{
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 512;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(250,250,247,0.95)'; g.strokeStyle = g.fillStyle;
+  g.fillRect(560, 150, 120, 90);
+  g.font = '600 24px system-ui, sans-serif'; g.textBaseline = 'middle';
+  g.fillText('125 mL', 440, 70);
+  g.lineWidth = 4;
+  for (let i = 1; i <= 4; i++) {
+    const y = 512 - (liquidHeight(i * 25) + L0 - 0.14) / (2.02 - 0.14) * 512;
+    g.beginPath(); g.moveTo(452, y); g.lineTo(512, y); g.stroke();
+    g.textAlign = 'right'; g.fillText(String(i * 25), 444, y);
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  const shell = new THREE.Mesh(new THREE.CylinderGeometry(0.3 + 0.012, 0.79 + 0.012, 2.02 - 0.14, 72, 1, true, Math.PI, Math.PI * 2),
+    new THREE.MeshStandardMaterial({ map: t, transparent: true, roughness: 0.5, depthWrite: false }));
+  shell.position.y = (0.14 + 2.02) / 2; shell.rotation.y = 0.5;
+  shell.userData.noCast = true; shell.userData.noAO = true;
+  flask.add(shell);
+}
+let surfaceY = FLASK_Y + 0.2; // içerik biriminde sıvı yüzeyi
+let liqKey = '';
+function buildLiquid(h, vortex) {
+  const key = h.toFixed(3) + ':' + vortex.toFixed(2);
+  if (key === liqKey) return;
+  liqKey = key;
+  const g = liquidGeometry((y) => rAt(y - L0) - 0.005, L0, L0 + h, { meniscus: 0.035, segs: 64, steps: 6 });
+  // Girdap: yüzeyin merkezi karıştırma hızıyla çöker
+  const p = g.attributes.position, top = L0 + h;
+  for (let i = 0; i < p.count; i++) {
+    const y = p.getY(i);
+    if (y > top - 0.06) { const r = Math.hypot(p.getX(i), p.getZ(i)) / Math.max(rAt(h), 0.01); p.setY(i, y - vortex * Math.pow(Math.max(0, 1 - r), 2)); }
+  }
+  g.computeVertexNormals();
+  liquid.geometry.dispose();
+  liquid.geometry = g;
+}
 
-// --- Büret ve sehpa ---
+// --- Büret (cam, musluklu) ve sehpa ---
 const burette = new THREE.Group();
-sim.scene.add(burette);
-const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 6.25, 24, 1, true), glassMat);
-tube.position.y = 3.35 + 6.25 / 2;
-tube.renderOrder = 3;
+content.add(burette);
+const tube = glassMesh(glassGeometry([[0, 2.82], [0.022, 2.83], [0.03, 2.98], [0.034, 3.16], [0.125, 3.28], [0.135, 3.36], [0.135, 9.6]], 0.03, 40), { thickness: 0.03 });
 burette.add(tube);
-const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.03, 0.15, 24, 1, true), glassMat);
-cone.position.y = 3.275;
-burette.add(cone);
-const tip = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.018, 0.35, 12), glassMat);
-tip.position.y = TIP_Y + 0.175;
-burette.add(tip);
-const cockBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.26, 16), new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.3 }));
+const cockBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.065, 0.3, 24), mat.plastic({ color: 0xf2f2ee, gloss: 0.2, scale: U }));
 cockBarrel.rotation.x = Math.PI / 2;
 cockBarrel.position.y = 3.07;
 burette.add(cockBarrel);
-const cockHandle = new THREE.Mesh(new RoundedBoxGeometry(0.46, 0.08, 0.06, 2, 0.02), new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.4 }));
-cockHandle.position.set(0, 3.07, 0.15);
+const cockHandle = new THREE.Mesh(new RoundedBoxGeometry(0.5, 0.09, 0.07, 2, 0.03), mat.plastic({ color: 0x2563eb, gloss: 0.5, scale: U }));
+cockHandle.position.set(0, 3.07, 0.17);
 burette.add(cockHandle);
-const burMat = new THREE.MeshPhongMaterial({ color: 0xcfe6ff, transparent: true, opacity: 0.5, depthWrite: false });
-const burLiquid = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1, 20).translate(0, 0.5, 0), burMat);
-burLiquid.position.y = 3.36;
-burLiquid.renderOrder = 1;
+const burMat = liquidMesh(new THREE.BufferGeometry(), 0xf4fbff, 0.6).material;
+burMat.thickness = 0.2;
+const burLiquid = new THREE.Mesh(new THREE.BufferGeometry(), burMat);
+burLiquid.userData.noCast = true; burLiquid.userData.noAO = true;
 burette.add(burLiquid);
-const meniscus = new THREE.Mesh(new THREE.CircleGeometry(0.1, 20), new THREE.MeshBasicMaterial({ color: 0x1e3a5f, transparent: true, opacity: 0.6, depthWrite: false }));
-meniscus.rotation.x = -Math.PI / 2;
-burette.add(meniscus);
+let burKey = -1;
+function buildBurLiquid(lvlY) {
+  if (Math.abs(lvlY - burKey) < 1e-4) return;
+  burKey = lvlY;
+  const g = liquidGeometry((y) => (y < 3.3 ? 0.06 : 0.1), 3.1, Math.max(3.15, lvlY), { meniscus: 0.06, segs: 32, steps: 3 });
+  burLiquid.geometry.dispose();
+  burLiquid.geometry = g;
+}
 {
   const pts = [];
   for (let ml = 0; ml <= BURETTE_ML; ml++) {
     const y = MARK0_Y - ml * PER_ML, len = ml % 10 === 0 ? 0.2 : ml % 5 === 0 ? 0.14 : 0.07;
-    pts.push(-0.02, y, 0.125, len, y, 0.125);
+    pts.push(-0.02, y, 0.138, len, y, 0.138);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-  burette.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xf1f5f9 })));
+  burette.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x14305c })));
   for (let ml = 0; ml <= BURETTE_ML; ml += 10) {
-    const t = textPlane(String(ml), 0.2, { color: '#f1f5f9', size: 48 });
-    t.position.set(0.4, MARK0_Y - ml * PER_ML, 0.13);
+    const t = textPlane(String(ml), 0.2, { color: '#14305c', size: 48 });
+    t.position.set(0.4, MARK0_Y - ml * PER_ML, 0.14);
     burette.add(t);
   }
 }
 const readLabel = sim.label('', { parent: burette, position: [-0.75, MARK0_Y, 0] });
 const burLabel = sim.label('', { parent: burette, position: [0, 9.95, 0], className: 'plain' });
-// Sehpa, kıskaçlar
+// Sehpa: dökme taban, paslanmaz çubuk, boss başlıkları, lastik çeneli kıskaçlar
 {
-  const base = new THREE.Mesh(new RoundedBoxGeometry(2.2, 0.12, 1.1, 2, 0.04), metalMat);
-  base.position.set(0, 0.06, -1.75);
-  sim.scene.add(base);
-  const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 10.4, 12), metalMat);
-  rod.position.set(0, 5.2, -1.7);
-  sim.scene.add(rod);
+  const base = new THREE.Mesh(new RoundedBoxGeometry(2.4, 0.16, 1.3, 3, 0.05), castIron);
+  base.position.set(0, 0.08, -1.75);
+  content.add(base);
+  const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 10.4, 24), steel);
+  rod.position.set(0, 5.35, -1.7);
+  content.add(rod);
+  const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.1, 6), steel);
+  nut.position.set(0, 0.2, -1.7); content.add(nut);
   for (const y of [4.1, 8.4]) {
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 1.55), metalMat);
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 1.55, 16), steel);
+    arm.rotation.x = Math.PI / 2;
     arm.position.set(0, y, -0.9);
-    sim.scene.add(arm);
-    const jaw = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.035, 8, 20), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6 }));
-    jaw.rotation.x = Math.PI / 2;
-    jaw.position.set(0, y, 0);
-    sim.scene.add(jaw);
-    const boss = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, 0.22), new THREE.MeshStandardMaterial({ color: 0x475569 }));
+    content.add(arm);
+    for (const s of [-1, 1]) {
+      const jaw = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.045, 10, 28, Math.PI * 0.9), mat.rubber({ color: 0x3b3f44, scale: U }));
+      jaw.rotation.set(Math.PI / 2, 0, s > 0 ? -Math.PI * 0.45 : Math.PI * 0.55);
+      jaw.position.set(0, y, 0);
+      content.add(jaw);
+    }
+    const boss = new THREE.Mesh(new RoundedBoxGeometry(0.3, 0.3, 0.3, 2, 0.05), castIron);
     boss.position.set(0, y, -1.7);
-    sim.scene.add(boss);
+    content.add(boss);
+    const screw = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.34, 12), steel);
+    screw.rotation.z = Math.PI / 2; screw.position.set(0.28, y, -1.7); content.add(screw);
+    const wing = new THREE.Mesh(new RoundedBoxGeometry(0.05, 0.22, 0.06, 1, 0.02), steel);
+    wing.position.set(0.46, y, -1.7); content.add(wing);
   }
 }
 
-// --- Şişeler ve pH metre ---
-function bottle(x, z, color, name, h = 1.3) {
-  const g = new THREE.Group();
-  const mat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.75, shininess: 90 });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, h, 28), mat);
-  body.position.y = h / 2;
-  const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.42, 28, 12, 0, Math.PI * 2, 0, Math.PI / 2), mat);
-  shoulder.position.y = h;
-  shoulder.scale.y = 0.5;
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.25, 16), mat);
-  neck.position.y = h + 0.3;
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.2, 16), new THREE.MeshStandardMaterial({ color: 0x111827 }));
-  cap.position.y = h + 0.5;
-  const lab = textPlane(name, 0.24, { bg: '#f8fafc', color: '#0f172a', size: 44, pad: 10 });
-  lab.position.set(0, h * 0.5, 0.43);
-  g.add(body, shoulder, neck, cap, lab);
-  g.position.set(x, 0, z);
-  sim.scene.add(g);
-  contactShadow(x, z, 1.4, 1.4);
-  return g;
-}
-bottle(-3.4, -0.9, 0x7c4a1e, 'NaOH');
-bottle(-4.6, -0.4, 0xdbeafe, 'HCl', 1.1);
-bottle(-3.9, 0.9, 0xe0f2fe, 'CH₃COOH', 0.95);
-const indBottle = bottle(-2.2, 1.3, 0xff6fb5, 'İnd.', 0.55);
-indBottle.scale.setScalar(0.7);
+// --- Şişeler (gerçek cam, sıvı, etiket) ve pH metre ---
+const bottles = [
+  reagentBottle({ h: 0.19, r: 0.042, amber: false, liquid: 0xf6fbff, label: 'NaOH', stripe: '#2f6fb1', level: 0.75 }),
+  reagentBottle({ h: 0.16, r: 0.036, amber: true, liquid: 0xf8f2e0, label: 'HCl', stripe: '#c0392b', level: 0.6 }),
+  reagentBottle({ h: 0.13, r: 0.03, amber: false, liquid: 0xfbf7ea, label: 'CH₃COOH', stripe: '#16a34a', level: 0.55 }),
+];
+[[-0.16, -0.05, 0.3], [-0.215, -0.13, -0.4], [-0.19, 0.06, 0.8]].forEach(([x, z, r], i) => { bottles[i].position.set(x, BENCH, z); bottles[i].rotation.y = r; sim.scene.add(bottles[i]); });
+// İndikatör damlalık şişesi: rengi seçilen indikatörün dönmüş rengi
+const indBottle = reagentBottle({ h: 0.075, r: 0.02, amber: false, liquid: 0xff6fb5, label: 'İnd.', stripe: '#db2777', level: 0.7 });
+indBottle.position.set(-0.1, BENCH, 0.07);
+sim.scene.add(indBottle);
+const indLiquid = indBottle.children[1];
 
 const meter = new THREE.Group();
 meter.position.set(3.3, 0, 0.2);
 meter.rotation.y = -0.35;
-sim.scene.add(meter);
-meter.add(new THREE.Mesh(new RoundedBoxGeometry(1.6, 1.0, 0.7, 3, 0.08), new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5 })));
-meter.children[0].position.y = 0.5;
+content.add(meter);
+{
+  const body = new THREE.Mesh(new RoundedBoxGeometry(1.6, 1.0, 0.7, 4, 0.1), mat.plastic({ color: 0xe3e5e6, gloss: 0.3, scale: U }));
+  body.position.y = 0.5; meter.add(body);
+  const bezel = new THREE.Mesh(new RoundedBoxGeometry(1.42, 0.68, 0.04, 2, 0.03), mat.plastic({ color: 0x23282e, gloss: 0.6, scale: U }));
+  bezel.position.set(0, 0.58, 0.35); meter.add(bezel);
+  ['#3b82f6', '#64748b', '#64748b'].forEach((c, i) => {
+    const b = new THREE.Mesh(new RoundedBoxGeometry(0.26, 0.08, 0.05, 2, 0.025), mat.rubber({ color: new THREE.Color(c).getHex(), scale: U }));
+    b.position.set(-0.4 + i * 0.4, 0.15, 0.36); meter.add(b);
+  });
+}
 const lcdCanvas = document.createElement('canvas');
 lcdCanvas.width = 256; lcdCanvas.height = 110;
 const lcdTex = new THREE.CanvasTexture(lcdCanvas);
 lcdTex.colorSpace = THREE.SRGBColorSpace;
-const lcd = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 0.56), new THREE.MeshBasicMaterial({ map: lcdTex }));
-lcd.position.set(0, 0.56, 0.36);
+const lcd = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 0.56), new THREE.MeshStandardMaterial({ map: lcdTex, emissiveMap: lcdTex, emissive: 0xffffff, emissiveIntensity: 0.55, roughness: 0.25 }));
+lcd.position.set(0, 0.58, 0.375);
 meter.add(lcd);
-contactShadow(3.3, 0.2, 2.2, 1.4);
 let lcdShown = -1;
 function drawLcd(pH) {
   const g = lcdCanvas.getContext('2d');
-  g.fillStyle = '#a9c79a'; g.fillRect(0, 0, 256, 110);
+  g.fillStyle = '#9fbf92'; g.fillRect(0, 0, 256, 110);
   g.fillStyle = '#1b2a17';
   g.font = '600 20px system-ui'; g.textAlign = 'left'; g.fillText('pH', 12, 28);
+  g.font = '600 16px system-ui'; g.fillText('25,0 °C', 12, 96);
   g.font = '700 64px ui-monospace, monospace'; g.textAlign = 'right';
   g.fillText(fmt(pH, 2), 244, 86);
   lcdTex.needsUpdate = true;
   lcdShown = pH;
 }
-// Prob ve kablo
-const probe = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 3.4, 12), new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4 }));
-const probeTop = new THREE.Vector3(0.28, 3.95, 0.05), probeBot = new THREE.Vector3(0.17, FLASK_Y + 0.13, 0.03);
-probe.position.copy(probeTop).add(probeBot).multiplyScalar(0.5);
-probe.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), probeTop.clone().sub(probeBot).normalize());
-probe.scale.y = probeTop.distanceTo(probeBot) / 3.4;
-sim.scene.add(probe);
+// pH elektrodu (koyu gövde + cam uç) ve kablo
+const probeTop = new THREE.Vector3(0.28, 3.95, 0.05), probeBot = new THREE.Vector3(0.17, FLASK_Y + 0.2, 0.03);
 {
+  const len = probeTop.distanceTo(probeBot);
+  const probe = new THREE.Group();
+  const bodyP = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, len * 0.75, 24), blackPl);
+  bodyP.position.y = len * 0.625; probe.add(bodyP);
+  const stem = glassMesh(new THREE.CylinderGeometry(0.045, 0.045, len * 0.25, 20), { thickness: 0.05 });
+  stem.position.y = len * 0.125; probe.add(stem);
+  const bulb = glassMesh(new THREE.SphereGeometry(0.055, 20, 12), { thickness: 0.05 });
+  probe.add(bulb);
+  probe.position.copy(probeBot);
+  probe.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), probeTop.clone().sub(probeBot).normalize());
+  content.add(probe);
   const curve = new THREE.CatmullRomCurve3([probeTop, new THREE.Vector3(0.6, 4.6, 0.1), new THREE.Vector3(2.4, 3.2, 0.3), new THREE.Vector3(3.2, 1.05, 0.1)]);
-  sim.scene.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 0.025, 6), new THREE.MeshStandardMaterial({ color: 0x111827 })));
+  content.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 60, 0.03, 8), mat.rubber({ color: 0x15171a, scale: U })));
 }
 
 // --- Damlalar, halkalar, akış, anlık renk lekesi ---
-const dropGeo = new THREE.SphereGeometry(0.045, 12, 8);
+const dropGeo = new THREE.SphereGeometry(0.05, 16, 12);
 const drops = [];
 for (let i = 0; i < 16; i++) {
   const m = new THREE.Mesh(dropGeo, burMat);
   m.scale.set(1, 1.35, 1);
   m.visible = false;
-  sim.scene.add(m);
+  m.userData.noCast = true;
+  content.add(m);
   drops.push({ m, v: 0, carry: 0, live: false });
 }
-const ringGeo = new THREE.RingGeometry(0.8, 1, 32).rotateX(-Math.PI / 2);
+const softTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.55, 'rgba(255,255,255,.6)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+const ringGeo = new THREE.RingGeometry(0.88, 1, 48).rotateX(-Math.PI / 2);
 const rings = [];
 for (let i = 0; i < 6; i++) {
   const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false }));
   m.visible = false;
-  sim.scene.add(m);
+  content.add(m);
   rings.push({ m, t: 1 });
 }
-const flashMat = new THREE.MeshBasicMaterial({ color: 0xff2fa0, transparent: true, opacity: 0, depthWrite: false });
+const flashMat = new THREE.MeshBasicMaterial({ color: 0xff2fa0, map: softTex, transparent: true, opacity: 0, depthWrite: false });
 const flash = new THREE.Mesh(new THREE.CircleGeometry(1, 32).rotateX(-Math.PI / 2), flashMat);
 flash.renderOrder = 4;
-sim.scene.add(flash);
+content.add(flash);
 let flashT = 0, flashDur = 1;
-const stream = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.02, 1, 10).translate(0, -0.5, 0), burMat);
+const stream = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.02, 1, 12).translate(0, -0.5, 0), burMat);
 stream.position.y = TIP_Y;
 stream.visible = false;
-sim.scene.add(stream);
+stream.userData.noCast = true;
+content.add(stream);
 
 function spawnDrop(carry = 0) {
   const d = drops.find((x) => !x.live);
@@ -377,7 +381,7 @@ function splash() {
   const r = rings.find((x) => x.t >= 1) || rings[0];
   r.t = 0;
   r.m.visible = true;
-  r.m.position.set(rand(-0.03, 0.03), surfaceY + 0.004, rand(-0.03, 0.03));
+  r.m.position.set(rand(-0.03, 0.03), surfaceY - vortexDepth() * 0.95 + 0.004, rand(-0.03, 0.03));
   // Damla yerinde bazik renk lekesi: eşdeğerliğe yaklaştıkça daha uzun kalır
   const I = INDICATORS[st.ind];
   const base = A().base;
@@ -386,7 +390,7 @@ function splash() {
     const near = smoothstep(0.75, 1.0, st.Vb / veq());
     flashDur = (0.3 + 2.8 * near) / (0.35 + stirRpm.value / 600);
     flashT = flashDur;
-    flash.position.set(0, surfaceY + 0.006, 0);
+    flash.position.set(0, surfaceY - vortexDepth() * 0.95 + 0.006, 0);
   }
 }
 
@@ -409,16 +413,14 @@ function refresh() {
   const pH = phAt(st.Vb);
   lastPh = pH;
   const { color, t, opacity } = indColor(pH);
-  liqMat.color.copy(color); liqMat.opacity = opacity;
-  surfMat.color.copy(color); surfMat.opacity = Math.min(0.9, opacity + 0.15);
+  // Renk: indikatörün soğurma rengi; opaklık → soğurma mesafesi (renksizde neredeyse şeffaf su)
+  liqMat0.attenuationColor.copy(color);
+  liqMat0.attenuationDistance = lerp(0.6, 0.012, clamp((opacity - 0.25) / 0.6, 0, 1));
   const h = liquidHeight(st.Va + st.Vb);
-  surfaceY = FLASK_Y + L0 + h;
-  clipPlane.constant = surfaceY;
-  surface.position.y = L0 + h;
-  surface.scale.setScalar(rAt(h) - 0.01);
+  surfaceY = flask.position.y + L0 + h;
+  buildLiquid(h, vortexDepth());
   const lvlY = MARK0_Y - st.burUsed * PER_ML;
-  burLiquid.scale.y = Math.max(0.001, lvlY - 3.36);
-  meniscus.position.y = lvlY + 0.002;
+  buildBurLiquid(lvlY);
   readLabel.position.y = lvlY;
   readLabel.setText(`${fmt(st.burUsed, 2)} mL`);
   if (Math.abs(pH - lcdShown) > 0.004) drawLcd(pH);
@@ -457,7 +459,7 @@ ui.select({
   label: 'İndikatör', value: 'fenol',
   options: Object.entries(INDICATORS).map(([k, I]) => ({ value: k, label: `${I.name} (${fmt(I.lo, 1)}–${fmt(I.hi, 1)}, ${I.text})` })),
   onChange: (v) => {
-    st.ind = v; indBottle.children[0].material.color.setHex(INDICATORS[v].cols.at(-1));
+    st.ind = v; indLiquid.material.attenuationColor.setHex(INDICATORS[v].cols.at(-1));
     const past = phAt(st.Vb) > (INDICATORS[v].lo + INDICATORS[v].hi) / 2;
     endpointHit = A().base ? !past : past; refresh(); chartDirty = true;
   },
@@ -671,7 +673,8 @@ function answer(i, Vb) {
 }
 
 // --- Döngü ---
-let dropAcc = 0;
+let dropAcc = 0, lastVortex = 0;
+function vortexDepth() { return (stirRpm ? stirRpm.value / 1200 : 0.5) * 0.28; }
 sim.onUpdate((dt) => {
   if (st.open) {
     const rate = rateSl.value;
@@ -699,8 +702,9 @@ sim.onUpdate((dt) => {
 sim.onRender((dt) => {
   const w = (stirRpm.value / 60) * Math.PI * 2 * 0.25; // görsel olarak yavaşlatılmış
   stirPivot.rotation.y += w * dt;
-  surface.rotation.z -= w * dt * 0.5;
-  led.material.color.setHex(stirRpm.value > 0 ? 0x22c55e : 0x334155);
+  ledMat.emissiveIntensity = stirRpm.value > 0 ? 5 : 0.05;
+  const vd = vortexDepth();
+  if (Math.abs(vd - lastVortex) > 0.01) { lastVortex = vd; buildLiquid(surfaceY - flask.position.y - L0, vd); }
   for (const r of rings) {
     if (r.t >= 1) continue;
     r.t = Math.min(1, r.t + dt * 1.6);
@@ -712,7 +716,7 @@ sim.onRender((dt) => {
     flashT = Math.max(0, flashT - dt);
     const k = flashT / flashDur;
     flashMat.opacity = 0.85 * k;
-    flash.scale.setScalar(Math.min(rAt(surfaceY - FLASK_Y - L0) - 0.02, 0.08 + (1 - k) * 0.5));
+    flash.scale.setScalar(Math.min(rAt(surfaceY - flask.position.y - L0) - 0.02, 0.08 + (1 - k) * 0.5));
   }
   flash.visible = flashT > 0;
   if (chartDirty) drawChart();

@@ -1,5 +1,6 @@
 // Tarım ve Hasat — dört tarla, günlük toprak suyu (kova) modeli, azot tepkisi, sıcaklık/dolu stresi ve hasat ekonomisi.
-import { createSim, THREE, fmt, clamp, lerp, smoothstep, seeded, instanced, disposeObject, BufferGeometryUtils } from '@core';
+import { createSim, THREE, fmt, clamp, lerp, smoothstep, seeded, instanced, disposeObject, BufferGeometryUtils, mat, procedural, RoundedBoxGeometry, landscape, createTerrain, terrainSkirt, terrainMaterial, createVegetation } from '@core';
+import { houseGeometries, plaster, roofTiles, treeGeometry, leafMat, barkMat } from './kit.js';
 
 const DOY0 = 60, DOY1 = 304;            // sezon: 1 Mart – 31 Ekim
 const SEASON = DOY1 - DOY0 + 1;
@@ -7,6 +8,12 @@ const SEC_PER_DAY = 0.25;
 const NSOIL = 4;                        // topraktan gelen azot (kg/da)
 const ROWS_N = 12, COLS_N = 14, PLANTS = ROWS_N * COLS_N;
 const PLOT = 10, GAP = 3;
+// Komşu buğday tarlası (dekor; modele girmez): [x0, z0, x1, z1] m
+const WHEAT = [2, -30, 32, -17.2];
+// Komşu sebze tarlası (dekor): lahana ve soğan sıraları
+const VEG = [13.9, -10.8, 29, 11.2];
+function inVeg(x, z, m = 0) { return x > VEG[0] - m && x < VEG[2] + m && z > VEG[1] - m && z < VEG[3] + m; }
+function inWheat(x, z, m = 0) { return x > WHEAT[0] - m && x < WHEAT[2] + m && z > WHEAT[1] - m && z < WHEAT[3] + m; }
 const PLOT_COL = ['#facc15', '#4ade80', '#f87171', '#c4b5fd'];
 const MONTHS = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
 const MDAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -26,10 +33,10 @@ const CROPS = {
 };
 
 const sim = createSim({
-  background: 0x9cc7ea,
-  camera: { position: [0, 27, 31], target: [0, 0, 2], fov: 45 },
-  controls: { maxDistance: 70, minDistance: 8, maxPolarAngle: Math.PI * 0.46 },
-  fog: [60, 140],
+  sky: { elevation: 42, azimuth: 215, clouds: 0.22, haze: 2.1, visibility: 9000, wind: [3, 1] },
+  camera: { position: [19, 6.8, 25], target: [-3, 0.6, -6], fov: 42, near: 0.1, far: 90000 },
+  controls: { maxDistance: 160, minDistance: 3, maxPolarAngle: Math.PI * 0.47 },
+  shadows: true, shadowSize: 42,
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Dört tarlada dört ayrı ürün bir sezon boyunca (1 Mart – 31 Ekim) gün gün büyür. Bitkilerin boyu ve yaprak örtüsü
@@ -94,108 +101,579 @@ function makeWeather() {
   }
 }
 
-// --- Sahne: zemin, çiftlik ---
-const grass = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x6b8f3e, roughness: 1 }));
-grass.rotation.x = -Math.PI / 2;
-sim.scene.add(grass);
-{
-  // Tarla yolu
-  const road = new THREE.MeshStandardMaterial({ color: 0xa08a68, roughness: 1 });
-  const r1 = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 2 * PLOT + GAP + 8), road);
-  r1.rotation.x = -Math.PI / 2; r1.position.y = 0.01;
-  sim.scene.add(r1);
-  const r2 = new THREE.Mesh(new THREE.PlaneGeometry(2 * PLOT + GAP + 8, 2.2), road);
-  r2.rotation.x = -Math.PI / 2; r2.position.y = 0.011;
-  sim.scene.add(r2);
-  // Çiftlik evi
-  const house = new THREE.Group();
-  const wall = new THREE.Mesh(new THREE.BoxGeometry(4, 2.4, 3), new THREE.MeshStandardMaterial({ color: 0xe8dcc4 }));
-  wall.position.y = 1.2;
-  const roof = new THREE.Mesh(new THREE.ConeGeometry(3.3, 1.6, 4), new THREE.MeshStandardMaterial({ color: 0xb4432f }));
-  roof.position.y = 3.2; roof.rotation.y = Math.PI / 4; roof.scale.set(1.05, 1, 0.8);
-  const door = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.4, 0.05), new THREE.MeshStandardMaterial({ color: 0x6b4226 }));
-  door.position.set(0, 0.7, 1.52);
-  house.add(wall, roof, door);
-  house.position.set(-17, 0, -9);
-  sim.scene.add(house);
-  // Su deposu
-  const tank = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 2.2, 16), new THREE.MeshStandardMaterial({ color: 0x7c9cb4, metalness: 0.2, roughness: 0.5 }));
-  tank.position.set(-17, 3.2, -4.5);
-  const legs = new THREE.Mesh(new THREE.BoxGeometry(1.6, 2.1, 1.6), new THREE.MeshStandardMaterial({ color: 0x5b4636, wireframe: true }));
-  legs.position.set(-17, 1.05, -4.5);
-  sim.scene.add(tank, legs);
-  // Ağaçlar
-  const tr = instanced(new THREE.ConeGeometry(1, 2.6, 7), new THREE.MeshStandardMaterial({ color: 0x2f6b34 }), 16);
-  const tt = instanced(new THREE.CylinderGeometry(0.15, 0.2, 1, 6), new THREE.MeshStandardMaterial({ color: 0x6b4a2b }), 16);
-  const m = new THREE.Matrix4(), q = new THREE.Quaternion();
-  for (let i = 0; i < 16; i++) {
-    const a = (i / 16) * Math.PI * 2 + 0.2, R = 20 + hash(i, 3) * 4;
-    const x = Math.cos(a) * R * 1.1, z = Math.sin(a) * R * 0.75 - 4;
-    if (z > 8) { tr.setMatrixAt(i, m.makeScale(0, 0, 0)); tt.setMatrixAt(i, m.makeScale(0, 0, 0)); continue; }
-    const s = 0.8 + hash(i, 7) * 0.6;
-    tr.setMatrixAt(i, m.compose(new THREE.Vector3(x, 1 + 1.3 * s, z), q, new THREE.Vector3(s, s, s)));
-    tt.setMatrixAt(i, m.compose(new THREE.Vector3(x, 0.5, z), q, new THREE.Vector3(1, 1, 1)));
-  }
-  sim.scene.add(tr, tt);
+// --- Sahne: ova, çevre tarlalar, çiftlik ---
+const LOW = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+const scene = sim.scene;
+const hillsF = landscape({ seed: 41, size: 2600, height: 240, octaves: 6, warp: 0.4 });
+const roll = landscape({ seed: 8, size: 700, height: 6, octaves: 4, warp: 0.2 });
+const hillsN = landscape({ seed: 27, size: 1400, height: 90, octaves: 5, warp: 0.35 });
+function hW(x, z) {
+  const r = Math.hypot(x, z);
+  let h = 0;
+  const a = smoothstep(60, 350, r);
+  if (a > 0) h += (roll(x, z) + 1.5) * a;
+  const c = smoothstep(260, 1600, r);                       // yakın çevrede yumuşak tepeler (40–90 m)
+  if (c > 0) h += Math.max(0, hillsN(x, z) + 45) * c;
+  const b = smoothstep(1800, 7000, r);
+  if (b > 0) h += Math.max(0, hillsF(x, z) + 80) * b;
+  return h - 0.02;
 }
-// Meteoroloji istasyonu ve etiketi
+function farmlandMaterial() {
+  const m = terrainMaterial({ water: -50, forest: 0.25, grass: 0x8a8448, dry: 0xb9a56a, soil: 0x86684a, forestCol: 0x3a4a26, grassAmount: 0.85 });
+  const orig = m.onBeforeCompile;
+  m.onBeforeCompile = (sh, r) => {
+    orig(sh, r);
+    sh.fragmentShader = sh.fragmentShader.replace('diffuseColor.rgb = c;', /* glsl */ `diffuseColor.rgb = c;
+      {
+        // Çevre tarlalar: yamalı parseller (anız, sürülmüş, yeşil ürün, nadas), sıra izleri; araları çayır sınır ve toprak yol
+        vec2 q = mat2(0.985, 0.174, -0.174, 0.985)*vTW.xz;
+        vec2 cs = vec2(95.0, 150.0);
+        vec2 id = floor(q/cs), f = fract(q/cs)*cs;
+        float t = h13(vec3(id, 3.0)), t2 = h13(vec3(id, 8.0));
+        float edge = min(min(f.x, cs.x - f.x), min(f.y, cs.y - f.y));
+        float dirH = step(0.5, h13(vec3(id, 5.0)));
+        float rowC = mix(q.x, q.y, dirH);
+        float fw = fwidth(rowC)*1.5;
+        float rows = 1.0 - smoothstep(0.0, 0.5, abs(fract(rowC/0.75) - 0.5)*2.0);
+        rows = mix(rows, 0.5, smoothstep(0.08, 0.4, fw));
+        float mid = fbm3(tP*0.03, 3), fine = vn3(tP*2.0);
+        vec3 fc;
+        if (t < 0.3) fc = mix(vec3(0.7, 0.58, 0.34), vec3(0.6, 0.48, 0.27), rows)*(0.9 + 0.2*mid);            // buğday anızı
+        else if (t < 0.5) fc = mix(vec3(0.42, 0.3, 0.2), vec3(0.3, 0.21, 0.14), rows)*(0.85 + 0.3*fine);     // sürülmüş
+        else if (t < 0.75) fc = mix(vec3(0.2, 0.3, 0.1), vec3(0.36, 0.3, 0.2), rows*0.7)*(0.85 + 0.3*mid);  // yeşil ürün sıraları
+        else fc = mix(vec3(0.6, 0.55, 0.36), vec3(0.5, 0.47, 0.3), fine)*(0.9 + 0.2*mid);                     // nadas / kuru ot
+        fc *= 0.92 + 0.16*t2;
+        float fieldW = smoothstep(1.5, 3.0, edge);
+        float farm = smoothstep(30.0, 45.0, max(abs(vTW.x + 3.0), abs(vTW.z + 2.0)));
+        float far = 1.0 - smoothstep(1500.0, 3500.0, length(vTW.xz));
+        diffuseColor.rgb = mix(diffuseColor.rgb, fc, fieldW*farm*far);
+        // yol (tarla araları, 2,2 m) ve çiftlik avlusu
+        float road = max(step(abs(vTW.x), 1.1)*step(abs(vTW.z), 16.0), step(abs(vTW.z), 1.1)*step(abs(vTW.x), 16.0));
+        road = max(road, step(abs(vTW.x + 17.0), 1.6)*step(vTW.z, -2.0)*step(-40.0, vTW.z));
+        road = max(road, step(abs(vTW.z + 16.0), 1.6)*step(-17.0, vTW.x)*step(vTW.x, 0.0));
+        // toprak yol: iki teker izi, ortada ot şeridi, kenarda seyrek ot
+        float rx = step(abs(vTW.x), 1.1)*step(abs(vTW.z), 16.0), rz = step(abs(vTW.z), 1.1)*step(abs(vTW.x), 16.0);
+        float ruts = rx*smoothstep(0.24, 0.08, abs(abs(vTW.x) - 0.7)) + rz*smoothstep(0.24, 0.08, abs(abs(vTW.z) - 0.7));
+        float med = rx*(1.0 - rz)*smoothstep(0.36, 0.14, abs(vTW.x)) + rz*(1.0 - rx)*smoothstep(0.36, 0.14, abs(vTW.z));
+        vec3 dirt = mix(vec3(0.5, 0.41, 0.3), vec3(0.4, 0.33, 0.24), fine)*(0.85 + 0.25*mid);
+        dirt = mix(dirt, dirt*vec3(0.7, 0.68, 0.66), clamp(ruts, 0.0, 1.0));
+        dirt = mix(dirt, vec3(0.3, 0.35, 0.15)*(0.75 + 0.5*fine), med*smoothstep(0.3, 0.6, fine + 0.3)*0.9);
+        diffuseColor.rgb = mix(diffuseColor.rgb, dirt, road);
+      }`);
+  };
+  m.customProgramCacheKey = () => 'tarim-farmland';
+  return m;
+}
+const landMat = farmlandMaterial();
+scene.add(createTerrain(hW, { size: [700, 700], res: LOW ? [160, 160] : [240, 240], material: landMat }));
+scene.add(createTerrain((x, z) => hW(x, z) - 1.2 * Math.min(smoothstep(350, 330, Math.abs(x)), smoothstep(350, 330, Math.abs(z))), { size: [24000, 24000], res: LOW ? [180, 180] : [260, 260], material: landMat }));
+scene.add(terrainSkirt(hW, { inner: 11500, outer: 80000, material: landMat }));
+scene.add(createVegetation(hW, {
+  rect: [-6000, -6000, 6000, 6000], trees: LOW ? 2500 : 6000, shrubs: LOW ? 800 : 2000, rocks: 80, seed: 5,
+  kinds: { broad: 0.6, cypress: 0.25, pine: 0.15 }, leafA: 0x3c5426, leafB: 0x6a6f34,
+  forest: (x, z) => { const r = Math.hypot(x, z); if (r < 120) return 0; const q = x * 0.985 + z * 0.174, w = -x * 0.174 + z * 0.985; const e = Math.min(Math.abs(((q % 95) + 95) % 95), Math.abs(((w % 150) + 150) % 150)); return (e < 4 ? 0.5 : 0) + 0.25 * smoothstep(1500, 4000, r); },
+}).group);
+
+// Çiftlik evi, ahır, su deposu, ağaçlar
+{
+  const HG = houseGeometries({ w: 9, d: 7, floors: 1, roof: 'gable' });
+  const house = new THREE.Group();
+  house.add(new THREE.Mesh(HG.walls, plaster(0xe9dfca)), new THREE.Mesh(HG.roof, roofTiles(0xa4492c)), new THREE.Mesh(HG.glass, mat.plastic({ color: 0x1d2630, gloss: 1 })), new THREE.Mesh(HG.trim, mat.wood({ color: 0x6b4a2e })));
+  house.position.set(-19, 0, -11);
+  house.rotation.y = Math.PI / 2;
+  {
+    // Sundurma (ahşap dikmeler, sac saçak), baca, kapı, saksılar
+    const beam = mat.wood({ color: 0x6b4a2e, ring: 6 });
+    const pg = [new THREE.BoxGeometry(7.4, 0.12, 2.1).translate(0, 0.06, 4.55)];
+    for (const x of [-3.5, -1.2, 1.2, 3.5]) pg.push(new THREE.CylinderGeometry(0.07, 0.08, 2.5, 10).translate(x, 1.3, 5.45));
+    pg.push(new THREE.BoxGeometry(7.4, 0.14, 0.14).translate(0, 2.52, 5.45));
+    house.add(new THREE.Mesh(BufferGeometryUtils.mergeGeometries(pg.map((g) => g.toNonIndexed())), beam));
+    const eave = new THREE.Mesh(new THREE.BoxGeometry(7.8, 0.05, 2.5).rotateX(0.16).translate(0, 2.78, 4.8), procedural({
+      key: 'tarim-eave', params: { color: 0x9a4a30, roughness: 0.55 }, bump: 0.02,
+      pattern: 'float w = 0.5 + 0.5*sin(p.x*28.0); col *= 0.82 + 0.2*w - 0.12*fbm3(p*1.5, 3); h = w;',
+    }));
+    const chim = new THREE.Mesh(new RoundedBoxGeometry(0.6, 1.9, 0.6, 1, 0.03).translate(2.4, 4.45, -1.2), mat.brick({ color: 0x9a5b42 }));
+    const chimCap = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.08, 0.8).translate(2.4, 5.43, -1.2), mat.concrete({ color: 0x8c8a86 }));
+    const door = new THREE.Mesh(new RoundedBoxGeometry(1.0, 2.1, 0.08, 1, 0.02).translate(0, 1.05, 3.62), mat.wood({ color: 0x5b3a22, ring: 3, varnish: true }));
+    const pots = [];
+    for (const x of [-2.6, -2.0, 2.0, 2.6]) pots.push(new THREE.CylinderGeometry(0.2, 0.14, 0.32, 14).translate(x, 0.28, 3.85));
+    const potM = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(pots.map((g) => g.toNonIndexed())), mat.ceramic({ color: 0xa8583a }));
+    const bush = [];
+    for (const x of [-2.6, -2.0, 2.0, 2.6]) bush.push(new THREE.IcosahedronGeometry(0.26, 2).scale(1, 0.8, 1).translate(x, 0.6, 3.85));
+    const bushM = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(bush.map((g) => g.toNonIndexed())), mat.foliage({ color: 0x4f7a2e }));
+    house.add(eave, chim, chimCap, door, potM, bushM);
+  }
+  scene.add(house);
+  // Ahır: ahşap kaplama, oluklu sac çatı
+  const barn = new THREE.Group();
+  const bw = new THREE.Mesh(new RoundedBoxGeometry(12, 4.2, 8, 2, 0.1).translate(0, 2.1, 0), mat.wood({ color: 0x7a5236, ring: 4 }));
+  const s = new THREE.Shape(); s.moveTo(-6.6, 0); s.lineTo(6.6, 0); s.lineTo(0, 2.4); s.closePath();
+  const br = new THREE.Mesh(new THREE.ExtrudeGeometry(s, { depth: 8.8, bevelEnabled: false }).translate(0, 4.2, -4.4), procedural({
+    key: 'tarim-sheet', params: { color: 0x8e9396, roughness: 0.45, metalness: 0.7 },
+    pattern: 'float cor = 0.5 + 0.5*sin(p.x*20.0); col *= 0.85 + 0.15*cor; col = mix(col, vec3(0.45, 0.28, 0.16), smoothstep(0.6, 0.85, fbm3(p*0.8, 4))*0.6); h = cor;',
+    bump: 0.03,
+  }));
+  const bd = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.2, 0.12).translate(0, 1.6, 4.02), mat.wood({ color: 0x5a3b26, ring: 3 }));
+  barn.add(bw, br, bd);
+  barn.position.set(-26, 0, 6);
+  barn.rotation.y = Math.PI / 2;
+  scene.add(barn);
+  // Su deposu: çelik ayaklar üstünde galvaniz tank
+  const tank = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 2.2, 32), mat.brushedMetal({ color: 0xb9bfc4, rough: 0.35 }));
+  tank.position.set(-21, 4.2, -3.5);
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(1.25, 0.4, 32), mat.brushedMetal({ color: 0xaeb4b8 }));
+  cap.position.set(-21, 5.5, -3.5);
+  const steel = mat.paintedMetal({ color: 0x5a6068, wear: 0.4 });
+  const legsG = [];
+  for (const [a, b] of [[-0.75, -0.75], [0.75, -0.75], [-0.75, 0.75], [0.75, 0.75]]) legsG.push(new THREE.CylinderGeometry(0.06, 0.06, 3.1, 8).translate(a, 1.55, b));
+  for (const y of [1.0, 2.2]) for (const [a, b, rot] of [[0, -0.75, 0], [0, 0.75, 0], [-0.75, 0, 1], [0.75, 0, 1]]) legsG.push(new THREE.BoxGeometry(rot ? 0.06 : 1.5, 0.06, rot ? 1.5 : 0.06).translate(a, y, b));
+  const legs = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(legsG.map((g) => g.toNonIndexed())), steel);
+  legs.position.set(-21, 0, -3.5);
+  scene.add(tank, cap, legs);
+  // Ağaçlar (dut, ceviz, kavak) — gerçek boy
+  const kinds = [treeGeometry('oak', 3, { dens: 1 }), treeGeometry('poplar', 5, { dens: 0.8 }), treeGeometry('fruit', 7, { dens: 1 })];
+  const leaf = [leafMat(0x4a6a2a), leafMat(0x557a2e), leafMat(0x5c7a32)], bark = barkMat(0x5a4632);
+  const pos = [[], [], []];
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2 + 0.2, R = 22 + hash(i, 3) * 5;
+    const x = Math.cos(a) * R * 1.15, z = Math.sin(a) * R * 0.8 - 4;
+    if (z > 8 || inWheat(x, z, 3) || inVeg(x, z, 3)) continue;
+    pos[i % 3 === 0 ? 1 : i % 3 === 1 ? 0 : 2].push([x, z, 0.8 + hash(i, 7) * 0.5, hash(i, 2) * 6.28]);
+  }
+  for (let k = -3; k < 14; k++) pos[1].push([-40 + k * 7, -34 + hash(k, 1) * 1.5, 0.85 + hash(k, 3) * 0.3, hash(k, 9) * 6]);   // yol boyu kavaklar
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+  kinds.forEach((G, j) => {
+    const cr = instanced(G.crown, leaf[j], pos[j].length), tr = instanced(G.trunk, bark, pos[j].length);
+    pos[j].forEach(([x, z, s, r], i) => { m4.compose(new THREE.Vector3(x, hW(x, z) - 0.2, z), q.setFromEuler(e.set(0, r, 0)), new THREE.Vector3(s, s, s)); cr.setMatrixAt(i, m4); tr.setMatrixAt(i, m4); });
+    scene.add(cr, tr);
+  });
+}
+// Meteoroloji istasyonu: direk, beyaz panjurlu sıcaklık kulübesi, yağmur ölçer, rüzgâr kepçeleri
 const station = new THREE.Group();
 {
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3, 6), new THREE.MeshStandardMaterial({ color: 0xcbd5e1 }));
-  pole.position.y = 1.5;
-  const box = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.5, 0.6), new THREE.MeshStandardMaterial({ color: 0xf8fafc }));
-  box.position.y = 2.2;
-  station.add(pole, box);
-  station.position.set(15, 0, -9);
-  sim.scene.add(station);
+  const white = mat.paintedMetal({ color: 0xf2f2ee, wear: 0.08 }), pole = mat.brushedMetal({ color: 0xc0c5ca });
+  station.add(new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 3.2, 12).translate(0, 1.6, 0), pole));
+  const scr = new THREE.Mesh(new RoundedBoxGeometry(0.55, 0.5, 0.45, 2, 0.02).translate(0.35, 1.55, 0), procedural({
+    key: 'tarim-louvre', params: { color: 0xf4f4f0, roughness: 0.6 },
+    pattern: 'float l = step(0.5, fract(p.y*28.0)); col *= 0.82 + 0.18*l; h = l;', bump: 0.004,
+  }));
+  station.add(scr);
+  station.add(new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.35, 20).translate(-0.5, 1.0, 0.3), white));
+  station.add(new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.0, 8).translate(-0.5, 0.5, 0.3), pole));
+  const cups = new THREE.Group();
+  for (let i = 0; i < 3; i++) {
+    const a = i * 2.094, arm = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.2, 6).rotateZ(Math.PI / 2).translate(0.1, 0, 0), pole);
+    arm.rotation.y = a;
+    const cup = new THREE.Mesh(new THREE.SphereGeometry(0.035, 12, 8, 0, Math.PI), white);
+    cup.position.set(Math.cos(a) * 0.2, 0, -Math.sin(a) * 0.2); cup.rotation.y = a + Math.PI / 2;
+    cups.add(arm, cup);
+  }
+  cups.position.y = 3.25;
+  station.add(cups);
+  station.userData.cups = cups;
+  station.position.set(13.6, 0, 13.6);
+  scene.add(station);
 }
-const wxLbl = sim.label('', { parent: station, position: [0, 3.6, 0], className: 'big' });
+const wxLbl = sim.label('', { parent: station, position: [0, 3.9, 0], className: 'big' });
 
-// Yağmur / dolu parçacıkları
-const RAIN_N = 900;
+// Yağmur / dolu parçacıkları (tarlaların üstünde, gerçek boy damla izleri)
+const RAIN_N = LOW ? 900 : 1800;
 const rainPos = new Float32Array(RAIN_N * 6);
 for (let i = 0; i < RAIN_N; i++) {
-  const x = (Math.random() - 0.5) * 40, y = Math.random() * 16, z = (Math.random() - 0.5) * 34;
+  const x = (Math.random() - 0.5) * 50, y = Math.random() * 18, z = (Math.random() - 0.5) * 44;
   rainPos.set([x, y, z, x, y + 0.5, z], i * 6);
 }
 const rainGeo = new THREE.BufferGeometry();
 rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
-const rainMat = new THREE.LineBasicMaterial({ color: 0xbfd8ff, transparent: true, opacity: 0, depthWrite: false });
+const rainMat = new THREE.LineBasicMaterial({ color: 0xc9d6e2, transparent: true, opacity: 0, depthWrite: false });
 const rainPts = new THREE.LineSegments(rainGeo, rainMat);
 rainPts.frustumCulled = false;
-sim.scene.add(rainPts);
+rainPts.userData.noShadow = true;
+scene.add(rainPts);
 let rainVis = 0, hailVis = 0;
 
-// --- Bitki geometrileri (yükseklik 1'e normalize) ---
-function geo(g, x = 0, y = 0, z = 0, rx = 0, rz = 0, sx = 1, sy = 1, sz = 1) {
-  g.scale(sx, sy, sz); g.rotateX(rx); g.rotateZ(rz); g.translate(x, y, z);
+// --- Bitki geometrileri (yükseklik 1'e normalize; x-z örnek ölçeğiyle, y bitki boyuyla ölçeklenir) ---
+const rng = seeded(99);
+function tint(g, fn) {
+  const p = g.attributes.position, c = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) { const v = fn(p.getX(i), p.getY(i), p.getZ(i)); c[i * 3] = v[0]; c[i * 3 + 1] = v[1]; c[i * 3 + 2] = v[2]; }
+  g.setAttribute('color', new THREE.BufferAttribute(c, 3));
   return g;
 }
-const merge = (list) => BufferGeometryUtils.mergeGeometries(list.map((g) => g.toNonIndexed()));
+const shade = (y) => { const k = 0.45 + 0.6 * Math.min(1, y); return [k, k, k]; };
+const merge = (list) => BufferGeometryUtils.mergeGeometries(list.map((g) => { const n = g.index ? g.toNonIndexed() : g; if (n.attributes.uv) n.deleteAttribute('uv'); if (!n.attributes.color) tint(n, (x, y) => shade(y)); return n; }));
+// Yaprak: sivri uçlu şerit, kavisli; (x0,y0) kökten yöne doğru
+function blade(len, w, x0, y0, z0, yaw, pitch, droop, seg = 4) {
+  const g = new THREE.PlaneGeometry(w, len, 1, seg), p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const t = (p.getY(i) + len / 2) / len;
+    p.setX(i, p.getX(i) * Math.sin(Math.PI * Math.min(1, 0.15 + t * 0.95)));
+    p.setY(i, t * len); p.setZ(i, droop * t * t * len);
+  }
+  g.rotateX(-pitch); g.rotateY(yaw); g.translate(x0, y0, z0);
+  return tint(g, (x, y) => shade(y));
+}
+function leafCloud(n, r, y0, y1, lw, ll) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = rng() * 6.28, rr = r * Math.sqrt(rng()), y = y0 + (y1 - y0) * rng();
+    out.push(blade(ll * (0.7 + rng() * 0.5), lw, Math.cos(a) * rr, y, Math.sin(a) * rr, a + Math.PI / 2 + (rng() - 0.5), 0.6 + rng() * 0.9, 0.25));
+  }
+  return out;
+}
+function balls(n, r, y0, y1, rad, sy = 1) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = i * 2.4 + rng(), rr = r * (0.5 + 0.5 * rng()), g = new THREE.IcosahedronGeometry(rad, 1);
+    g.scale(1, sy, 1); g.translate(Math.cos(a) * rr, y0 + (y1 - y0) * rng(), Math.sin(a) * rr);
+    out.push(tint(g, () => [1, 1, 1]));
+  }
+  return out;
+}
 const GEOS = {
   bugday: {
-    plant: merge([0, 1, 2, 3].map((i) => geo(new THREE.ConeGeometry(0.035, 1, 4), Math.cos(i * 1.6) * 0.06, 0.5, Math.sin(i * 1.6) * 0.06, Math.sin(i) * 0.12, Math.cos(i) * 0.12))),
-    fruit: merge([0, 1, 2, 3].map((i) => geo(new THREE.SphereGeometry(0.04, 5, 4), Math.cos(i * 1.6) * 0.12, 0.98, Math.sin(i * 1.6) * 0.12, 0, 0, 1, 3, 1))),
+    plant: merge(Array.from({ length: 26 }, (_, i) => blade(0.95 + rng() * 0.08, 0.018, (rng() - 0.5) * 0.5, 0, (rng() - 0.5) * 0.5, rng() * 6.28, 0.1 + rng() * 0.2, 0.08))),
+    fruit: merge(Array.from({ length: 16 }, () => { const x = (rng() - 0.5) * 0.5, z = (rng() - 0.5) * 0.5, g = new THREE.CapsuleGeometry(0.014, 0.07, 2, 6); g.rotateZ((rng() - 0.5) * 0.4); g.translate(x + 0.05, 0.97, z); return tint(g, () => [1, 1, 1]); })),
   },
   misir: {
     plant: merge([
-      geo(new THREE.CylinderGeometry(0.035, 0.05, 1, 5), 0, 0.5),
-      ...[0, 1, 2, 3, 4].map((i) => geo(new THREE.BoxGeometry(0.45, 0.012, 0.07), 0.2 * (i % 2 ? 1 : -1), 0.25 + i * 0.15, 0, 0, (i % 2 ? -1 : 1) * 0.35)),
+      tint(new THREE.CylinderGeometry(0.012, 0.018, 1, 7).translate(0, 0.5, 0), (x, y) => shade(y)),
+      ...Array.from({ length: 11 }, (_, i) => blade(0.55 + 0.15 * Math.sin(i), 0.05, 0, 0.15 + i * 0.07, 0, i * 2.6, 0.9, 0.6)),
+      ...Array.from({ length: 6 }, (_, i) => blade(0.14, 0.008, 0, 0.93, 0, i * 1.05, 0.35, 0.3, 2)),
     ]),
-    fruit: merge([geo(new THREE.CylinderGeometry(0.045, 0.035, 0.2, 6), 0.07, 0.5, 0, 0, -0.35)]),
+    fruit: merge([tint(new THREE.CylinderGeometry(0.03, 0.022, 0.13, 10).rotateZ(-0.35).translate(0.035, 0.52, 0), () => [1, 1, 1])]),
   },
   domates: {
-    plant: merge([geo(new THREE.SphereGeometry(0.42, 7, 5), 0, 0.55, 0, 0, 0, 1, 0.85, 1), geo(new THREE.CylinderGeometry(0.03, 0.04, 0.3, 4), 0, 0.15)]),
-    fruit: merge([0, 1, 2, 3, 4].map((i) => geo(new THREE.SphereGeometry(0.075, 6, 4), Math.cos(i * 1.3) * 0.38, 0.35 + (i % 3) * 0.14, Math.sin(i * 1.3) * 0.38))),
+    plant: merge([tint(new THREE.CylinderGeometry(0.01, 0.015, 0.8, 5).translate(0, 0.4, 0), (x, y) => shade(y)), ...leafCloud(60, 0.36, 0.12, 0.95, 0.07, 0.14)]),
+    fruit: merge(balls(6, 0.3, 0.25, 0.6, 0.045, 0.85)),
   },
   pamuk: {
-    plant: merge([geo(new THREE.SphereGeometry(0.33, 7, 5), 0, 0.62, 0, 0, 0, 1, 1.1, 1), geo(new THREE.CylinderGeometry(0.025, 0.035, 0.4, 4), 0, 0.2)]),
-    fruit: merge([0, 1, 2, 3, 4, 5].map((i) => geo(new THREE.SphereGeometry(0.075, 6, 4), Math.cos(i * 1.05) * 0.26, 0.8 + (i % 2) * 0.12, Math.sin(i * 1.05) * 0.26))),
+    plant: merge([tint(new THREE.CylinderGeometry(0.01, 0.016, 0.9, 5).translate(0, 0.45, 0), (x, y) => shade(y)), ...leafCloud(48, 0.3, 0.2, 1.0, 0.1, 0.12)]),
+    fruit: merge(balls(7, 0.26, 0.55, 0.95, 0.035, 1.15)),
   },
 };
-const plantMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, flatShading: true });
-const fruitMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
-const dripMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.7 });
+const plantMat = procedural({
+  key: 'tarim-plant', params: { color: 0xffffff, roughness: 0.75, vertexColors: true, side: THREE.DoubleSide },
+  pattern: 'col *= 0.82 + 0.3*vn3(p*25.0 + seed*9.0);',
+});
+const fruitMat = procedural({
+  key: 'tarim-fruit', params: { color: 0xffffff, roughness: 0.45, vertexColors: true },
+  pattern: 'col *= 0.9 + 0.15*vn3(p*60.0); rough = mix(0.35, 0.9, step(0.8, (col.r + col.g + col.b)/3.0));',
+});
+const dripMat = mat.rubber({ color: 0x17181a });
+
+// ---------------------------------------------------------------------------
+// Çiftlik çevresi (yalnız görsel): kenar otları, komşu buğday tarlası, traktör, çitler, sulama kanalı, pompa/filtre, balyalar
+// ---------------------------------------------------------------------------
+const mergeNI = (list) => BufferGeometryUtils.mergeGeometries(list.map((g) => (g.index ? g.toNonIndexed() : g)));
+// Kenar otları: tarlalar, yollar, yapılar ve kanal dışı; kuru Akdeniz çayırı
+const farmFree = (x, z) => {
+  const ax = Math.abs(x), az = Math.abs(z);
+  if (ax > 1.25 && ax < 11.75 && az > 1.25 && az < 11.75) return false;           // deneme tarlaları (seddeler dahil)
+  if (ax < 1.12 && az < 16.2) return false;                                       // ara yollar
+  if (az < 1.12 && ax < 16.2) return false;
+  if (inVeg(x, z, 0.4)) return false;
+  if (Math.abs(x + 17) < 2.0 && z > -41 && z < -1.5) return false;                 // çiftlik yolu
+  if (Math.abs(z + 16) < 2.0 && x > -17.5 && x < 0.5) return false;
+  if (x > -23.5 && x < -12.8 && z > -16.2 && z < -5.8) return false;               // ev + sundurma
+  if (x > -31 && x < -21 && z > -1 && z < 13) return false;                        // ahır
+  if (Math.hypot(x + 21, z + 3.5) < 1.6 || Math.hypot(x - 13.6, z - 13.6) < 1.2) return false;
+  if (z > -13.9 && z < -11.9 && x > -12.5 && x < 17.5) return false;               // kanal + pompa
+  if (inWheat(x, z, 0.6)) return false;
+  if (x > -21.2 && x < -16.5 && z > 9.5 && z < 16.5) return false;                 // balyalar
+  if (x > -11 && x < -2 && Math.abs(z + 16) < 2.8) return false;                   // traktör
+  return true;
+};
+const verge = createVegetation((x, z) => (farmFree(x, z) ? hW(x, z) : -100), {
+  rect: [-60, -60, 60, 60], trees: 0, shrubs: 0, rocks: 0, water: -50, seed: 17,
+  grass: LOW ? 22000 : 52000, grassAt: [9, 9, 32], grassFar: 70, grassA: 0x5c6a2c, grassB: 0xb0a15e,
+});
+verge.group.scale.y = 0.6;
+scene.add(verge.group);
+
+// Komşu tarla: kışlık buğday. Takvim gününe göre boy/renk (Mart kardeşlenme → Nisan başaklanma → Haziran hasat → anız).
+const wheatField = new THREE.Group();
+{
+  const [x0, z0, x1, z1] = WHEAT, W = x1 - x0, D = z1 - z0;
+  const soilG = new THREE.PlaneGeometry(W + 0.6, D + 0.6).rotateX(-Math.PI / 2).translate((x0 + x1) / 2, 0.02, (z0 + z1) / 2);
+  const soil = new THREE.Mesh(soilG, procedural({
+    key: 'tarim-soil2', params: { color: 0x7a5a3c, roughness: 0.97 }, bump: 0.02,
+    pattern: 'float r = 0.5 + 0.5*sin(p.z*21.0); col *= 0.75 + 0.2*r + 0.2*vn3(p*8.0) + 0.1*fbm3(p*0.8, 3); h = r*0.6 + vn3(p*8.0)*0.4;',
+  }));
+  soil.receiveShadow = true;
+  soil.userData.noFit = true;
+  wheatField.add(soil);
+  const r2 = seeded(313);
+  const stems = [], leaves = [], ears = [];
+  for (let i = 0; i < 11; i++) {
+    const x = (r2() - 0.5) * 0.3, z = (r2() - 0.5) * 0.26, yaw = r2() * 6.28, pit = 0.03 + r2() * 0.12, L = 0.88 + r2() * 0.14;
+    stems.push(blade(L, 0.012, x, 0, z, yaw, pit, 0.0, 2));
+    const e = new THREE.CylinderGeometry(0.0095, 0.006, 0.085, 5, 1, true).translate(0, 0.0425, 0).rotateX(-pit).rotateY(yaw);
+    const tz = -L * Math.sin(pit);
+    e.translate(x + tz * Math.sin(yaw), L * Math.cos(pit) - 0.02, z + tz * Math.cos(yaw));
+    ears.push(tint(e, () => [1, 1, 1]));
+  }
+  for (let i = 0; i < 12; i++) leaves.push(blade(0.42 + r2() * 0.2, 0.03, (r2() - 0.5) * 0.28, 0.05 + r2() * 0.3, (r2() - 0.5) * 0.24, r2() * 6.28, 0.5 + r2() * 0.5, 0.35, 3));
+  const clumpG = merge([...stems, ...leaves]), earG = merge(ears);
+  const fieldMat = procedural({
+    key: 'tarim-wheatfield', params: { color: 0x5f8f3a, roughness: 0.8, vertexColors: true, side: THREE.DoubleSide },
+    pattern: 'col *= 0.8 + 0.35*vn3(p*3.0) + 0.1*fbm3(p*0.4, 3);',
+  });
+  const earMat = procedural({
+    key: 'tarim-wheatear', params: { color: 0x7fa048, roughness: 0.7, vertexColors: true, side: THREE.DoubleSide },
+    pattern: 'col *= 0.85 + 0.3*vn3(p*5.0);',
+  });
+  const SP = LOW ? 0.34 : 0.28, nx = Math.floor(W / SP), nz = Math.floor(D / SP);
+  const clumps = instanced(clumpG, fieldMat, nx * nz), earsM = instanced(earG, earMat, nx * nz);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), v = new THREE.Vector3(), sc = new THREE.Vector3();
+  let k = 0;
+  for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
+    const x = x0 + (i + 0.5) * SP + (hash(i, j) - 0.5) * SP * 0.5, z = z0 + (j + 0.5) * SP + (hash(j, i + 7) - 0.5) * SP * 0.3;
+    const s = 0.85 + hash(i + 3, j) * 0.3;
+    m4.compose(v.set(x, 0.02, z), q.setFromEuler(e.set((hash(i, j + 5) - 0.5) * 0.12, hash(i + 9, j) * 6.28, (hash(i + 1, j + 2) - 0.5) * 0.12)), sc.set(s, 0.9 + hash(j, i) * 0.2, s));
+    clumps.setMatrixAt(k, m4); earsM.setMatrixAt(k, m4); k++;
+  }
+  clumps.userData.noCast = earsM.userData.noCast = true;
+  clumps.castShadow = earsM.castShadow = false;
+  clumps.receiveShadow = earsM.receiveShadow = true;
+  clumps.userData.noFit = earsM.userData.noFit = true;
+  wheatField.add(clumps, earsM);
+  wheatField.userData = { clumps, earsM, fieldMat, earMat, soil };
+}
+scene.add(wheatField);
+
+// Komşu sebze tarlası: güney yarıda lahana (Mart dikimi, Mayıs sonu hasat), kuzey yarıda soğan (sonbahar ekimi, Haziran hasat)
+const vegField = new THREE.Group();
+{
+  const [x0, z0, x1, z1] = VEG;
+  const soil = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0 + 0.4, z1 - z0 + 0.4, 1, 1).rotateX(-Math.PI / 2).translate((x0 + x1) / 2, 0.025, (z0 + z1) / 2), wheatField.userData.soil.material);
+  soil.receiveShadow = true; soil.userData.noFit = true;
+  vegField.add(soil);
+  const r3 = seeded(515);
+  // Lahana: 11 dış yaprak rozeti + sıkı baş
+  const cab = [];
+  for (let i = 0; i < 11; i++) cab.push(blade(0.2 + r3() * 0.06, 0.13, 0, 0.02, 0, (i / 11) * 6.28 + r3() * 0.3, 1.05 + r3() * 0.3, -0.25, 3));
+  cab.push(tint(new THREE.IcosahedronGeometry(0.1, 2).scale(1, 0.85, 1).translate(0, 0.1, 0), () => [1.25, 1.3, 1.1]));
+  const cabG = merge(cab);
+  // Soğan: 4 bitkilik öbek, her biri 5 ince boru yaprak
+  const oni = [];
+  for (let k = 0; k < 4; k++) { const ox = (k - 1.5) * 0.11; for (let i = 0; i < 5; i++) oni.push(blade(0.34 + r3() * 0.12, 0.012, ox, 0, (r3() - 0.5) * 0.03, r3() * 6.28, 0.12 + r3() * 0.3, 0.2, 3)); }
+  const oniG = merge(oni);
+  const vegMat = procedural({ key: 'tarim-vegleaf', params: { color: 0x6f9a52, roughness: 0.55, vertexColors: true, side: THREE.DoubleSide },
+    pattern: 'col *= 0.82 + 0.3*vn3(p*14.0 + seed*7.0); rough = 0.45 + 0.3*vn3(p*30.0);' });
+  const oniMat = procedural({ key: 'tarim-onion', params: { color: 0x5f8f48, roughness: 0.6, vertexColors: true, side: THREE.DoubleSide },
+    pattern: 'col *= 0.85 + 0.25*vn3(p*9.0);' });
+  const cabs = [], onis = [];
+  for (let z = z0 + 0.45; z < z1; z += 0.75) for (let x = x0 + 0.3; x < x1 - 0.2; x += z < (z0 + z1) / 2 + 3 ? 0.5 : 0.5) {
+    (z > (z0 + z1) / 2 - 1 ? cabs : onis).push([x + (r3() - 0.5) * 0.08, z + (r3() - 0.5) * 0.06, r3() * 6.28, 0.8 + r3() * 0.4]);
+  }
+  const mk = (G, M, list) => {
+    const im = instanced(G, M, list.length), m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), Yv = new THREE.Vector3(0, 1, 0), v = new THREE.Vector3(), s = new THREE.Vector3();
+    list.forEach(([x, z, a, k], i) => im.setMatrixAt(i, m4.compose(v.set(x, 0.03, z), q.setFromAxisAngle(Yv, a), s.set(k, k, k))));
+    im.castShadow = true; im.receiveShadow = true; im.userData.noFit = true;
+    vegField.add(im);
+    return im;
+  };
+  vegField.userData = { cab: mk(cabG, vegMat, cabs), oni: mk(oniG, oniMat, onis), cabs };
+}
+scene.add(vegField);
+function updateVegField(doy) {
+  const U = vegField.userData;
+  const cg = 0.6 + 0.7 * smoothstep(62, 140, doy);                       // lahana: fide → baş; hasattan sonra tarla boş
+  U.cab.visible = doy < 150;
+  if (U.cab.visible && Math.abs((U.cg || 0) - cg) > 0.01) {                 // örnek başına ölçek (ağ ölçeklenirse konumlar da kayar)
+    U.cg = cg;
+    U.cabs.forEach(([x, z, a, k], i) => U.cab.setMatrixAt(i, _vm.compose(_vv.set(x, 0.03, z), _vq.setFromAxisAngle(_vy, a), _vs.setScalar(k * cg))));
+    U.cab.instanceMatrix.needsUpdate = true;
+  }
+  const og = doy < 172 ? 0.8 + 0.5 * smoothstep(60, 130, doy) : 0.001;      // soğan: boylanır, Haziran'da sökülür
+  U.oni.scale.set(1, og, 1); U.oni.visible = doy < 172;
+  U.oni.material.color.setHex(0x5f8f48).lerp(_vc.setHex(0x9a9a55), smoothstep(145, 170, doy));
+}
+const _vc = new THREE.Color(), _vm = new THREE.Matrix4(), _vv = new THREE.Vector3(), _vq = new THREE.Quaternion(), _vy = new THREE.Vector3(0, 1, 0), _vs = new THREE.Vector3();
+// Yakın çevre ağaç sıraları (tarla sınırlarında rüzgâr kıran), orta mesafede
+{
+  const tl = createVegetation(hW, {
+    rect: [-420, -420, 420, 420], trees: LOW ? 700 : 1400, shrubs: LOW ? 250 : 600, rocks: 0, seed: 23, water: -50,
+    kinds: { broad: 0.55, poplar: 0.3, cypress: 0.15 }, leafA: 0x3c5426, leafB: 0x6a6f34,
+    forest: (x, z) => {
+      const r = Math.hypot(x, z); if (r < 58) return 0;
+      const q = x * 0.985 + z * 0.174, w = -x * 0.174 + z * 0.985;
+      const e = Math.min(Math.abs(((q % 95) + 95) % 95), Math.abs(((w % 150) + 150) % 150));
+      return e < 3.5 ? 0.9 : 0;
+    },
+  });
+  scene.add(tl.group);
+}
+// Rulo saman balyaları: yuvarlatılmış kenarlı silindir, lifli saman dokusu
+const strawMat = procedural({
+  key: 'tarim-straw', params: { color: 0xc6a55e, roughness: 0.95 }, bump: 0.02,
+  pattern: `float s = vn3(vec3(p.x*6.0, p.y*55.0, p.z*55.0))*0.6 + vn3(p*140.0)*0.4;
+    float sp = 0.5 + 0.5*sin(length(p.yz - floor(p.yz/1.6)*1.6 - 0.8)*55.0);
+    col *= 0.7 + 0.45*s + 0.08*sp - 0.15*fbm3(p*0.9, 3); h = s;`,
+});
+const baleG = new THREE.LatheGeometry([[0, -0.6], [0.66, -0.6], [0.73, -0.56], [0.76, -0.45], [0.76, 0.45], [0.73, 0.56], [0.66, 0.6], [0, 0.6]].map(([a, b]) => new THREE.Vector2(a, b)), 28).rotateZ(Math.PI / 2);
+{
+  const pts = [[-19.8, 11, 0.1], [-18.3, 11.2, 0.05], [-19.1, 12.6, -0.1], [-18.9, 14.3, 0.2], [-19.7, 15.6, 1.6]];
+  const b = instanced(baleG, strawMat, pts.length), m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
+  pts.forEach(([x, z, r], i) => b.setMatrixAt(i, m4.compose(new THREE.Vector3(x, 0.74, z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), r), new THREE.Vector3(1, 1, 1))));
+  scene.add(b);
+}
+const fieldBales = instanced(baleG, strawMat, 7);
+{
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
+  for (let i = 0; i < 7; i++) {
+    const x = WHEAT[0] + 3 + (i % 4) * 7 + hash(i, 1) * 2, z = WHEAT[1] + 4 + Math.floor(i / 4) * 9 + hash(i, 2) * 3;
+    fieldBales.setMatrixAt(i, m4.compose(new THREE.Vector3(x, 0.76, z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), hash(i, 3) * 3), new THREE.Vector3(1, 1, 1)));
+  }
+  fieldBales.visible = false;
+  scene.add(fieldBales);
+}
+function updateWheatField(doy) {
+  const U = wheatField.userData;
+  const harvested = doy >= 168 && doy < 285, plowed = doy >= 285;
+  const hgt = harvested ? 0.16 : plowed ? 0 : 0.3 + 0.7 * smoothstep(68, 128, doy);
+  U.clumps.visible = !plowed;
+  U.clumps.scale.set(1, Math.max(hgt, 0.001), 1);
+  U.earsM.scale.set(1, Math.max(hgt, 0.001), 1);
+  U.earsM.visible = !harvested && !plowed && doy >= 104;
+  const ripe = smoothstep(135, 163, doy);
+  U.fieldMat.color.setHex(0x5f8f3a).lerp(new THREE.Color(0xc9a85c), harvested ? 1 : ripe);
+  if (harvested) U.fieldMat.color.setHex(0xbfa36a);
+  U.earMat.color.setHex(0x86a44a).lerp(new THREE.Color(0xd9b563), smoothstep(125, 158, doy));
+  fieldBales.visible = doy >= 170 && doy < 262;
+}
+
+// Traktör (~90 BG, 4 m boy): arka lastik Ø1,6 m, ön Ø0,95 m, kabin, kaput, egzoz, çamurluk, 3 nokta askı
+function makeTractor() {
+  const g = new THREE.Group();
+  const red = mat.paintedMetal({ color: 0xa8231b, wear: 0.12 }), dark = mat.paintedMetal({ color: 0x26282c, wear: 0.25 });
+  const rimM = mat.paintedMetal({ color: 0xcfc7b4, wear: 0.2 }), tyreM = mat.rubber({ color: 0x1b1c1e });
+  const chrome = mat.brushedMetal({ color: 0x9a9ea3, rough: 0.3 });
+  function tyre(R, Wd, n) {
+    const r0 = R * 0.66, h = Wd / 2;
+    const prof = [[r0, -h], [R - 0.07, -h], [R - 0.02, -h + 0.05], [R - 0.02, h - 0.05], [R - 0.07, h], [r0, h]].map(([a, b]) => new THREE.Vector2(a, b));
+    const parts = [new THREE.LatheGeometry(prof, 40)];
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      for (const sd of [-1, 1]) {
+        const lug = new THREE.BoxGeometry(0.06, h * 0.95, 0.07).rotateX(sd * 0.55).translate(R - 0.005, sd * h * 0.48, sd * 0.04);
+        lug.applyMatrix4(new THREE.Matrix4().makeRotationY(-a));
+        parts.push(lug);
+      }
+    }
+    // lastik ekseni y → dönüşten sonra z (lateral)
+    return mergeNI(parts.map((p) => { p.deleteAttribute?.('uv'); return p; })).rotateX(Math.PI / 2);
+  }
+  const rearT = tyre(0.8, 0.44, 26), frontT = tyre(0.475, 0.3, 18);
+  const rimG = (R, Wd) => mergeNI([new THREE.CylinderGeometry(R * 0.66, R * 0.66, Wd * 0.85, 28, 1, true), new THREE.CylinderGeometry(R * 0.4, R * 0.4, Wd * 0.3, 20).translate(0, Wd * 0.1, 0), new THREE.CylinderGeometry(R * 0.12, R * 0.14, Wd * 0.6, 12).translate(0, Wd * 0.2, 0)].map((p) => { p.deleteAttribute('uv'); return p; })).rotateX(Math.PI / 2);
+  for (const [x, z, R, Wd, T] of [[0, 0.8, 0.8, 0.44, rearT], [0, -0.8, 0.8, 0.44, rearT], [2.3, 0.72, 0.475, 0.3, frontT], [2.3, -0.72, 0.475, 0.3, frontT]]) {
+    const t = new THREE.Mesh(T, tyreM); t.position.set(x, R, z);
+    const rim = new THREE.Mesh(rimG(R, Wd), rimM); rim.position.set(x, R, z); if (z < 0) rim.rotation.y = Math.PI;
+    g.add(t, rim);
+  }
+  // Şasi, motor, kaput, ızgara, ön ağırlık
+  g.add(new THREE.Mesh(new RoundedBoxGeometry(2.9, 0.55, 0.72, 2, 0.05).translate(1.3, 0.72, 0), dark));
+  g.add(new THREE.Mesh(new RoundedBoxGeometry(2.25, 0.72, 0.86, 3, 0.12).translate(2.05, 1.38, 0), red));
+  g.add(new THREE.Mesh(new RoundedBoxGeometry(0.1, 0.62, 0.74, 1, 0.03).translate(3.2, 1.34, 0), procedural({
+    key: 'tarim-grille', params: { color: 0x1c1d20, roughness: 0.5, metalness: 0.6 },
+    pattern: 'float l = step(0.5, fract(p.y*22.0)); col *= 0.5 + 0.7*l; h = l;', bump: 0.01,
+  })));
+  g.add(new THREE.Mesh(new RoundedBoxGeometry(0.5, 0.42, 0.9, 2, 0.05).translate(3.45, 0.72, 0), dark));
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 1.5).translate(2.3, 0.47, 0), dark));
+  for (const z of [-0.3, 0.3]) g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.05, 16).rotateZ(Math.PI / 2).translate(3.26, 1.55, z), mat.ceramic({ color: 0xf4f1e6 })));
+  // Egzoz ve hava filtresi
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.3, 12).translate(1.35, 2.3, 0.33), chrome));
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.35, 14).translate(1.35, 1.9, 0.33), dark));
+  // Kabin: taban, dikmeler, tavan, camlar, koltuk, direksiyon
+  const cab = new THREE.Group();
+  cab.add(new THREE.Mesh(new RoundedBoxGeometry(1.55, 0.14, 1.5, 1, 0.04).translate(0.15, 1.3, 0), dark));
+  const posts = [];
+  for (const [x, z] of [[-0.6, -0.72], [-0.6, 0.72], [0.9, -0.72], [0.9, 0.72]]) posts.push(new THREE.BoxGeometry(0.07, 1.42, 0.07).translate(x, 2.05, z));
+  cab.add(new THREE.Mesh(mergeNI(posts), dark));
+  cab.add(new THREE.Mesh(new RoundedBoxGeometry(1.8, 0.14, 1.72, 2, 0.05).translate(0.15, 2.8, 0), red));
+  const glassM = new THREE.MeshPhysicalMaterial({ color: 0x2b3a40, roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.35, depthWrite: false });
+  const panes = [new THREE.PlaneGeometry(1.45, 1.35).translate(0.15, 2.05, 0.72), new THREE.PlaneGeometry(1.45, 1.35).translate(0.15, 2.05, -0.72),
+    new THREE.PlaneGeometry(1.4, 1.35).rotateY(Math.PI / 2).translate(0.9, 2.05, 0), new THREE.PlaneGeometry(1.4, 1.35).rotateY(Math.PI / 2).translate(-0.6, 2.05, 0)];
+  const gl = new THREE.Mesh(mergeNI(panes), glassM); gl.material.side = THREE.DoubleSide; gl.userData.noCast = true; gl.castShadow = false;
+  cab.add(gl);
+  cab.add(new THREE.Mesh(new RoundedBoxGeometry(0.45, 0.5, 0.5, 2, 0.08).translate(-0.25, 1.62, 0), mat.fabric({ color: 0x2c2c2c })));
+  cab.add(new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.02, 8, 24).rotateY(Math.PI / 2).rotateZ(0.6).translate(0.45, 1.95, 0), dark));
+  g.add(cab);
+  // Arka çamurluklar
+  for (const z of [-0.8, 0.8]) {
+    const f = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 0.52, 28, 1, true, Math.PI * 0.6, Math.PI * 0.75).rotateX(Math.PI / 2).translate(0, 0.8, z), red);
+    f.material.side = THREE.DoubleSide;
+    g.add(f);
+  }
+  // 3 nokta askı + çeki demiri
+  const hitch = [new THREE.BoxGeometry(0.9, 0.08, 0.08).rotateZ(0.25).translate(-0.7, 0.55, 0.35), new THREE.BoxGeometry(0.9, 0.08, 0.08).rotateZ(0.25).translate(-0.7, 0.55, -0.35),
+    new THREE.BoxGeometry(0.7, 0.07, 0.07).rotateZ(-0.2).translate(-0.6, 1.05, 0), new THREE.BoxGeometry(0.5, 0.06, 0.2).translate(-0.55, 0.42, 0)];
+  g.add(new THREE.Mesh(mergeNI(hitch), dark));
+  g.add(new THREE.Mesh(new RoundedBoxGeometry(0.34, 0.34, 1.8, 2, 0.06).translate(0.0, 0.8, 0), dark));
+  // Basamak
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.04, 0.22).translate(0.55, 0.62, 0.95), dark));
+  g.traverse((o) => { if (o.isMesh && !o.userData.noCast) { o.castShadow = true; o.receiveShadow = true; } });
+  return g;
+}
+const tractor = makeTractor();
+tractor.position.set(-6.5, hW(-6.5, -16), -16.3);
+tractor.rotation.y = 0.12;
+scene.add(tractor);
+
+// Çitler: kestane kazık + iki kat ahşap kuşak
+{
+  const lines = [[[-34, 17], [-13, 17]], [[-34, 17], [-34, -22]], [[-34, -22], [-18.8, -22]], [[WHEAT[0], WHEAT[3] + 1.2], [WHEAT[2], WHEAT[3] + 1.2]], [[WHEAT[2] + 1, WHEAT[3] + 1.2], [WHEAT[2] + 1, WHEAT[1] - 1]]];
+  const parts = [];
+  for (const [[ax, az], [bx, bz]] of lines) {
+    const L = Math.hypot(bx - ax, bz - az), n = Math.max(1, Math.round(L / 2.5)), ang = Math.atan2(bz - az, bx - ax);
+    for (let i = 0; i <= n; i++) {
+      const t = i / n, x = ax + (bx - ax) * t, z = az + (bz - az) * t;
+      parts.push(new THREE.CylinderGeometry(0.055, 0.07, 1.25, 7).rotateZ((hash(i, n) - 0.5) * 0.06).translate(x, 0.6, z));
+    }
+    for (const y of [0.55, 1.0]) parts.push(new THREE.BoxGeometry(L, 0.09, 0.035).rotateY(-ang).translate((ax + bx) / 2, y, (az + bz) / 2));
+  }
+  const fence = new THREE.Mesh(mergeNI(parts.map((p) => { p.deleteAttribute('uv'); return p; })), mat.wood({ color: 0x7c6a54, ring: 5 }));
+  fence.castShadow = fence.receiveShadow = true;
+  scene.add(fence);
+}
+
+// Sulama: beton kanalet (açık U kanal), tarla ağzı kapakları, kuyu + pompa + damla filtre ünitesi
+{
+  const CZ = -12.9, X0 = -11.9, X1 = 14.2, L = X1 - X0, XC = (X0 + X1) / 2;
+  const conc = mat.concrete({ color: 0xb0aca2, stains: 0.6 });
+  const u = [new THREE.BoxGeometry(L, 0.1, 0.8).translate(XC, 0.05, CZ), new THREE.BoxGeometry(L, 0.52, 0.1).translate(XC, 0.26, CZ - 0.35), new THREE.BoxGeometry(L, 0.52, 0.1).translate(XC, 0.26, CZ + 0.35)];
+  // ara yoldaki geçiş plakası
+  u.push(new THREE.BoxGeometry(2.4, 0.12, 1.1).translate(0, 0.58, CZ));
+  const canal = new THREE.Mesh(mergeNI(u.map((p) => { p.deleteAttribute('uv'); return p; })), conc);
+  canal.castShadow = canal.receiveShadow = true;
+  const water = new THREE.Mesh(new THREE.PlaneGeometry(L - 0.02, 0.6).rotateX(-Math.PI / 2).translate(XC, 0.38, CZ), new THREE.MeshPhysicalMaterial({ color: 0x3f4d3e, roughness: 0.06, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05 }));
+  water.userData.noCast = true;
+  scene.add(canal, water);
+  // Kapaklar (T1 ve T2 ağızları): çelik çerçeve, kapak levhası, vidalı mil ve el çarkı
+  const steelM = mat.paintedMetal({ color: 0x3f6f8f, wear: 0.45 }), wheelM = mat.paintedMetal({ color: 0xc9302c, wear: 0.3 });
+  const gp = [], wp = [];
+  for (const x of [-6.5, 6.5]) {
+    gp.push(new THREE.BoxGeometry(0.08, 1.1, 0.08).translate(x - 0.34, 0.55, CZ + 0.3), new THREE.BoxGeometry(0.08, 1.1, 0.08).translate(x + 0.34, 0.55, CZ + 0.3),
+      new THREE.BoxGeometry(0.76, 0.08, 0.1).translate(x, 1.1, CZ + 0.3), new THREE.BoxGeometry(0.62, 0.45, 0.03).translate(x, 0.45, CZ + 0.3),
+      new THREE.CylinderGeometry(0.018, 0.018, 0.5, 8).translate(x, 1.35, CZ + 0.3));
+    wp.push(new THREE.TorusGeometry(0.14, 0.018, 8, 20).rotateX(Math.PI / 2).translate(x, 1.55, CZ + 0.3));
+  }
+  scene.add(new THREE.Mesh(mergeNI(gp.map((p) => { p.deleteAttribute('uv'); return p; })), steelM), new THREE.Mesh(mergeNI(wp.map((p) => { p.deleteAttribute('uv'); return p; })), wheelM));
+  // Kuyu başı, pompa, iki kum filtresi (mavi tank), boru hattı
+  const well = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.8, 0.7, 28).translate(15.6, 0.35, CZ - 0.2), conc);
+  const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.78, 0.78, 0.05, 28).translate(15.6, 0.72, CZ - 0.2), mat.paintedMetal({ color: 0x5a6068, wear: 0.6 }));
+  const pumpM = mat.paintedMetal({ color: 0x2f7a4a, wear: 0.2 });
+  const pump = new THREE.Mesh(mergeNI([new THREE.CylinderGeometry(0.2, 0.2, 0.6, 18).rotateZ(Math.PI / 2).translate(15.6, 0.97, CZ - 0.2), new THREE.CylinderGeometry(0.16, 0.18, 0.3, 16).translate(15.2, 0.9, CZ - 0.2)].map((p) => { p.deleteAttribute('uv'); return p; })), pumpM);
+  const blue = mat.plastic({ color: 0x2a5ea8, gloss: 0.4 }), pipeM = mat.plastic({ color: 0x1a1a1c, gloss: 0.2 });
+  const tanks = [];
+  for (const dz of [-0.9, 0.9]) tanks.push(new THREE.CapsuleGeometry(0.28, 0.6, 6, 18).translate(17.2, 0.62, CZ + dz));
+  const tankM = new THREE.Mesh(mergeNI(tanks.map((p) => { p.deleteAttribute('uv'); return p; })), blue);
+  const pipes = [new THREE.CylinderGeometry(0.055, 0.055, 1.6, 12).rotateZ(Math.PI / 2).translate(16.4, 1.0, CZ - 0.2), new THREE.CylinderGeometry(0.055, 0.055, 1.9, 12).rotateX(Math.PI / 2).translate(17.2, 1.05, CZ),
+    new THREE.CylinderGeometry(0.06, 0.06, 1.8, 12).rotateZ(Math.PI / 2).translate(14.95, 0.34, CZ)];
+  const pipe = new THREE.Mesh(mergeNI(pipes.map((p) => { p.deleteAttribute('uv'); return p; })), pipeM);
+  for (const o of [well, lid, pump, tankM, pipe]) { o.castShadow = o.receiveShadow = true; scene.add(o); }
+}
 
 // --- Tarlalar ---
 const CENTERS = [[-(PLOT + GAP) / 2, -(PLOT + GAP) / 2], [(PLOT + GAP) / 2, -(PLOT + GAP) / 2], [-(PLOT + GAP) / 2, (PLOT + GAP) / 2], [(PLOT + GAP) / 2, (PLOT + GAP) / 2]];
@@ -205,27 +683,51 @@ const DEFAULTS = [
   { crop: 'domates', variety: 'standart', irr: 45, method: 'damla', N: 18 },
   { crop: 'pamuk', variety: 'standart', irr: 75, method: 'salma', N: 15 },
 ];
-const DRY = new THREE.Color(0xc3a27a), WET = new THREE.Color(0x4e3524);
+const DRY = new THREE.Color(0xb39574), WET = new THREE.Color(0x4a3526);
+const SOIL_Y = 0.12, RIDGE = 0.1, PLANT_Y = SOIL_Y + RIDGE - 0.01;
 const plots = CENTERS.map(([cx, cz], i) => {
   const g = new THREE.Group();
   g.position.set(cx, 0, cz);
   sim.scene.add(g);
-  const soil = new THREE.Mesh(new THREE.BoxGeometry(PLOT, 0.2, PLOT), new THREE.MeshStandardMaterial({ color: 0x8b6b4a, roughness: 1 }));
-  soil.position.y = 0.0;
+  // Toprak: sırtlı (karıklı) yüzey; karık dipleri sıra aralarında. Rengi ve pürüzü nemle değişir.
+  const sg = new THREE.PlaneGeometry(PLOT, PLOT, 10, ROWS_N * 8).rotateX(-Math.PI / 2), sp = sg.attributes.position, dz = PLOT / ROWS_N;
+  for (let k = 0; k < sp.count; k++) { const z = sp.getZ(k), t = (z + PLOT / 2) / dz - 0.5; sp.setY(k, SOIL_Y + RIDGE * Math.cos(2 * Math.PI * t)); }
+  sg.computeVertexNormals();
+  { // karık dipleri koyu (nem, gölge), sırt tepeleri açık
+    const cc = new Float32Array(sp.count * 3);
+    for (let k = 0; k < sp.count; k++) { const u = (sp.getY(k) - (SOIL_Y - RIDGE)) / (2 * RIDGE), v = 0.62 + 0.42 * u; cc[k * 3] = v; cc[k * 3 + 1] = v * 0.98; cc[k * 3 + 2] = v * 0.95; }
+    sg.setAttribute('color', new THREE.BufferAttribute(cc, 3));
+  }
+  const soil = new THREE.Mesh(sg, procedural({
+    key: 'tarim-soil', params: { color: 0x8b6b4a, roughness: 0.95, vertexColors: true }, bump: 0.035,
+    pattern: `float cl = vn3(p*9.0), cr = fbm3(p*2.5, 4), st = smoothstep(0.72, 0.8, vn3(p*23.0 + 3.0));
+      float clod = smoothstep(0.35, 0.05, cells3(p*11.0)), crumb = vn3(p*38.0);
+      col *= 0.62 + 0.42*cl + 0.18*cr + 0.12*crumb; col = mix(col, col*1.35 + 0.05, st*0.5); col *= 1.0 - 0.18*clod;
+      h = cl*0.45 + st*0.2 + (1.0 - clod)*0.5 + crumb*0.2;`,
+  }));
+  soil.receiveShadow = true;
   soil.userData.plot = i;
   g.add(soil);
-  // Karıklar (sıra arası izler)
-  const fur = instanced(new THREE.BoxGeometry(PLOT - 0.4, 0.02, 0.12), new THREE.MeshStandardMaterial({ color: 0x5c4330, roughness: 1 }), ROWS_N);
-  const water = instanced(new THREE.BoxGeometry(PLOT - 0.4, 0.03, 0.22), new THREE.MeshStandardMaterial({ color: 0x3b82f6, transparent: true, opacity: 0, roughness: 0.2 }), ROWS_N);
-  const drip = instanced(new THREE.CylinderGeometry(0.035, 0.035, PLOT - 0.4, 5), dripMat, ROWS_N);
+  // Tarla seddesi (toprak bent)
+  const bund = mat.concrete({ color: 0x7d6246, stains: 0 });
+  const bm = procedural({ key: 'tarim-bund', params: { color: 0x7a5e42, roughness: 1 }, pattern: 'col *= 0.8 + 0.3*vn3(p*7.0) + 0.1*fbm3(p*2.0, 3); h = vn3(p*7.0);', bump: 0.03 });
+  for (const [w, d, x, z] of [[PLOT + 0.5, 0.35, 0, -PLOT / 2 - 0.1], [PLOT + 0.5, 0.35, 0, PLOT / 2 + 0.1], [0.35, PLOT, -PLOT / 2 - 0.1, 0], [0.35, PLOT, PLOT / 2 + 0.1, 0]]) {
+    const b = new THREE.Mesh(new RoundedBoxGeometry(w, 0.3, d, 2, 0.12), bm);
+    b.position.set(x, 0.06, z);
+    g.add(b);
+  }
+  void bund;
+  // Salma suyu (karık diplerinde) ve damla hatları (sıra üstünde)
+  const water = instanced(new THREE.BoxGeometry(PLOT - 0.3, 0.02, 0.2), new THREE.MeshPhysicalMaterial({ color: 0x5a4a30, roughness: 0.05, transparent: true, opacity: 0, ior: 1.33 }), ROWS_N);
+  const drip = instanced(new THREE.CylinderGeometry(0.008, 0.008, PLOT - 0.4, 8), dripMat, ROWS_N);
   const m = new THREE.Matrix4(), q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2));
   for (let r = 0; r < ROWS_N; r++) {
-    const z = -PLOT / 2 + (r + 0.5) * (PLOT / ROWS_N);
-    fur.setMatrixAt(r, m.makeTranslation(0, 0.105, z + PLOT / ROWS_N / 2));
-    water.setMatrixAt(r, m.makeTranslation(0, 0.115, z + PLOT / ROWS_N / 2));
-    drip.setMatrixAt(r, m.compose(new THREE.Vector3(0, 0.14, z + 0.1), q, new THREE.Vector3(1, 1, 1)));
+    const z = -PLOT / 2 + (r + 0.5) * dz;
+    water.setMatrixAt(r, m.makeTranslation(0, SOIL_Y - RIDGE + 0.03, z + dz / 2));
+    drip.setMatrixAt(r, m.compose(new THREE.Vector3(0, SOIL_Y + RIDGE + 0.008, z + 0.08), q, new THREE.Vector3(1, 1, 1)));
   }
-  g.add(fur, water, drip);
+  water.userData.noCast = true;
+  g.add(water, drip);
   // Seçim çerçevesi
   const sel = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(PLOT + 0.5, 0.3, PLOT + 0.5)), new THREE.LineBasicMaterial({ color: 0xfacc15 }));
   sel.position.y = 0.1;
@@ -431,21 +933,31 @@ sim.onRender((rdt) => {
     p.water.material.opacity = 0.75 * p.wet;
     p.water.visible = p.wet > 0.01;
   }
-  // Gökyüzü
+  // Gökyüzü: yağışta bulut ve pus, sıcak dalgada kuru pus (adımlı güncelleme)
   const w = weather[Math.min(day, SEASON - 1)];
-  const target = _sky.setHex(w && w.heat ? 0xe9c89f : 0x9cc7ea).lerp(_gray.setHex(0x61748a), Math.max(rainVis, hailVis) * 0.8);
-  sim.scene.background.lerp(target, Math.min(1, rdt * 3));
-  sim.scene.fog.color.copy(sim.scene.background);
+  const cl = Math.round(Math.max(rainVis, hailVis) * 8) / 8, hz = w && w.heat ? 1 : 0;
+  const key = cl * 10 + hz;
+  if (key !== skyKey) {
+    skyKey = key;
+    sim.sky.set({ clouds: lerp(0.22, 0.92, cl), haze: lerp(hz ? 2.8 : 2.1, 2.4, cl), visibility: lerp(hz ? 6000 : 9000, 4000, cl) });
+  }
+  station.userData.cups.rotation.y += rdt * (3 + 6 * cl);
+  vergeT += rdt;
+  verge.update(vergeT, 0.8 + 2.5 * cl);
 });
-const _sky = new THREE.Color(), _gray = new THREE.Color();
+let skyKey = -1, vergeT = 0;
 
 // --- Görsel güncelleme ---
 const _m = new THREE.Matrix4(), _v = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Color(), _c2 = new THREE.Color();
 const STRESS = new THREE.Color(0xc9b458), STUB = new THREE.Color(0xa88a5c);
 function updateVisuals() {
+  updateWheatField(DOY0 + Math.min(day, SEASON - 1));
+  updateVegField(DOY0 + Math.min(day, SEASON - 1));
   for (const p of plots) {
     const c = CROPS[p.crop];
-    p.soil.material.color.copy(DRY).lerp(WET, clamp(p.W / taw(p), 0, 1));
+    const wf = clamp(p.W / taw(p), 0, 1);
+    p.soil.material.color.copy(DRY).lerp(WET, wf);
+    p.soil.material.roughness = lerp(0.97, 0.7, wf);
     p.drip.visible = p.method === 'damla';
     const growing = p.sown && !p.done;
     const hFrac = p.sown ? (0.16 + 0.84 * smoothstep(0, 0.62, p.f)) * (0.55 + 0.45 * Math.min(1, p.B / (c.wp * 45))) : 0;
@@ -459,7 +971,7 @@ function updateVisuals() {
       if (!p.sown) { hs = 0; ws = 0; }
       else if (p.done) { hs = 0.07; ws = 0.6; }
       else { hs = c.h * hFrac * b.s; ws = wFrac * b.s * (c.h > 1.5 ? 1 : 1.1); }
-      _m.compose(_v.set(b.x, 0.1, b.z), b.q, _s.set(ws, Math.max(hs, 0.0001), ws));
+      _m.compose(_v.set(b.x, PLANT_Y, b.z), b.q, _s.set(ws, Math.max(hs, 0.0001), ws));
       p.plant.setMatrixAt(k, _m);
       if (p.done) _c.copy(STUB);
       else {
@@ -468,7 +980,7 @@ function updateVisuals() {
       }
       p.plant.setColorAt(k, _c);
       const showF = growing && fruitVis > 0 && b.h < keep;
-      _m.compose(_v.set(b.x, 0.1, b.z), b.q, _s.set(showF ? ws : 0, showF ? Math.max(hs, 0.0001) : 0, showF ? ws : 0));
+      _m.compose(_v.set(b.x, PLANT_Y, b.z), b.q, _s.set(showF ? ws : 0, showF ? Math.max(hs, 0.0001) : 0, showF ? ws : 0));
       p.fruit.setMatrixAt(k, _m);
       if (showF) {
         const ripeF = smoothstep(0.62, 0.95, p.f);
@@ -496,6 +1008,11 @@ function updateVisuals() {
 let selIdx = 0;
 const prices = Object.fromEntries(Object.entries(CROPS).map(([k, c]) => [k, c.price]));
 const ui = sim.ui;
+ui.section('Görünüm');
+const VIEWS = { tarla: [[19, 6.8, 25], [-3, 0.6, -6]], ciftlik: [[-1, 4.2, 20], [-21, 2.2, -2]], yakin: [[9, 2.2, 10], [3, 0.4, 3]], hava: [[30, 38, 44], [2, 0, -4]] };
+ui.segmented({ options: [{ value: 'tarla', label: 'Tarlalar' }, { value: 'yakin', label: 'Yakın' }, { value: 'ciftlik', label: 'Çiftlik' }, { value: 'hava', label: 'Havadan' }], value: 'tarla',
+  onChange: (v) => sim.moveCamera(VIEWS[v][0], VIEWS[v][1]) });
+
 ui.section('Tarla seç');
 const plotSeg = ui.segmented({ options: plots.map((p) => ({ value: p.i, label: `T${p.i + 1}` })), value: 0, onChange: (v) => selectPlot(v) });
 ui.text('<small>Sahnede bir tarlaya tıklayarak da seçebilirsin. Ürün, çeşit ve ekim tarihi değişince sezon baştan başlar; sulama ve gübre anında etkiler.</small>');

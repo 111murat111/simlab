@@ -8,10 +8,27 @@ import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js'
 import { ImprovedNoise } from 'three/examples/jsm/math/ImprovedNoise.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createPanel } from './ui.js';
+import { createLook } from './look.js';
+import { createSky } from './gfx/atmosphere.js';
+import { createOcean, seaState } from './gfx/ocean.js';
+import { createTerrain, terrainMaterial, landscape, depthTexture, terrainSkirt, NOISE3_GLSL } from './gfx/terrain.js';
+import { createVegetation, treeParts, leafMaterial } from './gfx/vegetation.js';
+import { mat, procedural } from './gfx/materials.js';
+import { createStudio, createSpace } from './gfx/stage.js';
+import { GLSL_COMMON } from './gfx/glsl.js';
+import { makeBuilding, makeBlock, populateCity, buildingMaterials, cityLightSet, cityRng, PALETTES } from './gfx/buildings.js';
+import { makeCity, streetMaterials, streetTrees, streetLamps, carFleet, CAR_COLORS } from './gfx/streets.js';
+import { makePerson, crowd, POSES, OUTFITS } from './gfx/people.js';
 import * as util from './util.js';
 
 export { THREE, OrbitControls, CSS2DRenderer, CSS2DObject, RoundedBoxGeometry, ConvexGeometry, ImprovedNoise, BufferGeometryUtils };
 export * from './util.js';
+export { createSky, createOcean, seaState, createTerrain, terrainMaterial, landscape, depthTexture, terrainSkirt, NOISE3_GLSL,
+  createVegetation, treeParts, leafMaterial, mat, procedural, createStudio, createSpace, GLSL_COMMON };
+// Kent: gerçek geometrili binalar (LOD'lu karolar) + sokak kiti
+export { makeBuilding, makeBlock, populateCity, buildingMaterials, cityLightSet, cityRng, PALETTES, makeCity, streetMaterials, streetTrees, streetLamps, carFleet, CAR_COLORS };
+// İnsanlar: eklemli figür (makePerson) ve örneklenmiş kalabalık (crowd)
+export { makePerson, crowd, POSES, OUTFITS };
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
 
@@ -26,6 +43,7 @@ const SPEEDS = [0.25, 0.5, 1, 2, 4, 8];
  * @param {boolean|'soft'} [o.lights=true]   Varsayılan yarıküre + yönlü ışık.
  * @param {number[]} [o.fog]                 [yakın, uzak]
  * @param {boolean} [o.playback=true]        Oynat/duraklat/hız çubuğu.
+ * @param {boolean|object} [o.look=true]   Görsel katman (ortam ışığı, gökyüzü, gölge, bloom); bkz. look.js.
  * @param {string} [o.info]                  "Nasıl çalışır?" penceresine eklenecek HTML.
  */
 export function createSim(o = {}) {
@@ -92,6 +110,20 @@ export function createSim(o = {}) {
     scene.userData.hemi = hemi;
   }
 
+  // ?look=off ya da ?look=-shadows,-bloom (hata ayıklama / zayıf cihaz)
+  const lookQ = new URLSearchParams(location.search).get('look');
+  const lookOpt = typeof o.look === 'object' ? { ...o.look } : {};
+  if (lookQ) lookQ.split(',').forEach((k) => { if (k.startsWith('-')) lookOpt[k.slice(1)] = false; });
+  // Motor: fiziksel gökyüzü ve FFT okyanus (isteğe bağlı)
+  const opt = (v) => (v === true ? {} : v);
+  const physSky = o.sky ? createSky(renderer, scene, opt(o.sky))
+    : o.studio ? createStudio(renderer, scene, opt(o.studio))
+    : o.space ? createSpace(renderer, scene, opt(o.space)) : null;
+  if (physSky) lookOpt.physSky = physSky;
+  const ocean = physSky && o.sky && o.ocean ? createOcean(renderer, physSky, o.ocean === true ? {} : o.ocean) : null;
+  if (ocean) scene.add(ocean.mesh);
+  const look = o.look === false || lookQ === 'off' ? null : createLook(renderer, scene, camera, lookOpt);
+
   // --- HUD (ortadaki büyük mesajlar) ve bildirimler ---
   const hud = document.createElement('div');
   hud.className = 'hud hidden';
@@ -109,7 +141,7 @@ export function createSim(o = {}) {
   const clickers = [];
 
   const sim = {
-    THREE, scene, camera, renderer, controls, ui, stage, meta,
+    THREE, scene, camera, renderer, controls, ui, stage, meta, sky: physSky, ocean,
     time: 0, speed: 1, paused: false, frame: 0,
     /** Simülasyon zamanıyla çağrılır (duraklatılınca durur). fn(dt, time) */
     onUpdate(fn) { updaters.push(fn); return sim; },
@@ -248,6 +280,7 @@ export function createSim(o = {}) {
   function resize() {
     const w = stage.clientWidth || 1, h = stage.clientHeight || 1;
     renderer.setSize(w, h, false);
+    if (look) look.setSize(w, h, renderer.getPixelRatio());
     labelRenderer.setSize(w, h);
     if (camera.isPerspectiveCamera) {
       camera.aspect = w / h;
@@ -261,7 +294,7 @@ export function createSim(o = {}) {
   resize();
 
   // --- Döngü ---
-  let last = performance.now();
+  let last = performance.now(), wall = 0; // wall: bulut zamanı (hızla ölçekli, duraklatınca da akar)
   function loop(now) {
     requestAnimationFrame(loop);
     const real = Math.min(Math.max((now - last) / 1000, 0), 0.1);
@@ -273,7 +306,12 @@ export function createSim(o = {}) {
     }
     for (const f of renderers) f(real);
     if (controls) controls.update();
-    renderer.render(scene, camera);
+    camera.updateMatrixWorld();
+    wall += real * Math.max(sim.speed, 0.25);
+    if (physSky) physSky.update(camera, wall);
+    if (ocean) ocean.update(sim.paused ? 0 : real * Math.min(sim.speed, 2), camera);
+    if (look) { look.render(controls ? controls.target : target); }
+    else renderer.render(scene, camera);
     labelRenderer.render(scene, camera);
     if (sim.frame % 10 === 0) timeEl.textContent = sim.formatTime ? sim.formatTime(sim.time) : util.fmtClock(sim.time);
     sim.frame++;

@@ -1,5 +1,6 @@
 // Köprü Mühendisi — kafes köprü; doğrudan rijitlik yöntemiyle eleman kuvvetleri, kopma/burkulma ve çöküş.
-import { createSim, THREE, fmt, clamp, ImprovedNoise, seeded } from '@core';
+import { createSim, THREE, fmt, clamp, mat, procedural, landscape, createTerrain, terrainSkirt, createVegetation, createOcean, depthTexture, RoundedBoxGeometry } from '@core';
+import { truck as kitTruck } from './kit.js';
 import { HALF, G, MATS, CABLE, gorgeY, buildPreset, applyDesign, buildLoads, solveTruss, totals } from './truss.js';
 
 const ZW = 3.2;            // kafes düzlemleri z = ±ZW
@@ -11,10 +12,9 @@ const TYPES = [
 ];
 
 const sim = createSim({
-  background: 0x9cc3e4,
-  camera: { position: [9, 3, 44], target: [0, -5, 0], fov: 48, far: 900 },
+  sky: { elevation: 33, azimuth: 158, clouds: 0.38, haze: 1.1, visibility: 5200, wind: [5, 2] },
+  camera: { position: [11.5, 2.4, 31], target: [-1.2, -4.2, 0], fov: 48, near: 0.2, far: 80000 },
   controls: { maxDistance: 160, minDistance: 8, maxPolarAngle: Math.PI * 0.56 },
-  fog: [110, 320],
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>32 m'lik bir kanyonu geçen bir kafes köprü. Elemanlar düğümlerde mafsallıdır; yalnızca eksenleri boyunca
@@ -41,79 +41,222 @@ const sim = createSim({
     Sehimler görünür olsun diye büyütülür. Fiyatlar temsilidir.</small></p>`,
 });
 
-// --- Arazi: V biçimli kanyon, nehir, yol, ağaçlar ---
-const noise = new ImprovedNoise();
-{
-  const geo = new THREE.PlaneGeometry(180, 110, 180, 110);
-  geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position, col = new Float32Array(pos.count * 3), c = new THREE.Color();
-  const grass = new THREE.Color(0x5f8f3e), rock = new THREE.Color(0x8b7b6b), dark = new THREE.Color(0x5d5249), bed = new THREE.Color(0x6f6a5c);
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i), z = pos.getZ(i);
-    let y = gorgeY(x);
-    const near = Math.abs(z) < 7 ? 0.2 : 1;
-    if (y < -0.01) y += noise.noise(x * 0.18, z * 0.12, 0.5) * 1.8 * near;
-    else if (Math.abs(x) > 34) y += Math.max(0, noise.noise(x * 0.03, z * 0.03, 2.5)) * (Math.abs(x) - 34) * 0.5;
-    pos.setY(i, y);
-    if (y > -0.4) c.copy(grass).offsetHSL(0, 0, noise.noise(x * 0.2, z * 0.2, 7) * 0.05);
-    else if (y > -22.5) c.copy(rock).lerp(dark, clamp(-y / 24, 0, 1) * 0.6 + noise.noise(x * 0.4, z * 0.3, 9) * 0.2);
-    else c.copy(bed);
-    col.set([c.r, c.g, c.b], i * 3);
+// --- Arazi: V biçimli kanyon (köprü kesitinde gorgeY ile birebir), kıvrılan vadi, nehir, yollar, orman ---
+const scene = sim.scene;
+const hills = landscape({ seed: 23, size: 700, height: 120, base: -10, warp: 0.5 });
+const rockN = landscape({ seed: 4, size: 18, height: 6, base: 0, warp: 0.3, octaves: 5 });
+const SS = THREE.MathUtils.smoothstep;
+const gorgeC = (z) => SS(Math.abs(z), 14, 70) * (11 * Math.sin(z / 43) + 5 * Math.sin(z / 17 + 1.3));
+const gorgeW = (z) => HALF * (1 + 0.25 * SS(Math.abs(z), 14, 90) * Math.sin(z / 61 + 0.7));
+const RIVER = -23.2;
+function hf(x, z) {
+  const c = gorgeC(z), w = gorgeW(z), e = w - Math.abs(x - c);
+  const away = SS(Math.abs(z), 5, 22);
+  let y = e <= 0 ? 0 : -Math.min(26.5, e * 3.2);   // taban su altında ≈ 3 m derin (köprü kesitinde gorgeY ile aynı yamaç)
+  if (e > -3 && y > -23.5) y += (rockN(x, z) - 3) * 0.9 * away * (e > 0 ? 1 : 0.3);
+  if (e < 0) {
+    const d = -e;
+    y += Math.max(0, hills(x, z)) * SS(d, 30, 420) * SS(Math.abs(z), 8, 40) + 1.2 * SS(d, 4, 60) * (rockN(z, x) / 6) * SS(Math.abs(z), 7, 20);
   }
-  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  geo.computeVertexNormals();
-  sim.scene.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, flatShading: true })));
+  return y;
 }
-const river = new THREE.Mesh(new THREE.PlaneGeometry(20, 110, 1, 1), new THREE.MeshStandardMaterial({ color: 0x2f6fae, roughness: 0.25, metalness: 0.1, transparent: true, opacity: 0.9 }));
-river.rotation.x = -Math.PI / 2;
-river.position.y = -23.2;
-sim.scene.add(river);
-
-const asphaltTex = (() => {
-  const c = document.createElement('canvas');
-  c.width = 256; c.height = 128;
-  const g = c.getContext('2d');
-  g.fillStyle = '#3b3f46'; g.fillRect(0, 0, 256, 128);
-  g.fillStyle = '#e5e7eb'; g.fillRect(0, 8, 256, 5); g.fillRect(0, 115, 256, 5);
-  g.fillStyle = '#facc15'; g.fillRect(40, 61, 176, 6);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-})();
-for (const s of [-1, 1]) {
-  const road = new THREE.Mesh(new THREE.BoxGeometry(40, 0.2, ZW * 2), new THREE.MeshStandardMaterial({ color: 0x3b3f46, roughness: 0.9 }));
-  road.position.set(s * (HALF + 20.5), 0.02, 0);
-  sim.scene.add(road);
+const land = new THREE.Group(); scene.add(land);
+// Kanyon içi: ana arazi 0,5 m aşağıda; üstünü kayalık yamaç ağı örter (3B prosedürel kaya dokusu, düşey yüzde gerilmez)
+const inG = (x, z) => THREE.MathUtils.smoothstep(gorgeW(z) - Math.abs(x - gorgeC(z)), -2.5, -0.5);
+// Kaba arazi ağı (≈6,7 m göz) dik duvarı köşeden keser ve ince kaya ağının önüne geçer: kanyon içinde onu derine it
+// (kaya ağı kenardan 9 m dışarıya kadar gerçek yükseklikte örter, yarık oluşmaz)
+const dropG = (x, z) => 60 * SS(gorgeW(z) - Math.abs(x - gorgeC(z)), -1, 1.5) * SS(Math.abs(z), 345, 325);
+land.add(createTerrain((x, z) => hf(x, z) - 0.5 * inG(x, z) - dropG(x, z), { size: [3000, 3000], res: [448, 448], materialOptions: { water: RIVER, grass: 0x5d6b2c, dry: 0x958a55, soil: 0x6a5238, rock: 0x857c70, forest: 0.7 } }));
+// Tabakalanma: kalınlığı değişen (≈1,5–10 m), hafif eğimli (≈4°) ve kanyon boyunca dalgalanan katmanlar.
+// Aynı fonksiyon hem duvar geometrisinde (sert katman çıkıntısı) hem dokuda (katman rengi) kullanılır.
+const STRATA_GLSL = `float yy = p.y + 0.035*p.x + 0.07*p.z + 0.9*sin(p.z*0.023 + 0.5) + 0.4*sin(p.z*0.071 + 2.0);
+      float su = yy + 1.2*sin(yy*0.31 + 0.4) + 0.35*sin(yy*1.1 + 1.7);`;
+const strataU = (x, y, z) => {
+  const yy = y + 0.035 * x + 0.07 * z + 0.9 * Math.sin(z * 0.023 + 0.5) + 0.4 * Math.sin(z * 0.071 + 2.0);
+  return yy + 1.2 * Math.sin(yy * 0.31 + 0.4) + 0.35 * Math.sin(yy * 1.1 + 1.7);
+};
+const LAYER = 3.6;   // ana katman ortalama kalınlığı (su biriminde)
+const hash1 = (n) => { const v = Math.sin(n * 127.1 + 311.7) * 43758.5453; return v - Math.floor(v); };
+// Döküntü (talus) yamaçları: duvar dibinde ≈38°'lik moloz konileri; yükseklikleri kanyon boyunca değişir
+function screeY(x, z) {
+  const c = gorgeC(z), w = gorgeW(z), e = w - Math.abs(x - c);
+  if (e <= 0) return -1e9;
+  const hs = 1.6 + 5.2 * SS(0.5 + 0.5 * Math.sin(z * 0.08 + 1.3 * Math.sin(z * 0.027)) + 0.25 * Math.sin(z * 0.23), 0.25, 0.95);
+  const eTop = -(RIVER + hs) / 3.2, toe = Math.min(eTop + hs / 0.78, w - 3.2);
+  return RIVER + hs - (e - eTop) * hs / Math.max(0.5, toe - eTop);
 }
+const hfS = (x, z) => Math.max(hf(x, z), screeY(x, z));
 {
-  const rnd = seeded(7), trees = [];
-  for (let i = 0; i < 400 && trees.length < 90; i++) {
-    const x = (rnd() - 0.5) * 170, z = (rnd() - 0.5) * 100;
-    if (Math.abs(x) < HALF + 2 || (Math.abs(z) < 7 && Math.abs(x) < 64) || Math.abs(x) > 34 || z > 16) continue;
-    trees.push([x, z, 0.8 + rnd() * 0.8]);
+  // düşey duvarda köşe örneklemesi: x yönünde 0,25 m göz (duvarda ≈0,8 m düşey), z yönünde 2 m
+  // z yönünde köprü çevresinde sık (≈0,5 m: eklem/blok kırıkları okunur), uzakta seyrek (≈3 m) örnekleme
+  const g = new THREE.PlaneGeometry(110, 2, 440, 560).rotateX(-Math.PI / 2), p = g.attributes.position;
+  const ZK = 2.6, zmap = (u) => 350 * Math.sinh(ZK * u) / Math.sinh(ZK);
+  for (let i = 0; i < p.count; i++) p.setZ(i, zmap(p.getZ(i)));
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i), e = gorgeW(z) - Math.abs(x - gorgeC(z));
+    const yw = hf(x, z), ys = screeY(x, z);
+    let y = Math.max(yw, ys);
+    if (e > 0 && yw > RIVER - 0.3) {
+      // Sert katmanlar (kireçtaşı/kumtaşı) çıkıntı yapar, yumuşak katmanlar (marn/şeyl) geride kalır; çıkıntılar kanyon
+      // boyunca kesik kesik (bloklar), katman sınırları yumuşak: ağ örneklemesinden ince sivri yama oluşmaz
+      const u = strataU(x, yw, z) / LAYER, k = Math.floor(u), f = u - k, hard = hash1(k);
+      const shelf = SS(f, 0.0, 0.22) * (1 - SS(f, 0.7, 1.0));
+      const blocks = 0.35 + 0.65 * SS(Math.sin(z * 0.19 + k * 2.3) + 0.6 * Math.sin(z * 0.53 + k), -0.4, 0.5);
+      const ledge = SS(hard, 0.35, 0.85) * shelf * blocks;
+      // düşey eklemler (≈2–3 m aralık, her katmanda kaydırılmış): kaya bloklara ayrılır, her blok farklı çıkıntı yapar
+      const jz = z * (0.36 + 0.14 * hash1(k + 0.5)) + hash1(k + 0.25) * 10 + 0.3 * Math.sin(z * 0.9 + k * 1.7), jb = Math.floor(jz), jf = jz - jb;
+      const joint = 1 - SS(Math.abs(jf - 0.5), 0.36, 0.48);
+      const blockOut = (hash1(k * 17.3 + jb * 3.1) - 0.3) * 0.45 * (0.4 + 0.6 * hard);
+      const sx = Math.sign(x - gorgeC(z));
+      const flute = 0.3 * Math.sin(z * 0.75 + 2 * Math.sin(yw * 0.3));
+      // yalnız içe (kanyona doğru) it: dışa itilen yüz, arkadaki kaba arazi ağının iri üçgenlerini açığa çıkarıyordu
+      let disp = 0.2 + 1.05 * ledge + Math.max(0, blockOut) * joint + 0.12 * (0.5 + 0.5 * Math.sin(z * 0.37 + yw * 0.7)) + 0.35 * (flute + 0.3) * (1 - 0.6 * ledge);
+      disp = Math.max(0.05, disp - 0.25 * (1 - joint));
+      disp *= 1 - SS(ys - yw, 0.0, 0.8);   // moloz yamacının altında kalan duvar itilmez
+      p.setX(i, x - sx * disp * THREE.MathUtils.smoothstep(e, 0.3, 2));
+    }
+    p.setY(i, e > -1.5 ? y : e > -9 ? y + 0.04 : y - 3);   // kenar şeridi araziyi biraz aşar (z-savaşı yok), dışı araziye gömülür
   }
-  const trunk = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.15, 0.2, 1.2, 6), new THREE.MeshStandardMaterial({ color: 0x6b4a2b }), trees.length);
-  const crown = new THREE.InstancedMesh(new THREE.ConeGeometry(1.1, 3, 7), new THREE.MeshStandardMaterial({ color: 0x2f6b34, roughness: 0.9 }), trees.length);
-  const m = new THREE.Matrix4();
-  trees.forEach(([x, z, s], i) => {
-    m.makeScale(s, s, s).setPosition(x, 0.6 * s, z); trunk.setMatrixAt(i, m);
-    m.makeScale(s, s, s).setPosition(x, 2.4 * s, z); crown.setMatrixAt(i, m);
+  g.computeVertexNormals();
+  // Tabakalı kaya dokusu: her ana katmanın kendi rengi/sertliği (krem ve gri kireçtaşı, okra kumtaşı, kızıl, koyu şeyl),
+  // içlerinde ince laminalar, katman dokanaklarında koyu çizgi; yağmur izi (çöl verniği), ıslak taban, moloz yamacı,
+  // çıkıntı üstlerinde yosun/çalı ve kenar üstünde toprak-çim
+  const cliffMat = procedural({
+    key: 'kopru-cliff3', bump: 0.1, params: { color: 0xa39682, roughness: 0.92 },
+    pattern: `
+      float n = fbm3(p*0.35, 5), f = fbm3(p*2.2, 4), c = cells3(p*1.7), gr = vn3(p*14.0);
+      ${STRATA_GLSL}
+      su += (n - 0.5)*0.5;
+      float uu = su/${LAYER.toFixed(2)}, k = floor(uu), fr = uu - k;
+      float hard = fract(sin(k*127.1 + 311.7)*43758.5453), hue = fract(sin(k*71.7 + 19.3)*15731.743);
+      vec3 cream = vec3(0.76, 0.70, 0.59), grey = vec3(0.60, 0.59, 0.56), ochre = vec3(0.74, 0.56, 0.37),
+           red = vec3(0.63, 0.43, 0.33), shale = vec3(0.38, 0.36, 0.34), buff = vec3(0.68, 0.61, 0.49);
+      vec3 hardC = hue < 0.4 ? cream : hue < 0.65 ? grey : hue < 0.85 ? ochre : buff;
+      vec3 softC = hue < 0.45 ? shale : hue < 0.75 ? red : mix(shale, grey, 0.5);
+      col = mix(softC, hardC, smoothstep(0.35, 0.7, hard));
+      // yanal fasiyes değişimi: katman rengi kanyon boyunca yavaşça değişir
+      col *= 0.9 + 0.2*fbm3(vec3(p.x*0.02, k*3.1, p.z*0.03), 3);
+      // ince laminalar (yumuşak katmanlarda belirgin) ve dokanak çizgileri
+      float lam = sin(su*(5.0 + 3.0*hue) + 3.0*f)*0.5 + 0.5;
+      col *= 1.0 - (0.06 + 0.14*(1.0 - hard))*lam;
+      float contact = 1.0 - smoothstep(0.0, 0.05, fr)*smoothstep(1.0, 0.96, fr);
+      col *= 1.0 - 0.35*contact;
+      // düşey eklemler ve bloklar (geometriyle aynı düzen): blok başına ton farkı, eklem çizgisi koyu
+      float jz = p.z*(0.36 + 0.14*fract(sin((k + 0.5)*127.1 + 311.7)*43758.5453)) + fract(sin((k + 0.25)*127.1 + 311.7)*43758.5453)*10.0 + 0.3*sin(p.z*0.9 + k*1.7) + 0.08*(f - 0.5);
+      float jb = floor(jz), jf = jz - jb;
+      float jline = 1.0 - smoothstep(0.02, 0.07, min(jf, 1.0 - jf));
+      col *= 0.88 + 0.22*fract(sin((k*17.3 + jb*3.1)*127.1 + 311.7)*43758.5453);
+      // eklemlerin bir kısmı belirgin açık çatlak, bir kısmı kapalı kıl çatlağı; yumuşak katmanlarda daha az
+      jline *= mix(0.25, 1.0, step(0.4, fract(sin((jb*7.1 + k*3.3)*127.1 + 311.7)*43758.5453)))*(0.4 + 0.6*hard);
+      col *= 1.0 - 0.5*jline;
+      // kırık yüzeyler: köşeli çatlak ağı
+      float crk = pow(1.0 - abs(vn3(p*vec3(0.7, 1.3, 0.7))*2.0 - 1.0), 14.0);
+      col *= 1.0 - 0.25*crk;
+      col *= (0.78 + 0.3*f)*(0.88 + 0.16*c)*(0.9 + 0.18*gr);
+      // düşey aşınma olukları ve yağmur izi (çöl verniği)
+      float run = smoothstep(0.62, 0.85, vn3(vec3(p.x*5.0, p.y*0.25, p.z*5.0)));
+      float streak = smoothstep(0.55, 0.8, fbm3(vec3(p.x*1.4, p.y*0.12, p.z*1.4), 3));
+      col = mix(col, col*vec3(0.5, 0.46, 0.44), max(streak*0.55, run*0.4));
+      // moloz yamacı: dibe yakın, orta eğimli yüzeyler; üstten düşmüş karışık renkli çakıl ve iri taş
+      float scree = smoothstep(0.5, 0.75, pn.y)*(1.0 - smoothstep(${(RIVER + 5.5).toFixed(2)}, ${(RIVER + 8.5).toFixed(2)}, p.y));
+      float peb = cells3(p*6.0), peb2 = cells3(p*2.3 + 7.0);
+      vec3 grav = mix(vec3(0.36, 0.34, 0.31), vec3(0.52, 0.47, 0.40), vn3(p*3.1))*(0.55 + 0.6*peb)*(0.8 + 0.3*peb2);
+      grav = mix(grav, grav*vec3(1.08, 0.86, 0.7), smoothstep(0.6, 0.85, vn3(p*1.3 + 5.0))*0.6);
+      col = mix(col, grav, scree);
+      // su çizgisine yakın ıslak, koyu kaya (yosunlu)
+      float wet = 1.0 - smoothstep(${(RIVER + 0.4).toFixed(2)}, ${(RIVER + 2.8).toFixed(2)}, p.y + 0.6*f);
+      col = mix(col, col*vec3(0.42, 0.45, 0.4), wet*0.85);
+      // çıkıntı üstlerinde tutunan yosun/çalı
+      float ledge = smoothstep(0.55, 0.85, pn.y)*smoothstep(0.35, 0.6, fbm3(p*0.9 + 3.0, 3))*(1.0 - scree);
+      col = mix(col, vec3(0.22, 0.29, 0.13)*(0.8 + 0.4*gr), ledge*0.75);
+      // kenar üstü: düz yüzeyde toprak ve çim, arada kaya yüzlekleri
+      float top = smoothstep(0.86, 0.96, pn.y)*smoothstep(-4.0, -1.5, p.y)*smoothstep(0.3, 0.55, fbm3(p*0.25 + 11.0, 4));
+      vec3 turf = mix(vec3(0.30, 0.34, 0.16), vec3(0.52, 0.48, 0.29), vn3(p*0.6))*(0.75 + 0.4*gr);
+      col = mix(col, turf, top);
+      h = hard*0.2 + lam*0.12 + f*0.35 + c*0.15 + gr*0.2 - run*0.3 - contact*0.25 - jline*0.4 - crk*0.3 + scree*(peb*0.6 + peb2*0.4);
+      rough = mix(0.84 + 0.12*f, 0.35, wet*0.8);`,
   });
-  sim.scene.add(trunk, crown);
+  const cliff = new THREE.Mesh(g, cliffMat);
+  cliff.receiveShadow = true; cliff.castShadow = true; cliff.userData.noFit = true;
+  land.add(cliff);
+}
+land.add(terrainSkirt(hf, { inner: 1500, outer: 60000 }));
+// Nehir: sakin su (FFT dalga, düşük rüzgâr), kıyı köpüğü için derinlik haritası
+const river = createOcean(sim.renderer, sim.sky, { wind: 3, windDir: 180, fetch: 8, chop: 0.5, foam: 0.08, deep: 0x0b2a2c, sss: 0x1d5448, sand: 0x4a4636 });
+river.mesh.position.y = RIVER;
+const RR = [-400, -800, 400, 800];
+river.setDepth(depthTexture(hfS, RR, 256, RIVER), RR);
+scene.add(river.mesh);
+sim.onRender((dt) => { river.update(dt, sim.camera); veg.update(sim.time, 0.7); });
+// Orman ve çalılar (yolda ve kanyonda yok)
+const vegH = (x, z) => (Math.abs(z) < 11 && Math.abs(x) < 900) || Math.abs(x - gorgeC(z)) < gorgeW(z) + 1.2 ? -60 : hf(x, z);
+const veg = createVegetation(vegH, {
+  rect: [-1300, -1300, 1300, 1300], trees: 4200, shrubs: 6000, rocks: 250, grass: 14000, grassAt: [26, 30, 26], seed: 5,
+  water: -1, kinds: { pine: 0.55, broad: 0.35, cypress: 0.1 }, near: [0, 0, 260],
+  forest: (x, z) => 0.55 + 0.25 * Math.sin(x * 0.012 + 0.5) * Math.cos(z * 0.015) + 0.2 * Math.sin((x - z) * 0.04),
+});
+land.add(veg.group);
+// Kanyon tabanında ve yamaçlarında kayalar
+const gorgeRocks = createVegetation((x, z) => { const h = hfS(x, z); return Math.abs(x - gorgeC(z)) < gorgeW(z) + 1 && Math.abs(z) > 6 && h < RIVER + 5 ? h : -100; }, {
+  rect: [-60, -300, 60, 300], trees: 0, shrubs: 0, rocks: 1100, water: -27, snow: 40, seed: 9,
+});
+land.add(gorgeRocks.group);
+
+// Yaklaşım yolları: asfalt, şerit çizgileri, bankette korkuluk
+const roadM = mat.asphalt({ color: 0x3c3d40, scale: 1.2 }), paintM = mat.concrete({ color: 0xe9e5d8, stains: 0 }), yellowM = mat.concrete({ color: 0xe0b12a, stains: 0 });
+const railM = mat.brushedMetal({ color: 0xb9bec4, rough: 0.35 });
+const concrete = mat.concrete({ color: 0xaaa49a });
+for (const s of [-1, 1]) {
+  const x0 = s * (HALF + 0.2), x1 = s * 900, L = Math.abs(x1 - x0), cx = (x0 + x1) / 2;
+  const road = new THREE.Mesh(new RoundedBoxGeometry(L, 0.3, ZW * 2 + 1.6, 1, 0.1), roadM); road.position.set(cx, -0.13, 0); scene.add(road);
+  for (const z of [-ZW + 0.35, ZW - 0.35]) { const l = new THREE.Mesh(new THREE.BoxGeometry(L, 0.02, 0.14), paintM); l.position.set(cx, 0.03, z); scene.add(l); }
+  const dashes = new THREE.InstancedMesh(new THREE.BoxGeometry(3, 0.02, 0.14), yellowM, Math.floor(L / 9));
+  for (let i = 0; i < dashes.count; i++) dashes.setMatrixAt(i, new THREE.Matrix4().makeTranslation(x0 + s * (i * 9 + 4), 0.03, 0));
+  scene.add(dashes);
+  // Korkuluk: direk + çift dalgalı bant
+  const n = Math.floor(Math.min(L, 160) / 2);
+  const posts = new THREE.InstancedMesh(new RoundedBoxGeometry(0.12, 0.9, 0.1, 1, 0.02), railM, n * 2);
+  let k = 0;
+  for (let i = 0; i < n; i++) for (const z of [-ZW - 0.55, ZW + 0.55]) posts.setMatrixAt(k++, new THREE.Matrix4().makeTranslation(x0 + s * (i * 2 + 1), 0.45, z));
+  scene.add(posts);
+  for (const z of [-ZW - 0.45, ZW + 0.45]) { const b = new THREE.Mesh(new RoundedBoxGeometry(Math.min(L, 160), 0.32, 0.06, 2, 0.02), railM); b.position.set(x0 + s * Math.min(L, 160) / 2, 0.68, z); scene.add(b); }
+  // Kenar ayağı (abutment): kanat duvarlı beton
+  const ab = new THREE.Mesh(new RoundedBoxGeometry(3.4, 5.5, ZW * 2 + 2.6, 3, 0.15), concrete); ab.position.set(s * (HALF + 1.3), -2.6, 0); scene.add(ab);
+  for (const z of [-1, 1]) { const wing = new THREE.Mesh(new RoundedBoxGeometry(7, 4.2, 0.6, 2, 0.1), concrete); wing.position.set(s * (HALF + 4.5), -1.9, z * (ZW + 1.0)); scene.add(wing); }
 }
 
 // --- Köprü görselleri ---
 const MAX_MEM = 64, MAX_NODE = 48, MAX_CROSS = 24;
-const memMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 8), new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.25 }), MAX_MEM * 2 + MAX_CROSS);
-const jointMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 10, 8), new THREE.MeshStandardMaterial({ color: 0x4b5563, roughness: 0.5, metalness: 0.4 }), MAX_NODE * 2);
-const side = new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.8 });
-const deckMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), [side, side, new THREE.MeshStandardMaterial({ map: asphaltTex, roughness: 0.9 }), side, side, side], 16);
-for (const m of [memMesh, jointMesh, deckMesh]) { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; sim.scene.add(m); }
+// Kare kutu profil (yuvarlatılmış köşe), birim boy +y ekseninde
+const tubeGeo = (() => {
+  const s = new THREE.Shape(), a = 0.5, r = 0.12;
+  s.moveTo(-a + r, -a); s.lineTo(a - r, -a); s.quadraticCurveTo(a, -a, a, -a + r); s.lineTo(a, a - r); s.quadraticCurveTo(a, a, a - r, a);
+  s.lineTo(-a + r, a); s.quadraticCurveTo(-a, a, -a, a - r); s.lineTo(-a, -a + r); s.quadraticCurveTo(-a, -a, -a + r, -a);
+  const g = new THREE.ExtrudeGeometry(s, { depth: 1, bevelEnabled: false, curveSegments: 3 });
+  g.translate(0, 0, -0.5); g.rotateX(-Math.PI / 2); g.scale(2, 1, 2);
+  return g;
+})();
+const steelM = mat.paintedMetal({ color: 0xffffff, wear: 0.18 }), woodM = mat.wood({ color: 0xffffff, ring: 10 });
+const memMesh = new THREE.InstancedMesh(tubeGeo, steelM, MAX_MEM * 2 + MAX_CROSS);
+const jointMesh = new THREE.InstancedMesh(new RoundedBoxGeometry(1, 1, 0.14, 2, 0.05), mat.paintedMetal({ color: 0x3d4247, wear: 0.35 }), MAX_NODE * 2);
+// Tabliye: beton plak + asfalt + bordür + çizgiler + korkuluk (her segment birim boy, x'te ölçeklenir)
+const deckParts = [
+  { geo: new RoundedBoxGeometry(1, 0.34, ZW * 2 + 0.5, 1, 0.06), m: concrete, y: 0, z: 0 },
+  { geo: new THREE.BoxGeometry(1, 0.06, ZW * 2 - 0.9), m: roadM, y: 0.19, z: 0 },
+  { geo: new RoundedBoxGeometry(1, 0.22, 0.34, 1, 0.05), m: concrete, y: 0.26, z: -ZW + 0.2 },
+  { geo: new RoundedBoxGeometry(1, 0.22, 0.34, 1, 0.05), m: concrete, y: 0.26, z: ZW - 0.2 },
+  { geo: new THREE.BoxGeometry(1, 0.012, 0.12), m: paintM, y: 0.226, z: -ZW + 0.7 },
+  { geo: new THREE.BoxGeometry(1, 0.012, 0.12), m: paintM, y: 0.226, z: ZW - 0.7 },
+  { geo: new THREE.BoxGeometry(0.45, 0.012, 0.13), m: yellowM, y: 0.226, z: 0 },
+  { geo: new RoundedBoxGeometry(1, 0.3, 0.05, 1, 0.02), m: railM, y: 0.85, z: -ZW + 0.3 },
+  { geo: new RoundedBoxGeometry(1, 0.3, 0.05, 1, 0.02), m: railM, y: 0.85, z: ZW - 0.3 },
+].map((p) => ({ ...p, mesh: new THREE.InstancedMesh(p.geo, p.m, 16) }));
+const deckMesh = deckParts[0].mesh;
+for (const m of [memMesh, jointMesh, ...deckParts.map((p) => p.mesh)]) { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; scene.add(m); }
 const extras = new THREE.Group();
-sim.scene.add(extras);
-const concrete = new THREE.MeshStandardMaterial({ color: 0xa8a29e, roughness: 0.9 });
+scene.add(extras);
 
-const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _d = new THREE.Vector3();
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _d = new THREE.Vector3(), _l = new THREE.Matrix4();
 const UP = new THREE.Vector3(0, 1, 0), ZERO = new THREE.Matrix4().makeScale(0, 0, 0);
 function setCyl(mesh, i, ax, ay, az, bx, by, bz, r) {
   _d.set(bx - ax, by - ay, bz - az);
@@ -124,13 +267,20 @@ function setCyl(mesh, i, ax, ay, az, bx, by, bz, r) {
   mesh.setMatrixAt(i, _m);
 }
 
-// Kopma tozu / kıvılcımları
+// Kopma kıvılcımları: yumuşak yuvarlak parlak parçacıklar
 const DEBRIS = 60;
 const debrisGeo = new THREE.BufferGeometry();
 debrisGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(DEBRIS * 3), 3));
-const debris = new THREE.Points(debrisGeo, new THREE.PointsMaterial({ color: 0xfde68a, size: 0.35, transparent: true, opacity: 0.9 }));
+const dot = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.4, 'rgba(255,255,255,0.55)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 32, 32);
+  return new THREE.CanvasTexture(c);
+})();
+const debris = new THREE.Points(debrisGeo, new THREE.PointsMaterial({ color: new THREE.Color(6, 4, 1.6), map: dot, size: 0.35, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
 debris.frustumCulled = false;
-sim.scene.add(debris);
+scene.add(debris);
 const debV = new Float32Array(DEBRIS * 3);
 let debLife = 0;
 function burst(x, y, z) {
@@ -142,23 +292,12 @@ function burst(x, y, z) {
   debLife = 1.2;
 }
 
-// Kamyon
-const truck = new THREE.Group();
-{
-  const body = new THREE.Group();
-  const add = (geo, color, x, y, z = 0) => { const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, roughness: 0.6 })); m.position.set(x, y, z); body.add(m); return m; };
-  add(new THREE.BoxGeometry(7, 0.35, 2.1), 0x374151, 0, 0.85);
-  add(new THREE.BoxGeometry(1.8, 2.3, 2.4), 0xf59e0b, 2.6, 2.1);
-  add(new THREE.BoxGeometry(0.1, 0.9, 2.0), 0x93c5fd, 3.52, 2.6);
-  add(new THREE.BoxGeometry(4.8, 2.5, 2.5), 0xe5e7eb, -0.9, 2.3);
-  const wg = new THREE.CylinderGeometry(0.5, 0.5, 0.4, 14);
-  wg.rotateX(Math.PI / 2);
-  for (const x of [-2.6, -1.4, 2.4]) for (const z of [-1.05, 1.05]) add(wg, 0x111827, x, 0.5, z);
-  truck.add(body);
-}
-sim.scene.add(truck);
-const truckLabel = sim.label('', { parent: truck, position: [0, 4.4, 0] });
+// Kamyon (gerçek ölçek, 7 m)
+const truck = kitTruck({ color: 0xd9731b, box: 0xe8eaea });
+scene.add(truck);
+const truckLabel = sim.label('', { parent: truck, position: [0, 4.6, 0] });
 const maxLabel = sim.label('', { className: 'plain' });
+
 
 // --- Durum ---
 let model = null, U = null, F = null;
@@ -180,7 +319,7 @@ function build(type) {
   state = 'stand'; pbd = null; broken = 0; cooldown = 0; peakUtil = 0;
   // Mesnet blokları
   extras.children.slice().forEach((c) => { c.geometry.dispose(); c.removeFromParent(); });
-  const block = (x, y, w, h) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, ZW * 2 + 1.6), concrete); b.position.set(x, y, 0); extras.add(b); };
+  const block = (x, y, w, h) => { const b = new THREE.Mesh(new RoundedBoxGeometry(w, h, ZW * 2 + 1.6, 2, 0.12), concrete); b.position.set(x, y, 0); extras.add(b); };
   block(-HALF - 1.1, -1.2, 2.6, 2.2); block(HALF + 1.1, -1.2, 2.6, 2.2);
   for (const n of model.nodes) {
     if (!n.fx || n.y === 0 && Math.abs(Math.abs(n.x) - HALF) < 0.01) continue;
@@ -268,6 +407,7 @@ function refreshVisuals() {
     for (let i = 0; i < nodes.length; i++) { disp[i].x = nodes[i].x + U[2 * i] * ex; disp[i].y = nodes[i].y + U[2 * i + 1] * ex; }
   }
   cNeut.setHex(mat.color);
+  memMesh.material = matSel.value === 'ahsap' ? woodM : steelM;
   let k = 0, worst = null;
   for (const m of model.members) {
     const a = disp[m.a], b = disp[m.b];
@@ -297,7 +437,7 @@ function refreshVisuals() {
   let j = 0;
   for (let i = 0; i < nodes.length; i++) {
     const r = 0.22 + chordD.value / 100 * 0.6;
-    for (const z of [-ZW, ZW]) { _m.makeScale(r, r, r).setPosition(disp[i].x, disp[i].y, z); jointMesh.setMatrixAt(j++, _m); }
+    for (const z of [-ZW, ZW]) { _m.makeScale(r * 2.3, r * 2.3, 1).setPosition(disp[i].x, disp[i].y, z); jointMesh.setMatrixAt(j++, _m); }
   }
   jointMesh.count = j;
   jointMesh.instanceMatrix.needsUpdate = true;
@@ -307,11 +447,10 @@ function refreshVisuals() {
     const a = disp[dk[i]], b = disp[dk[i + 1]];
     const L = Math.hypot(b.x - a.x, b.y - a.y);
     _q.setFromAxisAngle(_d.set(0, 0, 1), Math.atan2(b.y - a.y, b.x - a.x));
-    _m.compose(_p.set((a.x + b.x) / 2, (a.y + b.y) / 2 + 0.05, 0), _q, _s.set(L, 0.35, ZW * 2 + 0.3));
-    deckMesh.setMatrixAt(i, _m);
+    _m.compose(_p.set((a.x + b.x) / 2, (a.y + b.y) / 2 + 0.05, 0), _q, _s.set(L, 1, 1));
+    for (const part of deckParts) part.mesh.setMatrixAt(i, _l.makeTranslation(0, part.y, part.z).premultiply(_m));
   }
-  deckMesh.count = dk.length - 1;
-  deckMesh.instanceMatrix.needsUpdate = true;
+  for (const part of deckParts) { part.mesh.count = dk.length - 1; part.mesh.instanceMatrix.needsUpdate = true; }
   // En zorlanan eleman etiketi
   if (worst && state === 'stand' && worst.util > 0.05) {
     const a = disp[worst.a], b = disp[worst.b];
@@ -342,6 +481,7 @@ function placeTruck() {
   truck.position.set(truckX, (yr + yf) / 2 + (yf - yr) * 0.2 / 4.4, 0);
   truck.rotation.z = Math.atan2(yf - yr, 4.4);
   truck.visible = load.value > 0;
+  for (const w of truck.userData.wheels) w.rotation.z = -truckX / 0.52;
   truckLabel.setText(`🚚 ${fmt(load.value)} t`);
 }
 
@@ -424,6 +564,11 @@ ui.buttons([
 const removeMode = ui.toggle({ label: 'Tıklayınca eleman sök', value: false });
 
 ui.section('Görünüm');
+ui.buttons([
+  { label: 'Yakın bakış', onClick: () => sim.moveCamera([8.5, 1.4, 21], [-1, -1.6, 0]) },
+  { label: 'Köprü', onClick: () => sim.moveCamera([11.5, 2.4, 31], [-1.2, -4.2, 0]) },
+  { label: 'Kanyon', onClick: () => sim.moveCamera([46, 16, 105], [0, -9, 0]) },
+]);
 const exag = ui.slider({ label: 'Sehim büyütme', min: 1, max: 100, step: 1, value: 30, unit: '×' });
 const colorMode = ui.toggle({ label: 'Gerilme renkleri (mavi çekme, kırmızı basınç)', value: true });
 

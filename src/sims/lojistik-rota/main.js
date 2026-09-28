@@ -1,7 +1,8 @@
 // Lojistik Rota — ızgara şehirde depo + teslimat noktaları; rastgele, en yakın komşu, 2-opt, süpürme ve Clarke–Wright rotaları, trafik etkisi.
-import { createSim, THREE, fmt, clamp, seeded, instanced, disposeObject } from '@core';
+import { createSim, THREE, fmt, clamp, seeded, disposeObject } from '@core';
+import { buildWorld } from './world.js';
 
-const GN = 10, SP = 4, HALF = ((GN - 1) * SP) / 2;
+const GN = 10, SP = 500, HALF = ((GN - 1) * SP) / 2;
 const KM_EDGE = 0.5;                 // bir blok = 500 m
 const MIN_PER_SEC = 4;               // 1× hızda 1 sn = 4 dk
 const SERVICE = 4, RELOAD = 10;      // teslim ve depoda yükleme süresi (dk)
@@ -16,10 +17,10 @@ const ALGOS = [
 ];
 
 const sim = createSim({
-  background: 0x0c1322,
-  camera: { position: [0, 38, 30], target: [0, 0, 1], fov: 45 },
-  controls: { maxDistance: 90, minDistance: 10, maxPolarAngle: Math.PI * 0.45 },
-  fog: [70, 150],
+  sky: { elevation: 30, azimuth: 128, clouds: 0.42, haze: 0.7, visibility: 26000 },
+  // Depo ve depodan çıkan rotalar yakın planda (alçak, eğik bakış: ufuk ve gökyüzü kadrajda)
+  camera: { position: [-470, 430, 300], target: [-170, 0, -340], fov: 45, near: 2, far: 90000 },
+  controls: { maxDistance: 9000, minDistance: 40, maxPolarAngle: Math.PI * 0.47 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Izgara bir şehir: her blok 500 m. Ortadaki depodan çıkan kamyonetler numaralı noktalara paket götürür. Sokakların rengi
@@ -263,68 +264,22 @@ const edgeMap = new Map();
 edges.forEach((e) => { edgeMap.set(e.a * 1000 + e.b, e); edgeMap.set(e.b * 1000 + e.a, e); });
 const edgeBetween = (a, b) => edgeMap.get(a * 1000 + b);
 
-// --- Sahne ---
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(HALF * 2 + 14, HALF * 2 + 14), new THREE.MeshStandardMaterial({ color: 0x1a2436, roughness: 1 }));
-ground.rotation.x = -Math.PI / 2;
-sim.scene.add(ground);
-const roads = instanced(new THREE.BoxGeometry(1, 0.06, 1), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 }), edges.length);
-{
-  const m = new THREE.Matrix4();
-  edges.forEach((e, i) => {
-    const [ax, az] = nodePos(e.a), [bx, bz] = nodePos(e.b);
-    const w = e.art ? 1.3 : 0.9, horiz = az === bz;
-    m.compose(new THREE.Vector3((ax + bx) / 2, 0.03, (az + bz) / 2), new THREE.Quaternion(), new THREE.Vector3(horiz ? SP : w, 1, horiz ? w : SP));
-    roads.setMatrixAt(i, m);
-    roads.setColorAt(i, new THREE.Color(0x475569));
-  });
-  sim.scene.add(roads);
-  // Kavşaklar
-  const cross = instanced(new THREE.BoxGeometry(1.3, 0.065, 1.3), new THREE.MeshStandardMaterial({ color: 0x3b4658 }), GN * GN);
-  for (let i = 0; i < GN * GN; i++) { const [x, z] = nodePos(i); cross.setMatrixAt(i, m.makeTranslation(x, 0.031, z)); }
-  sim.scene.add(cross);
-  // Binalar
-  const r = seeded(9), B = [];
-  for (let br = 0; br < GN - 1; br++) for (let bc = 0; bc < GN - 1; bc++) {
-    const cx = -HALF + bc * SP + SP / 2, cz = -HALF + br * SP + SP / 2;
-    if (Math.abs(cx - nodePos(DEPOT)[0] - SP / 2) < 0.1 && Math.abs(cz - nodePos(DEPOT)[1] - SP / 2) < 0.1) continue;
-    if (r() < 0.12) { B.push([cx, cz, 2.4, 0.08, 2.4, 0x2f6b3a]); continue; } // park
-    for (const [ox, oz] of [[-0.7, -0.7], [0.7, -0.7], [-0.7, 0.7], [0.7, 0.7]]) {
-      if (r() < 0.25) continue;
-      const center = 1 - Math.hypot(cx, cz) / (HALF * 1.5);
-      const h = 0.6 + r() * 2.2 + center * r() * 4;
-      B.push([cx + ox, cz + oz, 1.1, h, 1.1, [0x3a475e, 0x445069, 0x4e5a73, 0x36425a][Math.floor(r() * 4)]]);
-    }
-  }
-  const bld = instanced(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85 }), B.length);
-  B.forEach(([x, z, w, h, d, c], i) => {
-    bld.setMatrixAt(i, m.compose(new THREE.Vector3(x, h / 2, z), new THREE.Quaternion(), new THREE.Vector3(w, h, d)));
-    bld.setColorAt(i, new THREE.Color(c));
-  });
-  sim.scene.add(bld);
-  // Depo
-  const [dx, dz] = nodePos(DEPOT);
-  const depot = new THREE.Group();
-  const hall = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.3, 2.2), new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.6 }));
-  hall.position.y = 0.65;
-  const roof = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 2.6, 12, 1, false, 0, Math.PI), new THREE.MeshStandardMaterial({ color: 0x9a5b12 }));
-  roof.rotation.z = Math.PI / 2; roof.position.y = 1.3; roof.scale.set(1, 1, 0.9);
-  depot.add(hall, roof);
-  depot.position.set(dx + SP / 2, 0, dz + SP / 2);
-  sim.scene.add(depot);
-  sim.label('🏭 Depo', { parent: depot, position: [0, 2.9, 0] });
-}
+// --- Sahne (metre ölçeğinde: bir blok 500 m) ---
+const W = buildWorld(sim, { GN, SP, HALF, DEPOT, nodePos, edges });
+const ground = W.ground, roads = W.roads;
+sim.label('🏭 Depo', { parent: W.depot, position: [0, 60, 0] });
 
 // Teslimat işaretçileri
-const markerGeo = new THREE.CylinderGeometry(0.35, 0.05, 1.1, 8);
 let markers = [];
 function buildMarkers() {
   markers.forEach(disposeObjectKeepGeo);
   markers = deliveries.map((d, k) => {
     const [x, z] = nodePos(d.node);
-    const m = new THREE.Mesh(markerGeo, new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0x332200, roughness: 0.5 }));
-    m.position.set(x, 0.75, z);
-    m.userData.k = k;
-    m.add(sim.label(`${k + 1}`, { position: [0, 0.95, 0], className: 'plain' }));
+    const m = W.makeMarker(0xfbbf24);
+    m.position.set(x, 0, z);
+    m.traverse((c) => { c.userData.k = k; });
+    m.visible = showRoutes.value;
+    m.add(sim.label(`${k + 1}`, { position: [0, 138, 0], className: 'plain' }));
     sim.scene.add(m);
     return m;
   });
@@ -334,21 +289,14 @@ function disposeObjectKeepGeo(o) {
   o.removeFromParent();
 }
 
-// Kamyonetler
-function makeVan(color) {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.8, 0.7), new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.5 }));
-  body.position.set(-0.15, 0.5, 0);
-  const cab = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.68), new THREE.MeshStandardMaterial({ color, roughness: 0.4 }));
-  cab.position.set(0.7, 0.4, 0);
-  const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.21, 0.15, 0.71), new THREE.MeshStandardMaterial({ color }));
-  stripe.position.set(-0.15, 0.55, 0);
-  g.add(body, cab, stripe);
-  g.scale.setScalar(0.9);
+// Kamyonetler (5,9 m panel van; renk şeridi ve altındaki hale aracın rota rengi)
+function makeVan(color, v) {
+  const g = W.makeVan(color);
+  g.add(sim.label(`<span style="color:#${color.toString(16)}">■</span> ${v + 1}`, { position: [0, 16, 0], className: 'plain' }));
   sim.scene.add(g);
   return g;
 }
-const vanMeshes = VAN_COL.map((c) => makeVan(c));
+const vanMeshes = VAN_COL.map((c, v) => makeVan(c, v));
 let routeLines = [];
 
 // --- Durum ---
@@ -362,6 +310,7 @@ function recompute() {
   for (const a of ALGOS) results[a.id] = evaluate(plan(a.id));
   result = results[algoSel.value];
   paintRoads();
+  W.assignTraffic();
   buildMarkers();
   drawRoutes();
   restart();
@@ -384,21 +333,23 @@ function paintRoads() {
     roads.setColorAt(i, c);
   });
   roads.instanceColor.needsUpdate = true;
+  roads.visible = showTraffic.value;
 }
 
 function drawRoutes() {
   routeLines.forEach(disposeObject);
   routeLines = [];
   result.vanRoutes.forEach((rs, v) => {
-    const off = (v - 1.5) * 0.18;
+    const off = (v - 1.5) * 5.5;
     for (const r of rs) {
       const pts = [];
       let prev = 0;
       for (const i of [...r, 0]) {
-        for (const node of P.paths[prev][i]) { const [x, z] = nodePos(node); pts.push(new THREE.Vector3(x + off, 0.16, z + off)); }
+        for (const node of P.paths[prev][i]) { const [x, z] = nodePos(node); pts.push(new THREE.Vector3(x + off, 0.5, z + off)); }
         prev = i;
       }
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: VAN_COL[v], transparent: true, opacity: 0.9 }));
+      const line = W.routeMesh(pts, VAN_COL[v]);
+      line.visible = showRoutes.value;
       sim.scene.add(line);
       routeLines.push(line);
     }
@@ -411,7 +362,7 @@ function placeVans() {
   vanMeshes.forEach((m, v) => {
     const keys = result && result.timelines[v];
     m.visible = v < vans.value;
-    if (!keys || keys.length < 2) { m.position.set(dx + 0.6 * v - 0.9, 0, dz + 1.1); m.rotation.y = 0; return; }
+    if (!keys || keys.length < 2) { m.position.set(dx + 60 + 9 * v, 0.3, dz + 150); m.rotation.y = -Math.PI / 2; return; }
     let p = vanPtr[v];
     while (p < keys.length - 2 && keys[p + 1].t <= clock) {
       p++;
@@ -426,9 +377,10 @@ function placeVans() {
     const k0 = keys[p], k1 = keys[p + 1];
     const f = k1.t > k0.t ? clamp((clock - k0.t) / (k1.t - k0.t), 0, 1) : 1;
     const [x0, z0] = nodePos(k0.node), [x1, z1] = nodePos(k1.node);
-    const off = (v - 1.5) * 0.18;
+    // Sağ şerit: gidiş yönünün sağına 1,9 m
+    const ux = Math.sign(x1 - x0), uz = Math.sign(z1 - z0);
     _a.set(x0, 0, z0); _b.set(x1, 0, z1);
-    m.position.lerpVectors(_a, _b, f).add(_a.set(off, 0, off));
+    m.position.lerpVectors(_a, _b, f).add(_a.set(-uz * 1.9, 0, ux * 1.9));
     if (x1 !== x0 || z1 !== z0) m.rotation.y = Math.atan2(-(z1 - z0), x1 - x0);
   });
 }
@@ -470,6 +422,11 @@ ui.section('Trafik');
 const traffic = ui.slider({ label: 'Trafik yoğunluğu', min: 0, max: 100, step: 5, value: 40, format: (v) => `%${fmt(v)}`, onChange: () => recompute() });
 const rushT = ui.toggle({ label: '🚦 Yoğun saat (ana caddeler ve merkez tıkalı)', value: false, onChange: () => recompute() });
 const showTraffic = ui.toggle({ label: 'Trafik renklerini göster', value: true, onChange: () => paintRoads() });
+const showRoutes = ui.toggle({ label: 'Rotaları ve teslimat işaretlerini göster', value: true, onChange: (v) => {
+  routeLines.forEach((l) => { l.visible = v; });
+  markers.forEach((m) => { m.visible = v; });
+  vanMeshes.forEach((m) => { m.userData.halo.visible = v; });
+} });
 
 ui.section('Maliyet');
 const fuelPrice = ui.slider({ label: 'Motorin fiyatı', min: 20, max: 100, step: 0.5, value: 50, format: (v) => `${fmt(v, 1)} ₺/L`, onChange: () => recompute() });
@@ -534,6 +491,18 @@ sim.onClick(() => [ground, ...markers], (hit) => {
     }
   }
   recompute();
+});
+
+// Görsel: trafik akışı (gerçek zamanlı), ağaç rüzgârı, güneşin saate göre konumu (09:00 → öğleden sonra)
+let skyH = -1;
+sim.onUpdate((dt, t) => {
+  W.placeCars(dt / Math.max(sim.speed, 0.01));
+  W.update(t);
+  const h = 9 + clock / 60;
+  if (Math.abs(h - skyH) > 0.04) {
+    skyH = h;
+    sim.sky?.set({ elevation: Math.max(4, 50 * Math.sin((Math.PI * (h - 6.3)) / 12.6)), azimuth: 180 + (h - 12.4) * 15 });
+  }
 });
 
 sim.onReset(() => restart());

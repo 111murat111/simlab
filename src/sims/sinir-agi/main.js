@@ -1,5 +1,6 @@
 // Sinir Ağı Nasıl Öğrenir? — tarayıcıda geri yayılımla eğitilen küçük MLP: 3B karar yüzeyi, canlı ağ şeması, eğitim/test kaybı.
-import { createSim, THREE, fmt, clamp, instanced } from '@core';
+import { createSim, THREE, fmt, clamp, instanced, mat, RoundedBoxGeometry, BufferGeometryUtils } from '@core';
+import { rackMaterial, rackGeometry, raisedFloor, cableTray, ledStrip, haze } from './serverhall.js';
 import { createNet, forward, trainBatch, evaluate, makeData, ACT } from './nn.js';
 
 const SURF = 9;            // yüzeyin kenar uzunluğu (dünya birimi)
@@ -11,12 +12,13 @@ const MAX_PTS = 400;
 const NET_Z = -5.2, NET_Y = 4.6, NET_W = 9;
 
 const sim = createSim({
-  background: 0x0b1120,
-  camera: { position: [0, 12.5, 18.5], target: [0, 1.6, -1.4], fov: 46 },
-  controls: { maxDistance: 45, minDistance: 6 },
+  studio: { color: 0x9aa0a6, mood: 'lab', warmth: -0.35, key: { el: 72, az: 20, power: 0.8 }, radius: 30, height: 18 },
+  camera: { position: [0.35, 3.05, 4.3], target: [0, 1.15, -0.45], fov: 50, near: 0.02, far: 200 },
+  controls: { maxDistance: 7.5, minDistance: 1.2 },
+  look: { aoRadius: 0.25 },
   info: `
     <h3>Ne görüyorsun?</h3>
-    <p>Önde, iki sınıflı bir veri kümesi (<b style="color:#60a5fa">mavi</b> ve <b style="color:#fb923c">turuncu</b> noktalar) ve ağın
+    <p>Sahne bir sunucu salonunun soğuk koridoru: ağ, iki sıra rafın arasındaki masada eğitiliyor. Önde, iki sınıflı bir veri kümesi (<b style="color:#60a5fa">mavi</b> ve <b style="color:#fb923c">turuncu</b> noktalar) ve ağın
     <b>karar yüzeyi</b>. Yüzeyin yüksekliği ve rengi, ağın o noktada "mavi" dediği olasılıktır; saydam düz levha %50 düzeyidir,
     yüzeyin levhayı kestiği yer <b>karar sınırı</b>dır. Küreler eğitim, sekizyüzlüler test noktalarıdır (ağ testleri hiç görmez).</p>
     <p>Arkada ağın kendisi: soldan sağa girdi (x₁, x₂), gizli katmanlar ve çıktı nöronu. Çizgiler ağırlıklardır:
@@ -54,26 +56,97 @@ let dirty = true, epochAcc = 0;
 let lastTrain = { loss: NaN, acc: NaN }, lastTest = { loss: NaN, acc: NaN };
 sim.formatTime = () => `${fmt(epoch)}. dönem`;
 
+// --- Sunucu salonu (metre): soğuk koridor, iki sıra raf, kablo tavaları, tavan armatürleri, pus ---
+const HALL_Z0 = -7.2, HALL_Z1 = 4.8, AX = 1.5, RD = 1.2, CEIL = 3.6;
+const rackMat = rackMaterial({ w: 0.6, h: 2.1 });
+if (sim.stage?.mesh) sim.stage.mesh.visible = false; // salon kapalı: stüdyo fonu görünmez
+{
+  const scene = sim.scene;
+  scene.add(raisedFloor(-4.8, HALL_Z0, 4.8, HALL_Z1, (x) => Math.abs(x) < AX));
+  const RN = 16, racks = instanced(rackGeometry(0.6, 2.1, RD), rackMat, RN * 2);
+  const d = new THREE.Object3D();
+  let k = 0;
+  for (const side of [-1, 1]) for (let i = 0; i < RN; i++) {
+    d.position.set(side * (AX + RD / 2), 0, HALL_Z0 + 1.2 + 0.3 + i * 0.6);
+    d.rotation.set(0, side < 0 ? Math.PI / 2 : -Math.PI / 2, 0); d.updateMatrix();
+    racks.setMatrixAt(k++, d.matrix);
+  }
+  racks.castShadow = racks.receiveShadow = true; racks.userData.noFit = true;
+  scene.add(racks);
+  // duvarlar, tavan, kapı
+  const wall = mat.concrete({ color: 0xc9ccce, stains: 0.15 });
+  const add = (g, m, cast = false) => { const o = new THREE.Mesh(g, m); o.receiveShadow = true; o.castShadow = cast; o.userData.noFit = true; if (!cast) o.userData.noCast = true; scene.add(o); return o; };
+  add(new THREE.BoxGeometry(0.2, CEIL, HALL_Z1 - HALL_Z0).translate(-4.9, CEIL / 2, (HALL_Z0 + HALL_Z1) / 2), wall);
+  add(new THREE.BoxGeometry(0.2, CEIL, HALL_Z1 - HALL_Z0).translate(4.9, CEIL / 2, (HALL_Z0 + HALL_Z1) / 2), wall);
+  add(new THREE.BoxGeometry(9.8, CEIL, 0.2).translate(0, CEIL / 2, HALL_Z0 - 0.1), wall);
+  add(new THREE.BoxGeometry(9.8, CEIL, 0.2).translate(0, CEIL / 2, HALL_Z1 + 0.1), wall);
+  add(new THREE.BoxGeometry(9.8, 0.1, HALL_Z1 - HALL_Z0).translate(0, CEIL + 0.05, (HALL_Z0 + HALL_Z1) / 2), mat.concrete({ color: 0xdadcdc, stains: 0.05 }));
+  const door = add(new RoundedBoxGeometry(1.2, 2.2, 0.08, 2, 0.02).translate(0, 1.1, HALL_Z0 + 0.01), mat.paintedMetal({ color: 0x8c949b, wear: 0.1 }));
+  door.castShadow = false;
+  const win = add(new THREE.BoxGeometry(0.3, 0.8, 0.02).translate(0, 1.5, HALL_Z0 + 0.06), new THREE.MeshStandardMaterial({ color: 0x1b2a33, roughness: 0.05, metalness: 0.3 }));
+  win.castShadow = false;
+  // soğuk koridor kapatması: raf üstlerinde cam panel çerçevesi
+  const alu = mat.brushedMetal({ color: 0xc4c8cc, rough: 0.3 });
+  for (const side of [-1, 1]) add(new THREE.BoxGeometry(0.05, 0.05, HALL_Z1 - HALL_Z0 - 2.4).translate(side * AX, 2.13, (HALL_Z0 + 1.2 + HALL_Z0 + 1.2 + 16 * 0.6) / 2), alu);
+  // kablo tavaları (raf sıralarının üstünde) ve tavan armatürleri
+  for (const side of [-1, 1]) {
+    scene.add(cableTray([side * (AX + 0.45), HALL_Z0 + 0.4], [side * (AX + 0.45), HALL_Z1 - 0.4], 2.55, 0.45, side < 0 ? 0xd7b21f : 0x9aa3ab));
+    scene.add(cableTray([side * (AX + 0.95), HALL_Z0 + 0.4], [side * (AX + 0.95), HALL_Z1 - 0.4], 2.85, 0.3, 0x9aa3ab));
+  }
+  for (const x of [-0.8, 0.8]) for (const z of [-5.2, -1.8, 1.6]) scene.add(ledStrip(2.4, x, CEIL - 0.04, z));
+  for (const x of [-3.9, 3.9]) for (const z of [-4.5, 0, 3.6]) scene.add(ledStrip(2.4, x, CEIL - 0.04, z));
+  const hz = haze(46, [-1.4, 0.05, HALL_Z0 + 0.8, 1.4, 1.1, 3.4]);
+  scene.add(hz);
+  sim.onRender(() => { const t = performance.now() / 1000; rackMat.userData.uniforms.uTime.value = t; hz.userData.update(t); });
+}
+
+// İçerik grubu: model birimleri korunur, 1 birim = 0,2 m; masanın üstünde karar yüzeyi, arkasında cam ekranda ağ
+const G = new THREE.Group();
+G.scale.setScalar(0.2); G.position.set(0, 1.0, 0);
+sim.scene.add(G);
+{
+  // masa: koyu kompozit tabla, fırçalanmış çelik kenar, ayaklar
+  const top = new THREE.Mesh(new RoundedBoxGeometry(2.05, 0.05, 2.05, 2, 0.015), mat.plastic({ color: 0x1d2024, gloss: 0.3 }));
+  top.position.set(0, 0.64, 0);
+  const rim = new THREE.Mesh(new RoundedBoxGeometry(2.09, 0.03, 2.09, 2, 0.012), mat.brushedMetal({ color: 0xaab0b6, rough: 0.3 }));
+  rim.position.set(0, 0.6, 0);
+  const body = new THREE.Mesh(new RoundedBoxGeometry(1.7, 0.56, 1.7, 2, 0.02), mat.paintedMetal({ color: 0x2a2e33, wear: 0.1 }));
+  body.position.set(0, 0.3, 0);
+  // ekran: alüminyum çerçeveli koyu cam, iki ayak
+  const scr = new THREE.Mesh(new RoundedBoxGeometry(2.34, 1.74, 0.04, 2, 0.012), new THREE.MeshStandardMaterial({ color: 0x07090c, roughness: 0.08, metalness: 0.4 }));
+  scr.position.set(0, 1.0 + 4.6 * 0.2, -1.2);
+  const frm = new THREE.Mesh(new RoundedBoxGeometry(2.4, 1.8, 0.03, 2, 0.012), mat.brushedMetal({ color: 0xb8bdc2, rough: 0.28 }));
+  frm.position.set(0, 1.0 + 4.6 * 0.2, -1.225);
+  const legs = [-1, 1].map((sx) => { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 1.06, 10), frm.material); l.position.set(sx * 1.05, 0.53, -1.23); return l; });
+  const feet = [-1, 1].map((sx) => { const f = new THREE.Mesh(new RoundedBoxGeometry(0.1, 0.03, 0.5, 1, 0.01), frm.material); f.position.set(sx * 1.05, 0.015, -1.23); return f; });
+  [top, rim, body, scr, frm, ...legs, ...feet].forEach((o) => { o.castShadow = o.receiveShadow = true; sim.scene.add(o); });
+}
+
 // --- Karar yüzeyi ---
 const surfGeo = new THREE.PlaneGeometry(SURF, SURF, SEG, SEG).rotateX(-Math.PI / 2);
 surfGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(surfGeo.attributes.position.count * 3), 3));
-const surf = new THREE.Mesh(surfGeo, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
-sim.scene.add(surf);
+const surf = new THREE.Mesh(surfGeo, new THREE.MeshPhysicalMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.42, clearcoat: 0.6, clearcoatRoughness: 0.15 }));
+surf.castShadow = surf.receiveShadow = true;
+G.add(surf);
 {
   const half = new THREE.Mesh(new THREE.PlaneGeometry(SURF + 0.6, SURF + 0.6).rotateX(-Math.PI / 2),
     new THREE.MeshBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide }));
   half.position.y = 0.001;
-  sim.scene.add(half);
-  const frame = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(SURF, HAMP * 2, SURF)),
-    new THREE.LineBasicMaterial({ color: 0x334155 }));
-  sim.scene.add(frame);
-  const base = new THREE.Mesh(new THREE.BoxGeometry(SURF + 1, 0.2, SURF + 1), new THREE.MeshLambertMaterial({ color: 0x1e293b }));
-  base.position.y = -HAMP - 0.3;
-  sim.scene.add(base);
-  sim.label('x₁ →', { position: [SURF / 2 - 0.6, -HAMP, SURF / 2 + 0.8], className: 'plain' });
-  sim.label('x₂ →', { position: [-SURF / 2 - 0.9, -HAMP, -SURF / 2 + 1], className: 'plain' });
+  G.add(half);
+  // çerçeve: 12 ince alüminyum çubuk
+  const bars = [], hx = SURF / 2, hy = HAMP;
+  for (const a of [-1, 1]) for (const b of [-1, 1]) {
+    bars.push(new THREE.BoxGeometry(SURF, 0.05, 0.05).translate(0, a * hy, b * hx));
+    bars.push(new THREE.BoxGeometry(0.05, 0.05, SURF).translate(a * hx, b * hy, 0));
+    bars.push(new THREE.BoxGeometry(0.05, HAMP * 2, 0.05).translate(a * hx, 0, b * hx));
+  }
+  const frame = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(bars.map((g) => g.toNonIndexed())), mat.brushedMetal({ color: 0xc0c5ca, rough: 0.3 }));
+  frame.castShadow = true;
+  G.add(frame);
+  sim.label('x₁ →', { parent: G, position: [SURF / 2 - 0.6, -HAMP, SURF / 2 + 0.8], className: 'plain' });
+  sim.label('x₂ →', { parent: G, position: [-SURF / 2 - 0.9, -HAMP, -SURF / 2 + 1], className: 'plain' });
 }
-const surfLbl = sim.label('', { position: [0, HAMP + 0.3, -SURF / 2 + 0.2] });
+const surfLbl = sim.label('', { parent: G, position: [0, HAMP + 0.3, -SURF / 2 + 0.2] });
 
 const C0 = new THREE.Color(0xf59e0b), C1 = new THREE.Color(0x3b82f6), CMID = new THREE.Color(0xf1f5f9);
 const _c = new THREE.Color();
@@ -82,21 +155,17 @@ function mixColor(v, out) {
 }
 
 // --- Veri noktaları ---
-const ptTrain = instanced(new THREE.SphereGeometry(0.11, 12, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAX_PTS);
-const ptTest = instanced(new THREE.OctahedronGeometry(0.14), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAX_PTS);
-[ptTrain, ptTest].forEach((m) => { m.frustumCulled = false; sim.scene.add(m); });
+const ptTrain = instanced(new THREE.SphereGeometry(0.11, 14, 10), new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.18, clearcoat: 1 }), MAX_PTS);
+const ptTest = instanced(new THREE.OctahedronGeometry(0.14), new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.25, clearcoat: 1, flatShading: true }), MAX_PTS);
+[ptTrain, ptTest].forEach((m) => { m.frustumCulled = false; m.castShadow = true; G.add(m); });
 const PT0 = new THREE.Color(0xea580c), PT1 = new THREE.Color(0x1d4ed8), PT0t = new THREE.Color(0xfdba74), PT1t = new THREE.Color(0x93c5fd);
 
 // --- Ağ şeması ---
 const MAX_N = 2 + 3 * 8 + 1, MAX_E = 2 * 8 + 8 * 8 * 2 + 8 + 2;
-const neuronMesh = instanced(new THREE.SphereGeometry(0.28, 20, 14), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAX_N);
-const edgeMesh = instanced(new THREE.CylinderGeometry(1, 1, 1, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }), MAX_E);
-[neuronMesh, edgeMesh].forEach((m) => { m.frustumCulled = false; sim.scene.add(m); });
-{
-  const board = new THREE.Mesh(new THREE.PlaneGeometry(NET_W + 2.4, 8.4), new THREE.MeshLambertMaterial({ color: 0x111827, transparent: true, opacity: 0.85 }));
-  board.position.set(0, NET_Y, NET_Z - 0.4);
-  sim.scene.add(board);
-}
+// Ağ, cam ekranın önünde parlayan ışık kürecikleri ve ışık çizgileri olarak çizilir (HDR → hafif çiçeklenme)
+const neuronMesh = instanced(new THREE.SphereGeometry(0.28, 20, 14), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.5, 1.5, 1.5) }), MAX_N);
+const edgeMesh = instanced(new THREE.CylinderGeometry(1, 1, 1, 6), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.25, 1.25, 1.25) }), MAX_E);
+[neuronMesh, edgeMesh].forEach((m) => { m.frustumCulled = false; m.userData.noCast = true; G.add(m); });
 let neuronPos = [], neuronId = [], layerLbls = [];
 const dummy = new THREE.Object3D(), _a = new THREE.Vector3(), _b = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
 
@@ -114,9 +183,9 @@ function layoutNet() {
   });
   layerLbls.forEach((o) => { o.el.remove(); o.removeFromParent(); });
   layerLbls = sz.map((n, l) => sim.label(l === 0 ? 'Girdi' : l === Lc - 1 ? 'Çıktı' : `Gizli ${l}`,
-    { position: [neuronPos[l][0].x, NET_Y + 3.7, NET_Z], className: 'plain' }));
-  layerLbls.push(sim.label('x₁', { position: [neuronPos[0][0].x - 0.65, neuronPos[0][0].y, NET_Z], className: 'plain' }));
-  layerLbls.push(sim.label('x₂', { position: [neuronPos[0][1].x - 0.65, neuronPos[0][1].y, NET_Z], className: 'plain' }));
+    { parent: G, position: [neuronPos[l][0].x, NET_Y + 3.7, NET_Z], className: 'plain' }));
+  layerLbls.push(sim.label('x₁', { parent: G, position: [neuronPos[0][0].x - 0.65, neuronPos[0][0].y, NET_Z], className: 'plain' }));
+  layerLbls.push(sim.label('x₂', { parent: G, position: [neuronPos[0][1].x - 0.65, neuronPos[0][1].y, NET_Z], className: 'plain' }));
 }
 
 function drawNet() {

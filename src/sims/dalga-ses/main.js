@@ -1,5 +1,6 @@
 // Dalga ve Ses — dalga havuzunda girişim, hareketli kaynakta Doppler/Mach konisi, telde ve boruda rezonans (duran dalga).
-import { createSim, THREE, fmt, clamp, smoothstep, instanced, heatColor, TAU } from '@core';
+import { createSim, THREE, fmt, clamp, smoothstep, instanced, heatColor, TAU, mat, RoundedBoxGeometry } from '@core';
+import { labRoom, glassMesh } from './labkit.js';
 
 const TW = 24, TD = 18, SX = 144, SZ = 108;   // havuz boyutu ve ızgara
 const C = 4;                                   // havuzdaki dalga hızı (birim/s)
@@ -9,10 +10,14 @@ const MODES = 12;
 const MU = 0.001;                              // tel: 1 g/m
 const VOL = 0.05;
 
+// Gerçek ölçek: dalga leğeni 60 × 45 cm → 1 birim = 2,5 cm (U); leğen laboratuvar tezgâhında kısa ayaklar üstünde
+const U = 0.025, BENCH = 0.9, LIFT = 3.0;
+const W = (p) => [p[0] * U, BENCH + (p[1] + LIFT) * U, p[2] * U];
 const sim = createSim({
-  background: 0x081018,
-  camera: { position: [0, 22, 21], target: [0, -1, 1], fov: 50 },
-  controls: { minDistance: 6, maxDistance: 60 },
+  studio: { color: 0xb9b4aa, mood: 'lab', warmth: 0.1, key: { el: 58, az: 155 }, radius: 22 },
+  look: { aoRadius: 0.03 },
+  camera: { position: W([0, 22, 21]), target: W([0, -1, 1]), fov: 50, near: 0.01, far: 100 },
+  controls: { minDistance: 6 * U, maxDistance: 60 * U },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p><b>Girişim:</b> İki nokta kaynak aynı frekansta su yüzeyine vuruyor. Dalgaların tepe ile tepe buluştuğu yerde yapıcı
@@ -49,9 +54,23 @@ const st = {
 let t0 = 0;           // kaynakların başladığı an
 let dirty = true;
 
-// --- Havuz ---
+// --- Laboratuvar + içerik grubu ---
+labRoom(sim.scene, { width: 3.2, depth: 0.8, benchH: BENCH, style: 'lab', wallZ: -0.4 });
+const content = new THREE.Group();
+content.position.set(0, BENCH + LIFT * U, 0);
+content.scale.setScalar(U);
+sim.scene.add(content);
+const MT = {
+  alu: mat.brushedMetal({ color: 0xbfc3c8, rough: 0.28, scale: U }),
+  steel: mat.brushedMetal({ color: 0xd4d7db, rough: 0.2, scale: U }),
+  dark: mat.plastic({ color: 0x202328, gloss: 0.4, scale: U }),
+  white: mat.plastic({ color: 0xeef0ef, gloss: 0.2, scale: U }),
+  wood: mat.wood({ color: 0xa0764a, varnish: true, scale: U }),
+};
+
+// --- Havuz (dalga leğeni): alüminyum çerçeveli tepsi, beyaz taban, boyalı su ---
 const tank = new THREE.Group();
-sim.scene.add(tank);
+content.add(tank);
 const geo = new THREE.PlaneGeometry(TW, TD, SX, SZ);
 geo.rotateX(-Math.PI / 2);
 const P = geo.attributes.position;
@@ -61,27 +80,37 @@ const VX = new Float32Array(NV), VZ = new Float32Array(NV);
 for (let i = 0; i < NV; i++) { VX[i] = P.getX(i); VZ[i] = P.getZ(i); }
 const colors = new Float32Array(NV * 3);
 geo.setAttribute('color', new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
-const water = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.28, metalness: 0.08 }));
+// Su yüzeyi: parlak, ıslak yüzey (fiziksel malzeme) + girişim desenini gösteren renk (dalga leğeni gölge deseni gibi)
+const waterMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.05, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.03, ior: 1.333, specularIntensity: 1 });
+const water = new THREE.Mesh(geo, waterMat);
+water.userData.noCast = true;
 tank.add(water);
 {
-  const rimMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.7 });
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(TW + 1, 0.3, TD + 1), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.9 }));
+  const floor = new THREE.Mesh(new RoundedBoxGeometry(TW + 1, 0.3, TD + 1, 2, 0.08), MT.white);
   floor.position.y = -1.4;
   tank.add(floor);
-  for (const [w, d, x, z] of [[TW + 1, 0.5, 0, TD / 2 + 0.25], [TW + 1, 0.5, 0, -TD / 2 - 0.25], [0.5, TD, TW / 2 + 0.25, 0], [0.5, TD, -TW / 2 - 0.25, 0]]) {
-    const r = new THREE.Mesh(new THREE.BoxGeometry(w, 1.8, d), rimMat);
+  for (const [w, d, x, z] of [[TW + 1.5, 0.5, 0, TD / 2 + 0.25], [TW + 1.5, 0.5, 0, -TD / 2 - 0.25], [0.5, TD, TW / 2 + 0.25, 0], [0.5, TD, -TW / 2 - 0.25, 0]]) {
+    const r = new THREE.Mesh(new RoundedBoxGeometry(w, 1.8, d, 2, 0.08), MT.alu);
     r.position.set(x, -0.6, z);
     tank.add(r);
   }
+  for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, LIFT - 1.55, 16), MT.steel);
+    leg.position.set(x * (TW / 2 - 0.2), -1.55 - (LIFT - 1.55) / 2, z * (TD / 2 - 0.2)); tank.add(leg);
+    const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.5, 0.2, 16), mat.rubber({ scale: U }));
+    foot.position.set(x * (TW / 2 - 0.2), -LIFT + 0.1, z * (TD / 2 - 0.2)); tank.add(foot);
+  }
 }
 // Kaynaklar (titreşen uçlar)
-const srcMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, emissive: 0x854d0e, emissiveIntensity: 0.6, metalness: 0.4, roughness: 0.4 });
+// Titreşimli uçlar: çelik çubuk, plastik bilye uç, üstte küçük titreşim motoru gövdesi
 const srcs = [0, 1].map(() => {
   const g = new THREE.Group();
-  const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 3, 12), srcMat);
+  const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3, 16), MT.steel);
   rod.position.y = 1.5;
-  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), srcMat);
-  g.add(rod, tip);
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.3, 24, 16), mat.plastic({ color: 0xf2c230, gloss: 0.6, scale: U }));
+  const motor = new THREE.Mesh(new RoundedBoxGeometry(0.9, 0.7, 0.7, 2, 0.12), MT.dark);
+  motor.position.y = 3.2;
+  g.add(rod, tip, motor);
   tank.add(g);
   return g;
 });
@@ -89,8 +118,8 @@ const srcLabels = srcs.map((g, i) => sim.label(`K${i + 1}`, { parent: g, positio
 // Gözlem noktası (şamandıra)
 const buoy = new THREE.Group();
 {
-  const b = new THREE.Mesh(new THREE.SphereGeometry(0.35, 16, 12), new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.5 }));
-  const s = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.2, 8), new THREE.MeshStandardMaterial({ color: 0xf8fafc }));
+  const b = new THREE.Mesh(new THREE.SphereGeometry(0.35, 24, 16), mat.plastic({ color: 0xd8342b, gloss: 0.7, scale: U }));
+  const s = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.2, 8), MT.white);
   s.position.y = 0.6;
   buoy.add(b, s);
 }
@@ -105,7 +134,7 @@ mach.frustumCulled = false;
 tank.add(mach);
 // Doppler gözlemcileri
 const obsLabels = [-1, 1].map((s) => {
-  const m = new THREE.Mesh(new THREE.ConeGeometry(0.4, 1.4, 12), new THREE.MeshStandardMaterial({ color: s > 0 ? 0x22c55e : 0x60a5fa }));
+  const m = new THREE.Mesh(new THREE.ConeGeometry(0.4, 1.4, 24), mat.plastic({ color: s > 0 ? 0x22a355 : 0x3b7bd8, gloss: 0.5, scale: U }));
   m.position.set(s * (TW / 2 + 1.3), 0.7, 0);
   tank.add(m);
   const l = sim.label('', { parent: m, position: [0, 1.4, 0], className: 'plain' });
@@ -174,7 +203,7 @@ function dopplerAt(x, z, t) {
 function dopplerStart() { return st.v > 0.001 ? -TW / 2 + 2 : 0; }
 
 // --- Havuz güncelleme ---
-const cLow = new THREE.Color(0x041c36), cHigh = new THREE.Color(0x67d4f5), cNode = new THREE.Color(0x020617), tmpC = new THREE.Color();
+const cLow = new THREE.Color(0x06324a), cHigh = new THREE.Color(0x8fe0f2), cNode = new THREE.Color(0x03101a), tmpC = new THREE.Color();
 function updateWater(t) {
   const arr = P.array, col = colors;
   const w = TAU * st.f, cw = Math.cos(w * t), sw = Math.sin(w * t), age = C * (t - t0);
@@ -202,33 +231,58 @@ function updateWater(t) {
 
 // --- Rezonans: tel / boru ---
 const res = new THREE.Group();
-sim.scene.add(res);
+content.add(res);
 const SL = 16, X0 = -SL / 2, NBEAD = 161;
-const beadMesh = instanced(new THREE.SphereGeometry(1, 10, 8), new THREE.MeshStandardMaterial({ color: 0xf8fafc, metalness: 0.5, roughness: 0.3 }), NBEAD);
+// Tel: çelik tel (sık dizili küçük küreler, sürekli tel görünümü); sonometre: ahşap köprüler, titreştirici, ahşap kutu
+const beadMesh = instanced(new THREE.SphereGeometry(1, 10, 8), MT.steel, NBEAD);
+beadMesh.userData.noAO = true;
 res.add(beadMesh);
 const posts = [X0, X0 + SL].map((x) => {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, 4, 1.2), new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.8 }));
+  const m = new THREE.Mesh(new RoundedBoxGeometry(0.5, 4, 1.2, 2, 0.08), MT.wood);
   m.position.set(x + (x < 0 ? -0.25 : 0.25), 0, 0);
   res.add(m);
   return m;
 });
-const driver = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.8, 16), new THREE.MeshStandardMaterial({ color: 0xfacc15, emissive: 0x713f12, metalness: 0.4 }));
+const driver = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.8, 24), MT.dark);
 res.add(driver);
-const base = new THREE.Mesh(new THREE.BoxGeometry(SL + 3, 0.3, 4), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.9 }));
+const base = new THREE.Mesh(new RoundedBoxGeometry(SL + 3, 0.3, 4, 2, 0.08), MT.wood);
 base.position.y = -2.2;
 res.add(base);
 // Boru
 const PR = 1.5, PCOLS = 64, PRING = 14, NP = PCOLS * PRING;
-const pipe = new THREE.Mesh(new THREE.CylinderGeometry(PR, PR, SL, 40, 1, true),
-  new THREE.MeshStandardMaterial({ color: 0x93c5fd, transparent: true, opacity: 0.13, side: THREE.DoubleSide, depthWrite: false }));
+// Boru: cam (Kundt borusu gibi), iki V-mesnet üstünde; kapalı uçta kauçuk tıpa
+const pipe = glassMesh(new THREE.CylinderGeometry(PR, PR, SL, 64, 1, true), { thickness: 0.004 });
+pipe.material.side = THREE.DoubleSide; pipe.material.depthWrite = false; pipe.material.thickness = 0.1;
 pipe.rotation.z = Math.PI / 2;
 res.add(pipe);
-const cap = new THREE.Mesh(new THREE.CircleGeometry(PR, 32), new THREE.MeshStandardMaterial({ color: 0x64748b, side: THREE.DoubleSide }));
-cap.rotation.y = Math.PI / 2;
-cap.position.x = X0;
+const vblocks = [-SL * 0.33, SL * 0.33].map((x) => {
+  const g = new THREE.Group();
+  const p = new THREE.Mesh(new RoundedBoxGeometry(0.6, 2.9, 1.6, 2, 0.08), MT.wood);
+  p.position.y = -PR - 1.4 + 0.05;
+  const cr = new THREE.Mesh(new THREE.TorusGeometry(PR + 0.08, 0.1, 10, 48, Math.PI), MT.alu);
+  cr.rotation.set(0, Math.PI / 2, Math.PI);
+  g.add(p, cr); g.position.x = x; res.add(g);
+  return g;
+});
+const cap = new THREE.Mesh(new THREE.CylinderGeometry(PR * 0.98, PR * 0.94, 0.5, 40), mat.rubber({ color: 0x2b2c2f, scale: U }));
+cap.rotation.z = Math.PI / 2;
+cap.position.x = X0 - 0.2;
 res.add(cap);
-const air = instanced(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 }), NP);
-air.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(NP * 3), 3).setUsage(THREE.DynamicDrawUsage);
+// Hava parselleri: basınca göre renklenen yumuşak nokta sprite'ları
+const airPos = new Float32Array(NP * 3), airCol = new Float32Array(NP * 3);
+const airGeo = new THREE.BufferGeometry();
+airGeo.setAttribute('position', new THREE.BufferAttribute(airPos, 3).setUsage(THREE.DynamicDrawUsage));
+airGeo.setAttribute('aColor', new THREE.BufferAttribute(airCol, 3).setUsage(THREE.DynamicDrawUsage));
+const ptScale = { value: 400 };
+const air = new THREE.Points(airGeo, new THREE.ShaderMaterial({
+  uniforms: { uScale: ptScale, uSize: { value: 0.28 * U } },
+  vertexShader: `attribute vec3 aColor; uniform float uScale, uSize; varying vec3 vC;
+    void main(){ vC = aColor; vec4 mv = modelViewMatrix*vec4(position, 1.0); gl_PointSize = uSize*uScale/max(-mv.z, 0.001); gl_Position = projectionMatrix*mv; }`,
+  fragmentShader: `varying vec3 vC; void main(){ float r = length(gl_PointCoord - 0.5)*2.0; if (r > 1.0) discard;
+    float a = smoothstep(1.0, 0.35, r); gl_FragColor = vec4(vC*1.3, a*0.9); }`,
+  transparent: true, depthWrite: false,
+}));
+air.frustumCulled = false; air.renderOrder = 3;
 res.add(air);
 const AIRY = new Float32Array(NP), AIRZ = new Float32Array(NP);
 for (let c = 0; c < PCOLS; c++) for (let j = 0; j < PRING; j++) {
@@ -242,7 +296,7 @@ envGeo.setAttribute('position', new THREE.BufferAttribute(envPos, 3).setUsage(TH
 const envLines = new THREE.LineSegments(envGeo, new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.22 }));
 envLines.frustumCulled = false;
 res.add(envLines);
-const nodeMesh = instanced(new THREE.TorusGeometry(0.28, 0.06, 8, 20), new THREE.MeshBasicMaterial({ color: 0xef4444 }), 16);
+const nodeMesh = instanced(new THREE.TorusGeometry(0.28, 0.06, 8, 20), mat.glow({ color: 0xef4444, intensity: 2 }), 16);
 res.add(nodeMesh);
 const resLabel = sim.label('', { parent: res, position: [0, 3.4, 0], className: 'big' });
 
@@ -286,14 +340,16 @@ function resUpdate(t) {
       const u = i / (NBEAD - 1);
       let y = 0, e = 0;
       for (let m = 1; m <= MODES; m++) { const sh = shape(m, u); y += AMP[m] * sh * Math.cos(wv * t - DEL[m]); e += AMP[m] * Math.abs(sh); }
-      mat(a, i * 16, X0 + u * SL, clamp(y, -1.3, 1.3) * Y, 0, 0.09);
+      wm(a, i * 16, X0 + u * SL, clamp(y, -1.3, 1.3) * Y, 0, 0.09);
       envPos[i * 6] = X0 + u * SL; envPos[i * 6 + 1] = Math.min(e, 1.3) * Y;
       envPos[i * 6 + 3] = X0 + u * SL; envPos[i * 6 + 4] = -Math.min(e, 1.3) * Y;
     }
     beadMesh.instanceMatrix.needsUpdate = true;
     driver.position.set(X0 + 0.6, -1.2 + 0.15 * Math.cos(wv * t), 0);
   } else {
-    const a = air.instanceMatrix.array, col = air.instanceColor.array;
+    const a = airPos, col = airCol;
+    const vp = sim.renderer.getDrawingBufferSize(_vp2);
+    ptScale.value = vp.y / (2 * Math.tan(THREE.MathUtils.degToRad(sim.camera.fov / 2)));
     for (let c = 0; c < PCOLS; c++) {
       const u = (c + 0.5) / PCOLS;
       let s = 0, p = 0;
@@ -305,12 +361,12 @@ function resUpdate(t) {
       heatColor(clamp(0.5 + p * ps, 0, 1), tmpC);
       for (let j = 0; j < PRING; j++) {
         const i = c * PRING + j;
-        mat(a, i * 16, x, AIRY[i], AIRZ[i], 0.1);
+        a[i * 3] = x; a[i * 3 + 1] = AIRY[i]; a[i * 3 + 2] = AIRZ[i];
         col[i * 3] = tmpC.r; col[i * 3 + 1] = tmpC.g; col[i * 3 + 2] = tmpC.b;
       }
     }
-    air.instanceMatrix.needsUpdate = true;
-    air.instanceColor.needsUpdate = true;
+    airGeo.attributes.position.needsUpdate = true;
+    airGeo.attributes.aColor.needsUpdate = true;
     for (let i = 0; i < NBEAD; i++) {
       const u = i / (NBEAD - 1);
       let e = 0;
@@ -328,13 +384,14 @@ function resUpdate(t) {
       const u = st.medium === 'tel' ? s / dominant : st.medium === 'acik' ? (s + 0.5) / dominant : (2 * s) / (2 * dominant - 1);
       if (u < -1e-6 || u > 1 + 1e-6) continue;
       if (st.medium === 'tel' && s > dominant) break;
-      mat(na, nc++ * 16, X0 + u * SL, pipeMode ? -PR - 1.4 : 0, 0, 1);
+      wm(na, nc++ * 16, X0 + u * SL, pipeMode ? -PR - 1.4 : 0, 0, 1);
     }
   }
   nodeMesh.count = nc;
   nodeMesh.instanceMatrix.needsUpdate = true;
 }
-function mat(a, o, x, y, z, s) {
+const _vp2 = new THREE.Vector2();
+function wm(a, o, x, y, z, s) {
   a[o] = s; a[o + 1] = 0; a[o + 2] = 0; a[o + 3] = 0; a[o + 4] = 0; a[o + 5] = s; a[o + 6] = 0; a[o + 7] = 0;
   a[o + 8] = 0; a[o + 9] = 0; a[o + 10] = s; a[o + 11] = 0; a[o + 12] = x; a[o + 13] = y; a[o + 14] = z; a[o + 15] = 1;
 }
@@ -423,7 +480,8 @@ function updateMach() {
 // --- Tıklama: gözlem noktası ---
 sim.onClick([water], (hit) => {
   if (st.mode === 'rezonans') return;
-  st.probe.set(clamp(hit.point.x, -TW / 2 + 0.5, TW / 2 - 0.5), clamp(hit.point.z, -TD / 2 + 0.5, TD / 2 - 0.5));
+  const lp = content.worldToLocal(hit.point.clone());
+  st.probe.set(clamp(lp.x, -TW / 2 + 0.5, TW / 2 - 0.5), clamp(lp.z, -TD / 2 + 0.5, TD / 2 - 0.5));
   probeChart.clear();
   sim.toast('Gözlem noktası taşındı', 'good');
 });
@@ -559,8 +617,10 @@ function layoutRes() {
   const pipeMode = isPipe();
   beadMesh.visible = !pipeMode; posts.forEach((p) => (p.visible = !pipeMode)); driver.visible = !pipeMode;
   pipe.visible = air.visible = pipeMode;
+  vblocks.forEach((v) => (v.visible = pipeMode));
   cap.visible = st.medium === 'kapali';
   base.position.y = pipeMode ? -PR - 2.8 : -2.2;
+  res.position.y = -LIFT - (base.position.y - 0.15);   // sonometre kutusu tezgâha otursun
   sT.el.style.display = pipeMode ? 'none' : '';
   sTemp.el.style.display = pipeMode ? '' : 'none';
   if (st.r > rMax()) sR.set(rMax(), true);
@@ -585,8 +645,8 @@ function setMode(m) {
   srcX = dopplerStart();
   probeChart.clear();
   dirty = true;
-  if (m === 'rezonans') { sim.moveCamera([0, 4, 19], [0, 0.3, 0]); layoutRes(); }
-  else sim.moveCamera([0, 22, 21], [0, -1, 1]);
+  if (m === 'rezonans') { layoutRes(); sim.moveCamera(W([0, 4 + res.position.y, 19]), W([0, 0.3 + res.position.y, 0])); }
+  else sim.moveCamera(W([0, 22, 21]), W([0, -1, 1]));
 }
 
 sim.onReset(() => { t0 = st.mode === 'girisim' ? -2.5 : 0; srcX = dopplerStart(); probeChart.clear(); });

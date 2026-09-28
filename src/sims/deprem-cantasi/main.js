@@ -1,10 +1,12 @@
 // Deprem Çantası Hazırlama — sınırlı ağırlık/hacimle çanta hazırla, 72 saatlik senaryoda test et.
-import { createSim, THREE, RoundedBoxGeometry, fmt, clamp, lerp } from '@core';
+import { createSim, THREE, RoundedBoxGeometry, fmt, clamp, lerp, mat as M, procedural, textTexture, BufferGeometryUtils } from '@core';
+import { createCity } from './city.js';
 
 const sim = createSim({
-  background: 0x16213a,
-  camera: { position: [0, 10.5, 10], target: [0, 0, 1.1], fov: 44 },
-  controls: { minDistance: 6, maxDistance: 22, maxPolarAngle: Math.PI * 0.46 },
+  sky: { elevation: 30, azimuth: 150, clouds: 0.35, haze: 1, visibility: 6000 },
+  camera: { position: [0, 2.86, 2.0], target: [0, 0.76, 0.22], fov: 44, near: 0.02, far: 20000 },
+  controls: { minDistance: 1.2, maxDistance: 4.2, maxPolarAngle: Math.PI * 0.46 },
+  look: { aoRadius: 0.08 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Masada bir deprem sonrası işine yarayabilecek (ve yaramayacak) eşyalar var. Her birinin <b>ağırlığı</b> ve
@@ -28,7 +30,12 @@ const sim = createSim({
 });
 
 // --- Malzeme / geometri yardımcıları ---
-const std = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05, ...o });
+// Eşya malzemeleri: saydam/ışıyan parçalar dışında motorun plastik ve fırçalanmış metal malzemeleri (mikro doku, parlaklık)
+const std = (color, o = {}) => {
+  if (o.transparent || o.side || o.emissive) return new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05, ...o });
+  if ((o.metalness ?? 0) > 0.4) return M.brushedMetal({ color, rough: o.roughness ?? 0.35 });
+  return M.plastic({ color, gloss: clamp(1.1 - (o.roughness ?? 0.6), 0, 1) });
+};
 function mesh(geo, mat, x = 0, y = 0, z = 0) {
   const m = new THREE.Mesh(geo, mat);
   m.position.set(x, y, z);
@@ -90,29 +97,76 @@ const ITEMS = [
 ];
 const byId = Object.fromEntries(ITEMS.map((it) => [it.id, it]));
 
-// --- Sahne: oda, masa, çanta ---
-const floor = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), std(0x3a2f2a, { roughness: 0.95 }));
-floor.rotation.x = -Math.PI / 2;
-floor.position.y = -2.6;
-sim.scene.add(floor);
-const wall = new THREE.Mesh(new THREE.PlaneGeometry(60, 20), std(0x334155, { roughness: 1 }));
-wall.position.set(0, 7, -8);
-sim.scene.add(wall);
-
-const TABLE = { w: 12.8, d: 9.2 };
-const table = new THREE.Group();
-const wood = std(0x9a6b43, { roughness: 0.8 });
-table.add(rbox(TABLE.w, 0.3, TABLE.d, wood, 0, -0.15, 0, 0.08));
-for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) table.add(mesh(new THREE.BoxGeometry(0.3, 2.45, 0.3), std(0x7c5433), x * (TABLE.w / 2 - 0.5), -1.45, z * (TABLE.d / 2 - 0.5)));
-table.position.z = 0.7;
-sim.scene.add(table);
+// --- Sahne (metre): oturma odası; pencere, parke, halı, gerçek masa. Eşyalar ve çanta W grubunda (1 birim = 0,2 m) ---
+const KS = 0.2, TOPY = 0.76;
+let cityMesh = null, lastEl = 30;
+const W = new THREE.Group();
+W.scale.setScalar(KS); W.position.set(0, TOPY, 0.14);
+sim.scene.add(W);
+{
+  const scene = sim.scene;
+  const add = (o, cast = true) => { o.castShadow = cast; o.receiveShadow = true; o.userData.noFit = true; scene.add(o); return o; };
+  // parke: tahtalar uzunlamasına (halka deseni tahta boyunca)
+  const planks = [];
+  for (let i = 0; i < 44; i++) planks.push(new THREE.BoxGeometry(0.16, 1.6, 0.02).translate(-3.5 + i * 0.16, ((i * 7) % 5) * 0.32, 0).toNonIndexed());
+  const pg = BufferGeometryUtils.mergeGeometries(planks), oak = M.wood({ color: 0x8a6a4a, varnish: 0.5, scale: 1.3 });
+  for (let r = -3; r <= 3; r++) { const f = add(new THREE.Mesh(pg, oak), false); f.rotation.x = -Math.PI / 2; f.position.set(0, -0.01 * ((r + 3) % 2), r * 1.6); f.userData.noCast = true; }
+  // halı
+  const rug = procedural({ key: 'dc-rug', bump: 0.03, params: { color: 0x7a3b2e, roughness: 0.95 },
+    pattern: `
+      vec2 q = abs(p.xz);
+      float border = step(1.05, max(q.x/1.3, q.y/0.95)*1.2);
+      float motif = step(0.5, fract(q.x*3.0 + q.y*3.0))*step(max(q.x/1.3, q.y/0.95)*1.2, 0.95);
+      float n = fbm3(p*18.0, 3);
+      col = mix(col, vec3(0.62, 0.48, 0.3), border*0.7);
+      col = mix(col, col*0.7, motif*0.35);
+      col *= 0.82 + 0.3*n; h = n;` });
+  add(new THREE.Mesh(new RoundedBoxGeometry(3.0, 0.012, 2.3, 1, 0.004).translate(0, 0.006, 0.2), rug), false);
+  // duvarlar: sıva, süpürgelik; arka duvarda pencere (dışarıda şehir)
+  const plaster = procedural({ key: 'dc-plaster', bump: 0.012, params: { color: 0xd9d2c4, roughness: 0.93 },
+    pattern: `float n = fbm3(p*2.5, 4); col *= 0.9 + 0.14*n; h = n;` });
+  const WZ = -1.6, H = 2.7;
+  add(new THREE.Mesh(new THREE.BoxGeometry(2.0, H, 0.12).translate(-2.5, H / 2, WZ), plaster));
+  add(new THREE.Mesh(new THREE.BoxGeometry(2.4, H, 0.12).translate(2.3, H / 2, WZ), plaster));
+  add(new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.9, 0.12).translate(0.1, 0.45, WZ), plaster));
+  add(new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.5, 0.12).translate(0.1, H - 0.25, WZ), plaster));
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.12, H, 4.5).translate(-3.5, H / 2, 0.6), plaster));
+  const pvc = M.plastic({ color: 0xf2f2ee, gloss: 0.4 });
+  for (const [w, h, x, y] of [[2.0, 0.07, 0.1, 0.93], [2.0, 0.07, 0.1, 2.17], [0.07, 1.3, -0.87, 1.55], [0.07, 1.3, 1.07, 1.55], [0.06, 1.3, 0.1, 1.55]]) add(new THREE.Mesh(new RoundedBoxGeometry(w, h, 0.09, 1, 0.01).translate(x, y, WZ), pvc), false);
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.2), new THREE.MeshStandardMaterial({ color: 0xcfe0ea, roughness: 0.02, transparent: true, opacity: 0.12 }));
+  glass.position.set(0.1, 1.55, WZ); glass.userData.noCast = true; glass.userData.noFit = true; scene.add(glass);
+  add(new THREE.Mesh(new RoundedBoxGeometry(2.1, 0.03, 0.26, 1, 0.01).translate(0.1, 0.9, WZ + 0.08), M.ceramic({ color: 0xe9e4da })), false);
+  const skirt = M.paintedMetal({ color: 0xf0ede6, wear: 0.02 });
+  add(new THREE.Mesh(new THREE.BoxGeometry(7, 0.08, 0.015).translate(0, 0.04, WZ + 0.067), skirt), false);
+  // dışarısı: sokak ve karşı binalar
+  const street = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000).rotateX(-Math.PI / 2), M.asphalt({ color: 0x45464a }));
+  street.position.y = -9; street.userData.noFit = true; street.userData.noCast = true; scene.add(street);
+  scene.add(cityMesh = createCity({ ground: -9, rect: [-900, -1500, 900, -40], pitch: 70, seed: 31, lit: 0.05, glow: 0.8, avoid: (x, z) => z > -60 && Math.abs(x) < 25 }));
+  // masa: ceviz tabla (tahta boyunca damar), siyah çelik ayaklar
+  const TW = 2.7, TD = 1.95;
+  const top = new THREE.Mesh(new RoundedBoxGeometry(0.045, TW, TD, 2, 0.01), M.wood({ color: 0x7b5436, varnish: 0.6, scale: 1.2 }));
+  top.rotation.z = Math.PI / 2; top.position.set(0, TOPY - 0.0225, 0.14); add(top);
+  const steel = M.paintedMetal({ color: 0x22252a, wear: 0.1 });
+  for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) add(new THREE.Mesh(new RoundedBoxGeometry(0.05, TOPY - 0.045, 0.05, 1, 0.008).translate(x * (TW / 2 - 0.12), (TOPY - 0.045) / 2, 0.14 + z * (TD / 2 - 0.12)), steel));
+  add(new THREE.Mesh(new THREE.BoxGeometry(TW - 0.24, 0.06, 0.03).translate(0, TOPY - 0.08, 0.14 - TD / 2 + 0.12), steel));
+  add(new THREE.Mesh(new THREE.BoxGeometry(TW - 0.24, 0.06, 0.03).translate(0, TOPY - 0.08, 0.14 + TD / 2 - 0.12), steel));
+  // köşede saksı bitkisi ve duvarda deprem hazırlık afişi (basılı)
+  const poster = new THREE.Mesh(new THREE.PlaneGeometry(0.42, 0.6), new THREE.MeshStandardMaterial({ roughness: 0.85, map: (() => {
+    const c = document.createElement('canvas'); c.width = 420; c.height = 600; const g = c.getContext('2d');
+    g.fillStyle = '#f4efe4'; g.fillRect(0, 0, 420, 600); g.fillStyle = '#c2410c'; g.fillRect(0, 0, 420, 110);
+    g.fillStyle = '#fff'; g.font = '700 44px system-ui, sans-serif'; g.textAlign = 'center'; g.fillText('ÇÖK', 70, 72); g.fillText('KAPAN', 210, 72); g.fillText('TUTUN', 350, 72);
+    g.fillStyle = '#1f2937'; g.font = '600 26px system-ui, sans-serif'; g.textAlign = 'left';
+    ['Afet ve acil durum çantası', '• Su ve bozulmayan yiyecek', '• El feneri, yedek pil', '• Düdük, ilk yardım', '• Belgelerin fotokopisi', '• Nakit, battaniye'].forEach((t, i) => g.fillText(t, 26, 170 + i * 58));
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; })() }));
+  poster.position.set(-3.43, 1.55, 0.4); poster.rotation.y = Math.PI / 2; scene.add(poster);
+}
 
 // Çanta
 const BAG_POS = new THREE.Vector3(0, 0, -2.4);
 const bag = new THREE.Group();
 bag.position.copy(BAG_POS);
-const bagMat = std(0xea580c, { roughness: 0.85 });
-const bagDark = std(0x9a3412, { roughness: 0.85 });
+const bagMat = M.fabric({ color: 0xd9560f });
+const bagDark = M.fabric({ color: 0x7c2d12 });
 const bagBody = new THREE.Group();
 bagBody.add(rbox(2.0, 2.4, 1.2, bagMat, 0, 1.2, 0, 0.35));
 bagBody.add(rbox(1.5, 1.0, 0.4, bagDark, 0, 0.75, 0.66, 0.15));
@@ -124,13 +178,14 @@ for (const x of [-0.55, 0.55]) bagBody.add(rbox(0.22, 2.0, 0.1, bagDark, x, 1.2,
 // Yansıtıcı şerit (gece görünürlüğü)
 bagBody.add(rbox(1.52, 0.08, 0.02, std(0xe5e7eb, { emissive: 0x555555, metalness: 0.5 }), 0, 0.98, 0.87, 0.01));
 bag.add(bagBody);
-sim.scene.add(bag);
+bag.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+W.add(bag);
 const bagLabel = sim.label('', { parent: bag, position: [0, 3.25, 0], className: 'big' });
 
 // Fener ışığı (gece, fener çantadaysa)
-const torch = new THREE.PointLight(0xffe7a3, 0, 14, 1.5);
+const torch = new THREE.PointLight(0xffe7a3, 0, 4, 2);
 torch.position.set(BAG_POS.x - 1.2, 2.2, BAG_POS.z + 1.2);
-sim.scene.add(torch);
+W.add(torch);
 
 // --- Eşyaları masaya diz ---
 const COLS = 6, SX = 1.95, SZ = 1.55, X0 = -4.875, Z0 = -0.2;
@@ -144,7 +199,8 @@ ITEMS.forEach((it, i) => {
   g.position.copy(it.home);
   g.rotation.y = (i * 0.37) % 0.5 - 0.25;
   g.traverse((o) => { if (o.isMesh) { o.userData.item = it; if (o.material.emissive) o.userData.baseEm = o.material.emissive.getHex(); } });
-  sim.scene.add(g);
+  g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  W.add(g);
   it.group = g;
   const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.25, side: THREE.DoubleSide }));
   ring.rotation.x = -Math.PI / 2;
@@ -154,10 +210,10 @@ ITEMS.forEach((it, i) => {
   hit.rotation.x = -Math.PI / 2;
   hit.position.copy(it.home).setY(0.02);
   hit.userData.item = it;
-  sim.scene.add(ring, hit);
+  W.add(ring, hit);
   it.ring = ring;
   clickTargets.push(g, hit);
-  it.label = sim.label(it.short, { position: [it.home.x, 0, it.home.z + 0.62], className: 'plain' });
+  it.label = sim.label(it.short, { parent: W, position: [it.home.x, 0, it.home.z + 0.62], className: 'plain' });
   it.label.el.style.fontSize = '10.5px';
   it.label.el.style.fontWeight = '600';
   it.packed = false;
@@ -528,18 +584,13 @@ sim.onRender((dt) => {
     s.it.group.position.set(s.x, 1.6 + Math.sin(s.t * 3) * 0.15, BAG_POS.z + 0.8);
     s.it.group.rotation.y += dt * 1.5;
   }
-  // Işık
-  const sun = sim.scene.userData.sun, hemi = sim.scene.userData.hemi;
+  // Işık: gün ışığı gökyüzünden (güneş yüksekliği saate göre), gece yalnız fener ve karşı binaların pencereleri
   const dl = S.phase === 'pack' ? -1 : daylight(S.hour);
-  if (dl < 0) {
-    bgc.copy(skyPack); hemi.intensity = 1.4; sun.intensity = 2.2; torch.intensity = 0;
-  } else {
-    bgc.copy(skyNight).lerp(skyDay, dl);
-    hemi.intensity = lerp(0.25, 1.4, dl);
-    sun.intensity = lerp(0.12, 2.2, dl);
-    torch.intensity = has('fener') && S.health > 0 ? lerp(18, 0, dl) * (0.9 + 0.1 * Math.sin(tAcc * 7)) : 0;
-  }
-  sim.scene.background.copy(bgc);
+  const el = dl < 0 ? 30 : lerp(-7, 32, dl);
+  if (Math.abs(el - lastEl) > 0.4) { sim.sky.set({ elevation: el }); lastEl = el; }
+  const night = dl < 0 ? 0 : 1 - dl;
+  if (cityMesh) { const u = cityMesh.material.userData.uniforms; u.uLit.value = 0.05 + 0.35 * night; u.uGlow.value = 0.8 + 2.2 * night; }
+  torch.intensity = dl >= 0 && has('fener') && S.health > 0 ? lerp(2.8, 0, dl) * (0.9 + 0.1 * Math.sin(tAcc * 7)) : 0;
 });
 
 // --- Tıklama ve üzerine gelme ---

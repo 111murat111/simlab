@@ -1,10 +1,18 @@
 // Bir Lokmanın Yolculuğu — çocuklar için sindirim sistemi: peristaltizmle ilerleyen lokma, organ durakları, kana geçen besinler.
-import { createSim, THREE, clamp, lerp, fmt, pick } from '@core';
+import { createSim, THREE, clamp, lerp, fmt, pick, mat, procedural, RoundedBoxGeometry, textPlane } from '@core';
+import { blobGeometry, loftTube, sdfMesh, sEllipsoid, sCone , tissue } from './bio.js';
+import { STAND, bodyItems } from './human.js';
+import { createClassroom, classroomFloor } from './classroom.js';
+
+// Ölçek: sindirim düzeni 'birim' uzayında (1 birim = K m ≈ 8,7 cm); gerçek boyutlu yetişkin gövdesine oturtulur
+const K = 0.0868, OFF = [0, 1.1206, 0.0202];
+const U2W = (a) => [a[0] * K + OFF[0], a[1] * K + OFF[1], a[2] * K + OFF[2]];
+const HOME = [[0.3, 1.36, 1.78], [0, 1.2, 0.02]];   // tüm gövde + kaide üstü ve isim levhası kadrajda
 
 const sim = createSim({
-  background: 0x10213a,
-  camera: { position: [0, 1.2, 13], target: [0, 1.0, 0], fov: 45 },
-  controls: { minDistance: 3, maxDistance: 22, maxPolarAngle: Math.PI * 0.85, minPolarAngle: Math.PI * 0.15 },
+  studio: { mood: 'lab', color: 0x6f7880, warmth: 0.15, key: { el: 40, az: 150, power: 1.3 }, radius: 10, height: 6, floorMaterial: classroomFloor() },
+  camera: { position: HOME[0], target: HOME[1], fov: 45, near: 0.02, far: 60 },
+  controls: { minDistance: 0.25, maxDistance: 2.4, maxPolarAngle: Math.PI * 0.85, minPolarAngle: Math.PI * 0.15 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Yediğin bir lokma, ağızdan başlayıp yaklaşık <b>8–9 metrelik</b> bir tüpten geçer. Tüpün kasları dalga gibi kasılarak
@@ -65,59 +73,144 @@ function hours(min) {
   return `${fmt(h, h % 1 ? 1 : 0)} saat`;
 }
 
-// --- Beden ---
-const skin = new THREE.MeshStandardMaterial({ color: 0xffc9a3, roughness: 0.6, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide });
+// Ceviz kaplama (gerçek ölçek): dikey damar, 2–4 mm aralıklı lif çizgileri, gözenek, cila
+function walnut(color = 0x5c4331, key = 'lok-walnut') {
+  // Ceviz kaplama: düz kesim; ≈2–4 mm'lik ince lif figürü, düşük kontrast, yarı mat vernik
+  return procedural({
+    key, physical: true, bump: 0.0008, params: { color, roughness: 0.46, clearcoat: 0.55, clearcoatRoughness: 0.28 },
+    pattern: `
+      float a = p.x + p.z;
+      float wav = fbm3(vec3(a*3.0, p.y*0.5, 3.0), 3);
+      float fig = a*95.0 + wav*7.0 + 0.6*sin(p.y*4.0 + a*9.0);
+      float band = smoothstep(0.2, 0.9, 0.5 + 0.5*sin(fig*6.2832));
+      float fine = vn3(vec3(a*700.0, p.y*14.0, 1.0));
+      float pore = smoothstep(0.8, 0.92, vn3(vec3(a*420.0, p.y*30.0, 5.0)));
+      float flake = fbm3(vec3(a*5.0, p.y*1.0, 9.0), 3);
+      col *= 0.9 + 0.08*band + 0.05*(fine - 0.5) + 0.1*(flake - 0.5);
+      col = mix(col, vec3(dot(col, vec3(0.33))), 0.15);
+      col = mix(col, col*vec3(0.75, 0.68, 0.62), pore*0.4);
+      rough = 0.42 + 0.14*pore;
+      h = band*0.3 + fine*0.4 - pore*0.4;`,
+  });
+}
+
+// --- Beden: müze tipi "cam insan" gövde modeli (kolsuz torso + baş, gerçek boyut) kaide üstünde ---
+// Sindirim düzeni birim uzayında kurulur (1 birim = K m); root grubu bunu metreye çevirir.
+const LOWQ = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+// Arka plan: fen sınıfı (bulanık duvarlar, alan derinliği hissi)
+createClassroom(sim.scene);
+const root = new THREE.Group();
+root.scale.setScalar(K);
+root.position.set(...OFF);
+sim.scene.add(root);
+const toU = (g) => g.translate(-OFF[0], -OFF[1], -OFF[2]).scale(1 / K, 1 / K, 1 / K); // ayakta metre → birim
 {
-  const prof = [[0.001, -3.5], [1.3, -3.3], [1.95, -2.4], [2.0, -1.0], [1.8, 0.2], [1.9, 1.6], [2.2, 2.8], [2.0, 3.6], [1.0, 3.95], [0.55, 4.1], [0.5, 4.4], [0.001, 4.45]].map(([r, y]) => new THREE.Vector2(r, y));
-  const torso = new THREE.Mesh(new THREE.LatheGeometry(new THREE.SplineCurve(prof).getPoints(40), 40).scale(1, 1, 0.55), skin);
-  torso.renderOrder = 5;
-  sim.scene.add(torso);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(1.15, 32, 24), skin);
-  head.position.set(0, 5.35, 0);
-  head.renderOrder = 5;
-  sim.scene.add(head);
-  const eyeW = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 }), eyeB = new THREE.MeshStandardMaterial({ color: 0x1f2937 });
-  for (const x of [-0.4, 0.4]) {
-    const e = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), eyeW); e.position.set(x, 5.7, 0.98); sim.scene.add(e);
-    const p = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 8), eyeB); p.position.set(x, 5.72, 1.15); sim.scene.add(p);
-    const ch = new THREE.Mesh(new THREE.CircleGeometry(0.18, 20), new THREE.MeshBasicMaterial({ color: 0xff8fa3, transparent: true, opacity: 0.6 }));
-    ch.position.set(x * 1.6, 5.25, 0.95); ch.lookAt(x * 4, 5.25, 5); sim.scene.add(ch);
+  // Kaide: ceviz blok, fırçalı çelik üst plaka, pirinç isim levhası
+  const TOP = 0.8;
+  const block = new THREE.Mesh(new RoundedBoxGeometry(0.44, TOP - 0.012, 0.34, 4, 0.02), walnut());
+  block.position.set(0, (TOP - 0.012) / 2, -0.01);
+  // süpürgelik/kaide ayağı: biraz geniş, koyu, pahlı taban bloğu (gövdeyi yerden ayırır)
+  const plinth = new THREE.Mesh(new RoundedBoxGeometry(0.47, 0.06, 0.37, 3, 0.012), walnut(0x3e2c20, 'lok-walnut-dark'));
+  plinth.position.set(0, 0.03, -0.01);
+  plinth.castShadow = true; plinth.receiveShadow = true;
+  const plate = new THREE.Mesh(new RoundedBoxGeometry(0.46, 0.012, 0.36, 3, 0.004), mat.brushedMetal({ color: 0xc9ccd0, scale: 4 }));
+  plate.position.set(0, TOP - 0.006, -0.01);
+  const brass = new THREE.Mesh(new RoundedBoxGeometry(0.2, 0.05, 0.004, 2, 0.0015), mat.brushedMetal({ color: 0xc8a25a, scale: 6, rough: 0.25 }));
+  brass.position.set(0, TOP - 0.08, 0.1605);
+  const txt = textPlane('SİNDİRİM SİSTEMİ', 0.016, { color: '#3b2a12' });
+  txt.position.set(0, TOP - 0.08, 0.163);
+  sim.scene.add(block, plinth, plate, brass, txt);
+  // Müze vitrini gibi kaideyi önden yumuşakça aydınlatan spot (kaide ve levha karanlıkta kalmasın)
+  const spot = new THREE.SpotLight(0xfff0dc, 5, 4, 0.5, 0.8, 2);
+  spot.position.set(0.35, 1.25, 1.5); spot.target.position.set(0, 0.55, 0);
+  sim.scene.add(spot, spot.target);
+}
+// Cam gövde kabuğu: SDF beden (kolsuz, kalçadan kesik), gerçek kırılmalı ince cam
+const shellItems = bodyItems(STAND, { build: 1.2, parts: { arms: false }, floorCut: 0.8 });
+const shellRaw = sdfMesh(shellItems, { cell: LOWQ ? 0.011 : 0.0075 });
+{ // gövde (boyun altı) organlara yer açmak için biraz geniş: stilize müze modeli oranı
+  const p = shellRaw.attributes.position;
+  for (let i = 0; i < p.count; i++) { const f = THREE.MathUtils.smoothstep(p.getY(i), 1.4, 1.47); const w = 1 - f; p.setXYZ(i, p.getX(i) * (1 + 0.08 * w), p.getY(i), p.getZ(i) * (1 + 0.07 * w)); }
+  shellRaw.computeVertexNormals();
+}
+const shellGeo = toU(shellRaw);
+// İnce cam kabuk: yalnız ön yüz çizilir (çift geçiş yok); içerisi olduğu gibi görünür, yansıma ve kenar koyuluğu
+// Fresnel ile artar (önceden çarpılmış alfa: arka plan × (1 − α) + yansıma)
+const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x000000, roughness: 0.04, metalness: 0, ior: 1.5, specularIntensity: 1,
+  transparent: true, depthWrite: false, side: THREE.FrontSide, envMapIntensity: 1.5,
+  blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor, blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor });
+glassMat.onBeforeCompile = (sh) => {
+  sh.fragmentShader = sh.fragmentShader.replace('#include <opaque_fragment>', `
+    float gcv = clamp(abs(dot(normalize(vViewPosition), normal)), 0.0, 1.0);
+    float gF = pow(1.0 - gcv, 3.0);
+    // kenarda camın içinden geçen yol uzar: hafif mavi-gri soğurma + ince parlak kontur
+    float gA = 0.015 + 0.42*gF;
+    outgoingLight += vec3(0.62, 0.72, 0.8)*0.1*gF;
+    gl_FragColor = vec4(outgoingLight, gA);`);
+};
+glassMat.customProgramCacheKey = () => 'lokma-thin-glass';
+const shell = new THREE.Mesh(shellGeo, glassMat);
+shell.userData.noCast = true; shell.userData.noAO = true; shell.castShadow = false;
+shell.renderOrder = 5;
+root.add(shell);
+// Gözler: göz yuvasında göz küreleri (cam kabuğun içinde)
+{
+  const scl = mat.ceramic({ color: 0xf1ece4 });
+  const iris = mat.plastic({ color: 0x5a3a1c, gloss: 0.9 });
+  const pup = mat.plastic({ color: 0x0b0b0c, gloss: 1 });
+  for (const s of [-1, 1]) {
+    const c = new THREE.Vector3(0.031 * s, 1.626, 0.064).sub(new THREE.Vector3(...OFF)).divideScalar(K);
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.0118 / K, 32, 20), scl);
+    e.position.copy(c); root.add(e);
+    const ir = new THREE.Mesh(new THREE.SphereGeometry(0.0119 / K, 32, 8, 0, Math.PI * 2, 0, 0.55), iris);
+    ir.rotation.x = Math.PI / 2; ir.position.copy(c); root.add(ir);
+    const pp = new THREE.Mesh(new THREE.SphereGeometry(0.01195 / K, 24, 6, 0, Math.PI * 2, 0, 0.24), pup);
+    pp.rotation.x = Math.PI / 2; pp.position.copy(c); root.add(pp);
   }
 }
-// Ağız: dişler + dil + oynayan çene
+// Ağız: dişler + dil + oynayan çene (birim uzayı)
 const jaw = new THREE.Group();
 jaw.position.set(0, 5.1, 0.2);
-sim.scene.add(jaw);
+root.add(jaw);
 {
-  const tooth = new THREE.BoxGeometry(0.1, 0.1, 0.08), tm = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 });
-  for (let i = 0; i < 6; i++) {
-    const a = -0.9 + (i / 5) * 1.8;
-    const up = new THREE.Mesh(tooth, tm); up.position.set(Math.sin(a) * 0.4, 5.22, 0.2 + Math.cos(a) * 0.55); sim.scene.add(up);
-    const lo = new THREE.Mesh(tooth, tm); lo.position.set(Math.sin(a) * 0.38, 0.0, Math.cos(a) * 0.52); jaw.add(lo);
+  const tm = mat.ceramic({ color: 0xf0e8d6 });
+  const gum = tissue({ color: 0xc8606c, veins: 0.1, scale: 3 });
+  const N = 12;
+  for (let i = 0; i < N; i++) {
+    const a = -1.15 + (i / (N - 1)) * 2.3, back = Math.abs(a) > 0.6;
+    const w = back ? 0.11 : 0.085;
+    const tooth = new RoundedBoxGeometry(w, 0.1, back ? 0.1 : 0.05, 2, 0.02);
+    const ux = Math.sin(a) * 0.27, uz = 0.2 + Math.cos(a) * 0.46;
+    const up = new THREE.Mesh(tooth, tm); up.position.set(ux, 5.245, uz); up.rotation.y = a; root.add(up);
+    const lo = new THREE.Mesh(tooth, tm); lo.position.set(ux * 0.96, 0.045, uz - 0.2 - 0.02); lo.rotation.y = a; jaw.add(lo);
   }
-  const tongue = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 12), new THREE.MeshStandardMaterial({ color: 0xf06a8a, roughness: 0.5 }));
-  tongue.scale.set(0.3, 0.08, 0.45); tongue.position.set(0, 0.02, 0.15);
+  // diş etleri (at nalı)
+  const arch = (y, sc, zo) => new THREE.CatmullRomCurve3(Array.from({ length: 9 }, (_, i) => { const a = -1.2 + i * 0.3; return new THREE.Vector3(Math.sin(a) * 0.27 * sc, y, zo + Math.cos(a) * 0.46 * sc); }));
+  root.add(new THREE.Mesh(loftTube(arch(5.3, 1, 0.2), () => 0.055, { segs: 40, radial: 10 }), gum));
+  jaw.add(new THREE.Mesh(loftTube(arch(-0.01, 0.96, 0.0), () => 0.055, { segs: 40, radial: 10 }), gum));
+  const tongue = new THREE.Mesh(blobGeometry(1, { detail: 10, amp: 0.05, freq: 2 }), tissue({ color: 0xc86a78, veins: 0.15, scale: 4 }));
+  tongue.scale.set(0.24, 0.08, 0.36); tongue.position.set(0, 0.06, 0.08);
   jaw.add(tongue);
 }
 
 // --- Sindirim tüpü (tek parça, yarıçap ve renk boyunca değişir) ---
 const C = {
-  mouth: 0xf58ca0, eso: 0xf49a8a, stomach: 0xf4a261, small: 0xf7b2a0, large: 0xc9895e, rect: 0xb77a57,
+  mouth: 0xc9606e, eso: 0xcf7f7a, stomach: 0xd98f78, small: 0xe3a08e, large: 0xc08a70, rect: 0xa9705e,
 };
 const CP = [
-  [[0, 5.2, 0.62], 0.22, C.mouth, 0], [[0, 5.0, 0.2], 0.22, C.mouth, 0], [[0, 4.5, -0.05], 0.17, C.eso, 1],
+  [[0, 5.2, 0.5], 0.17, C.mouth, 0], [[0, 5.0, 0.2], 0.22, C.mouth, 0], [[0, 4.5, -0.05], 0.17, C.eso, 1],
   [[0, 3.6, -0.12], 0.15, C.eso, 1], [[0.05, 2.8, -0.1], 0.15, C.eso, 1], [[0.15, 2.1, 0], 0.15, C.eso, 1],
   [[0.38, 1.75, 0.1], 0.32, C.stomach, 2], [[0.82, 1.62, 0.18], 0.62, C.stomach, 2], [[1.05, 1.18, 0.24], 0.7, C.stomach, 2],
   [[0.85, 0.72, 0.3], 0.58, C.stomach, 2], [[0.45, 0.55, 0.32], 0.36, C.stomach, 2], [[0.15, 0.6, 0.3], 0.2, C.stomach, 2],
   [[-0.2, 0.5, 0.25], 0.17, C.small, 3], [[-0.45, 0.15, 0.15], 0.17, C.small, 3], [[-0.2, -0.3, 0.2], 0.17, C.small, 3],
 ];
-// İnce bağırsak kıvrımları
+// İnce bağırsak kıvrımları: yatay sıralar, uçlarda yarım daire dönüşler (tüp kendini kesmez, kıvrımlar düzgün)
 for (let row = 0; row < 5; row++) {
-  const y = -0.62 - row * 0.33;
-  const xs = row % 2 ? [0.85, 0.3, -0.3, -0.85] : [-0.85, -0.3, 0.3, 0.85];
-  xs.forEach((x, k) => CP.push([[x, y + (k % 2 ? 0.06 : -0.04), 0.22 + ((k + row) % 2) * 0.12], 0.17, C.small, 3]));
+  const y = -0.62 - row * 0.34, dir = row % 2 ? -1 : 1;
+  const xs = [-0.82, -0.41, 0, 0.41, 0.82].map((x) => x * dir);
+  xs.forEach((x, k) => CP.push([[x, y + 0.03 * Math.sin(k * 1.9 + row), 0.24 + 0.08 * Math.sin(k * 1.3 + row * 2.1)], 0.15, C.small, 3]));
+  if (row < 4) CP.push([[xs[4] + 0.2 * dir, y - 0.17, 0.3], 0.15, C.small, 3]);
 }
-CP.push([[-1.0, -2.1, 0.3], 0.18, C.small, 3]);
 const LARGE_START = CP.length;
 CP.push(
   [[-1.38, -1.95, 0.25], 0.32, C.large, 4], [[-1.5, -1.0, 0.25], 0.31, C.large, 4], [[-1.4, 0.0, 0.3], 0.3, C.large, 4],
@@ -156,12 +249,18 @@ function colorAt(u, out) {
   for (let i = 1; i < CP.length; i++) if (u <= cpU[i]) { const t = (u - cpU[i - 1]) / (cpU[i] - cpU[i - 1] || 1); return out.copy(_ca.setHex(CP[i - 1][2])).lerp(_cb.setHex(CP[i][2]), t); }
   return out.setHex(CP[CP.length - 1][2]);
 }
-const TS = 700, RS = 14;
+const TS = LOWQ ? 1000 : 1400, RS = LOWQ ? 22 : 28;
 const tubeGeo = new THREE.TubeGeometry(curve, TS, 1, RS, false);
 const tPos = tubeGeo.attributes.position;
 const centers = [], dirs = new Float32Array(tPos.count * 3), base = new Float32Array(TS + 1);
 {
-  for (let i = 0; i <= TS; i++) { centers.push(curve.getPointAt(i / TS)); base[i] = radiusAt(i / TS); }
+  const LEN = curve.getLength();
+  for (let i = 0; i <= TS; i++) {
+    centers.push(curve.getPointAt(i / TS)); base[i] = radiusAt(i / TS);
+    // kalın bağırsak cepleri (haustra): yaklaşık 3 cm aralıklı halka boğumları
+    const ul = i / TS;
+    if (ul > cpU[LARGE_START] && ul < cpU[CP.length - 3]) base[i] *= 1 - 0.14 * Math.pow(0.5 + 0.5 * Math.cos(ul * LEN / 0.36 * Math.PI * 2), 6);
+  }
   const col = new Float32Array(tPos.count * 3), c = new THREE.Color();
   for (let i = 0; i <= TS; i++) {
     colorAt(i / TS, c);
@@ -174,9 +273,22 @@ const centers = [], dirs = new Float32Array(tPos.count * 3), base = new Float32A
   tubeGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
   tPos.setUsage(THREE.DynamicDrawUsage);
 }
-const tube = new THREE.Mesh(tubeGeo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.45, transparent: true, opacity: 0.72, depthWrite: false, side: THREE.DoubleSide }));
-tube.renderOrder = 2;
-sim.scene.add(tube);
+const tubeMat = tissue({ color: 0xffffff, veins: 0.22, scale: 5 });
+tubeMat.vertexColors = true; tubeMat.side = THREE.DoubleSide; tubeMat.clearcoat = 0.9; tubeMat.clearcoatRoughness = 0.15;
+const uBolus = { value: new THREE.Vector4(0, 0, 0, 0) };
+{ // lokmanın olduğu yerde duvar içeriden sıcak ışık alır (ince doku ışığı geçirir)
+  const b0 = tubeMat.onBeforeCompile;
+  tubeMat.onBeforeCompile = (sh) => {
+    b0(sh);
+    sh.uniforms.uBolus = uBolus;
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform vec4 uBolus;')
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        if (uBolus.w > 0.0) { float d = length(vPObj - uBolus.xyz); totalEmissiveRadiance += vec3(1.0, 0.45, 0.25) * exp(-d*d/(uBolus.w*uBolus.w)) * 0.5; }`);
+  };
+  tubeMat.customProgramCacheKey = () => 'lokma-tup';
+}
+const tube = new THREE.Mesh(tubeGeo, tubeMat);
+root.add(tube);
 let normTick = 0;
 function deformTube(ub, bolusR, churn, t) {
   const w = 0.012;
@@ -202,50 +314,63 @@ function deformTube(ub, bolusR, churn, t) {
 
 // --- Yardımcı organlar ---
 const organInfo = [];
-function organ(mesh, name, info) { mesh.userData.info = { name, info }; organInfo.push(mesh); sim.scene.add(mesh); return mesh; }
-const liver = organ(new THREE.Mesh(new THREE.SphereGeometry(1, 32, 20), new THREE.MeshStandardMaterial({ color: 0x9a3b2c, roughness: 0.5 })), 'Karaciğer',
+function organ(mesh, name, info) { mesh.userData.info = { name, info }; organInfo.push(mesh); root.add(mesh); return mesh; }
+const wet = (m, cc = 0.8) => { m.clearcoat = cc; m.clearcoatRoughness = 0.18; return m; };
+// Karaciğer: büyük sağ lob + mideye uzanan ince sol lob, alt yüzü mide/bağırsak için oyuk
+const liverGeo = sdfMesh([
+  { p: [sEllipsoid([-0.9, 1.52, 0.1], [0.86, 0.56, 0.6], [0, 0, 0.25]), sEllipsoid([-0.1, 1.72, 0.2], [0.72, 0.34, 0.42], [0, 0, 0.12]),
+    sEllipsoid([0.42, 1.86, 0.24], [0.36, 0.17, 0.28], [0, 0, -0.1])], k: 0.28 },
+  { p: [sEllipsoid([0.85, 1.25, 0.2], [0.72, 0.62, 0.62])], k: 0.12, op: 'sub' },
+  { p: [sEllipsoid([-0.6, 0.72, 0.3], [0.7, 0.35, 0.7])], k: 0.18, op: 'sub' },
+], { cell: 0.045, noiseAmp: 0.012, noiseFreq: 2 });
+const liver = organ(new THREE.Mesh(liverGeo, wet(tissue({ color: 0x7c2b22, veins: 0.12, scale: 1.6 }), 1)), 'Karaciğer',
   'Vücudun en büyük iç organı. Safra üretir, bağırsaktan gelen kandaki besinleri işler ve depolar, zararlı maddeleri temizler.');
-liver.scale.set(1.25, 0.55, 0.6); liver.position.set(-0.75, 1.55, 0.1); liver.rotation.z = 0.2;
-const gall = organ(new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 12), new THREE.MeshStandardMaterial({ color: 0x4caf50, roughness: 0.4 })), 'Safra kesesi',
+const gall = organ(new THREE.Mesh(blobGeometry(0.17, { detail: 10, amp: 0.05, stretch: [1, 1.5, 1] }), wet(tissue({ color: 0x4d7a2e, veins: 0.05, scale: 5 }), 1)), 'Safra kesesi',
   'Karaciğerin ürettiği yeşilimsi safrayı depolar ve yemekten sonra ince bağırsağa sıkar. Safra, yağları küçük damlalara ayırır.');
-gall.scale.set(1, 1.4, 1); gall.position.set(-0.55, 0.95, 0.45);
-const pancreas = organ(new THREE.Mesh(new THREE.CapsuleGeometry(0.14, 1.1, 6, 12), new THREE.MeshStandardMaterial({ color: 0xf1c27d, roughness: 0.6 })), 'Pankreas',
+gall.position.set(-0.55, 0.98, 0.45); gall.rotation.z = -0.4;
+const panCurve = new THREE.CatmullRomCurve3([[-0.3, 0.3, -0.18], [0.1, 0.4, -0.27], [0.55, 0.5, -0.3], [0.95, 0.6, -0.25], [1.18, 0.72, -0.2]].map((p) => new THREE.Vector3(...p)));
+const pancreas = organ(new THREE.Mesh(loftTube(panCurve, (t) => lerp(0.2, 0.085, t) * (1 + 0.1 * Math.sin(t * 40)), { segs: 60, radial: 16, squash: 0.75, noiseAmp: 0.03, noiseFreq: 9 }),
+  wet(tissue({ color: 0xe0b27c, veins: 0.05, scale: 7 }), 0.5)), 'Pankreas',
   'Midenin arkasında durur. Güçlü sindirim suları üretip ince bağırsağa gönderir; ayrıca kan şekerini ayarlayan insülin hormonunu yapar.');
-pancreas.rotation.z = Math.PI / 2 - 0.2; pancreas.position.set(0.35, 0.42, -0.25);
-const heart = organ(new THREE.Mesh(new THREE.SphereGeometry(0.42, 24, 16), new THREE.MeshStandardMaterial({ color: 0xe53935, roughness: 0.4 })), 'Kalp',
+pancreas.position.set(0, 0, 0);
+pancreas.userData.center = new THREE.Vector3(0.35, 0.45, -0.25);
+// Kalp: karıncık gövdesi + sola-aşağı sivri uç + kulakçıklar + aort kökü
+const heartGeo = sdfMesh([
+  { p: [sEllipsoid([0, 0.02, 0], [0.36, 0.38, 0.31], [0, 0, -0.5]), sCone([0.05, -0.02, 0.02], [0.3, -0.36, 0.08], 0.28, 0.05),
+    sEllipsoid([-0.24, 0.24, -0.05], [0.18, 0.16, 0.2]), sEllipsoid([0.2, 0.28, -0.12], [0.15, 0.13, 0.17]),
+    sCone([-0.02, 0.22, -0.02], [-0.06, 0.62, -0.06], 0.11, 0.1), sCone([0.08, 0.2, 0.08], [0.12, 0.5, 0.02], 0.1, 0.09)], k: 0.1 },
+], { cell: 0.02, noiseAmp: 0.006, noiseFreq: 5 });
+const heart = organ(new THREE.Mesh(heartGeo, wet(tissue({ color: 0x9e2226, veins: 0.35, scale: 3 }), 0.9)), 'Kalp',
   'Kanı tüm vücuda pompalar. Bağırsaktan emilen besinler kanla önce karaciğere, oradan kalbe ve tüm hücrelere gider.');
-heart.position.set(0.35, 2.85, 0.2); heart.scale.set(1, 1.15, 0.9);
+heart.position.set(0.35, 2.85, 0.2);
 // Damarlar: kapı toplardamarı (bağırsak → karaciğer) ve karaciğer → kalp
 const portal = new THREE.CatmullRomCurve3([[-0.05, -2.0, 0.05], [0.05, -1.2, 0.05], [-0.1, -0.5, 0.05], [-0.35, 0.3, 0.0], [-0.6, 1.2, 0.1]].map((p) => new THREE.Vector3(...p)));
 const toHeart = new THREE.CatmullRomCurve3([[-0.6, 1.3, 0.1], [-0.25, 2.0, 0.05], [0.25, 2.6, 0.15]].map((p) => new THREE.Vector3(...p)));
-const vesselMat = new THREE.MeshStandardMaterial({ color: 0xc62828, roughness: 0.4, transparent: true, opacity: 0.55, depthWrite: false });
-organ(new THREE.Mesh(new THREE.TubeGeometry(portal, 60, 0.07, 8), vesselMat), 'Kapı toplardamarı', 'Bağırsaklardan emilen besinlerle dolu kanı önce karaciğere taşır; karaciğer bu besinleri işler ve süzer.');
-organ(new THREE.Mesh(new THREE.TubeGeometry(toHeart, 30, 0.07, 8), vesselMat), 'Toplardamar (karaciğerden kalbe)', 'Karaciğerden çıkan kan kalbe gider; kalp de onu tüm vücuda pompalar.');
+const vesselMat = wet(tissue({ color: 0x8e2f52, veins: 0.1, scale: 8 }), 0.9);
+organ(new THREE.Mesh(loftTube(portal, () => 0.075, { segs: 80, radial: 12 }), vesselMat), 'Kapı toplardamarı', 'Bağırsaklardan emilen besinlerle dolu kanı önce karaciğere taşır; karaciğer bu besinleri işler ve süzer.');
+organ(new THREE.Mesh(loftTube(toHeart, () => 0.075, { segs: 40, radial: 12 }), vesselMat), 'Toplardamar (karaciğerden kalbe)', 'Karaciğerden çıkan kan kalbe gider; kalp de onu tüm vücuda pompalar.');
 // Bağırsaktan kapı toplardamarına dallar
 const branches = [];
 for (const [x, y] of [[-0.85, -0.6], [0.85, -0.9], [-0.85, -1.3], [0.85, -1.6], [-0.6, -1.95], [0.6, -0.3]]) {
   const b = new THREE.CatmullRomCurve3([new THREE.Vector3(x, y, 0.2), new THREE.Vector3(x * 0.5, y + 0.1, 0.1), portal.getPointAt(clamp(0.1 + (y + 2) / 3.4 * 0.5, 0, 0.6))]);
   branches.push(b);
-  const m = new THREE.Mesh(new THREE.TubeGeometry(b, 16, 0.035, 6), vesselMat);
-  sim.scene.add(m);
+  root.add(new THREE.Mesh(loftTube(b, (t) => lerp(0.03, 0.045, t), { segs: 20, radial: 8 }), vesselMat));
 }
 // Tüp üzerine tıklama bilgisi
 tube.userData.info = null;
 
-// --- Lokma ---
-const bolusMat = new THREE.MeshStandardMaterial({ color: 0xe23b3b, roughness: 0.55, emissive: 0x220000 });
-const bolus = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 3), bolusMat);
-sim.scene.add(bolus);
-const bolusGlow = new THREE.PointLight(0xffffff, 2.2, 3, 1.5);
-bolus.add(bolusGlow);
+// --- Lokma --- (ıslak, topaklı besin lokması; tüp duvarını içeriden aydınlatır)
+const bolusMat = wet(tissue({ color: 0xe23b3b, veins: 0, scale: 9 }), 0.6);
+const bolus = new THREE.Mesh(blobGeometry(1, { detail: 14, amp: 0.09, freq: 1.6, oct: 2 }), bolusMat);
+root.add(bolus);
 
 // --- Tanecikler (besin → kan, su, safra/pankreas suyu) ---
 const NP = 260;
-const pMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.055, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }), NP);
+const pMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.055, 12, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 2.2, 2.2) }), NP);
 pMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-pMesh.frustumCulled = false;
+pMesh.frustumCulled = false; pMesh.userData.noCast = true;
 for (let i = 0; i < NP; i++) pMesh.setColorAt(i, new THREE.Color(0xffffff));
-sim.scene.add(pMesh);
+root.add(pMesh);
 const parts = Array.from({ length: NP }, () => ({ alive: false }));
 const tmpC = new THREE.Color();
 function emit(kind, from) {
@@ -253,7 +378,7 @@ function emit(kind, from) {
   if (!p) return;
   p.alive = true; p.kind = kind; p.t = 0; p.from = from.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2, 0.1));
   if (kind === 'su' && stageIdx === 4) { p.mode = 'fade'; p.dir = new THREE.Vector3().randomDirection().multiplyScalar(0.8); }
-  else if (kind === 'safra' || kind === 'pankreas') { p.mode = 'juice'; p.to = from.clone(); p.from = (kind === 'safra' ? gall.position : pancreas.position).clone(); }
+  else if (kind === 'safra' || kind === 'pankreas') { p.mode = 'juice'; p.to = from.clone(); p.from = (kind === 'safra' ? gall.position : pancreas.userData.center).clone(); }
   else { p.mode = 'blood'; p.branch = pick(branches); }
   pMesh.setColorAt(parts.indexOf(p), tmpC.setHex(kind === 'safra' ? 0x7cb342 : kind === 'pankreas' ? 0xfff176 : NUTS[kind].color));
   pMesh.instanceColor.needsUpdate = true;
@@ -291,17 +416,17 @@ function nearestU(pt) {
 }
 
 // --- Bilgi balonu ---
-const bubble = sim.label('', { position: [0, 0, 0] });
+const bubble = sim.label('', { position: [0, 0, 0], parent: root });
 Object.assign(bubble.el.style, { whiteSpace: 'normal', width: '230px', background: 'rgba(255,255,255,.95)', color: '#1f2937', textShadow: 'none',
   fontWeight: '500', fontSize: '12.5px', lineHeight: '1.35', padding: '8px 10px', borderRadius: '12px', border: '2px solid #fbbf24', marginLeft: '125px' });
 const stageLabels = [];
 ST.forEach((s) => {
   if (s.key === 'cikis') return;
-  const l = sim.label(`${s.emoji} ${s.name}`, { position: s.key === 'agiz' ? [-1.5, 5.1, 0.6] : s.key === 'yemekborusu' ? [-0.95, 3.3, 0] : s.key === 'mide' ? [2.1, 1.3, 0.3] : s.key === 'incebagirsak' ? [0, -1.15, 0.9] : [-2.3, -1.0, 0.3] });
+  const l = sim.label(`${s.emoji} ${s.name}`, { position: s.key === 'agiz' ? [-1.5, 5.1, 0.6] : s.key === 'yemekborusu' ? [-0.95, 3.3, 0] : s.key === 'mide' ? [2.1, 1.3, 0.3] : s.key === 'incebagirsak' ? [0, -1.15, 0.9] : [-2.3, -1.0, 0.3], parent: root });
   stageLabels.push(l);
 });
-stageLabels.push(sim.label('Karaciğer', { position: [-1.4, 2.05, 0.3], className: 'plain' }), sim.label('Pankreas', { position: [1.5, 0.35, -0.2], className: 'plain' }),
-  sim.label('Safra kesesi', { position: [-1.0, 0.75, 0.6], className: 'plain' }), sim.label('Kalp', { position: [1.0, 3.0, 0.2], className: 'plain' }));
+stageLabels.push(sim.label('Karaciğer', { position: [-1.4, 2.05, 0.3], className: 'plain', parent: root }), sim.label('Pankreas', { position: [1.5, 0.35, -0.2], className: 'plain', parent: root }),
+  sim.label('Safra kesesi', { position: [-1.0, 0.75, 0.6], className: 'plain', parent: root }), sim.label('Kalp', { position: [1.0, 3.0, 0.2], className: 'plain', parent: root }));
 
 // --- Durum ---
 let food = FOODS.elma, foodKey = 'elma';
@@ -369,7 +494,7 @@ ui.buttons([
   { label: '🔁 Baştan', onClick: () => restart() },
 ]);
 const auto = ui.toggle({ label: 'Otomatik ilerle', value: true, onChange: (v) => { if (v && waiting) { waiting = false; nextStage(); } } });
-const follow = ui.toggle({ label: '🎥 Kamera lokmayı izlesin', value: false, onChange: (v) => { if (!v) sim.moveCamera([0, 1.2, 13], [0, 1.0, 0]); } });
+const follow = ui.toggle({ label: '🎥 Kamera lokmayı izlesin', value: false, onChange: (v) => { if (!v) sim.moveCamera(HOME[0], HOME[1]); } });
 ui.toggle({ label: 'Organ adları', value: true, onChange: (v) => stageLabels.forEach((l) => (l.visible = v)) });
 ui.section('Kana geçen besinler');
 const meters = {};
@@ -398,8 +523,9 @@ sim.onClick(() => [...organInfo, tube], (hit) => {
   let info = hit.object.userData.info;
   if (!info && hit.object === tube) {
     // tüpte en yakın durak
+    const localHit = root.worldToLocal(hit.point.clone());
     let best = 0, bd = Infinity;
-    for (let i = 0; i <= 200; i++) { const d = curve.getPointAt(i / 200).distanceToSquared(hit.point); if (d < bd) { bd = d; best = i / 200; } }
+    for (let i = 0; i <= 200; i++) { const d = curve.getPointAt(i / 200).distanceToSquared(localHit); if (d < bd) { bd = d; best = i / 200; } }
     const s = ST.find((x) => best >= x.u0 && best <= x.u1) || ST[0];
     info = { name: `${s.emoji} ${s.name}`, info: s.text(food) };
   }
@@ -449,6 +575,7 @@ sim.onUpdate((dt, t) => {
   const wob = stageIdx === 0 ? 0.25 * Math.abs(Math.sin(t * 9)) : stageIdx === 2 ? 0.15 * Math.sin(t * 5) : 0;
   bolus.scale.set(r * (1 + wob), r * (1 - wob * 0.6), r);
   bolus.rotation.y += dt * 2;
+  uBolus.value.set(p.x, p.y, p.z, done ? 0 : r * 2.4);
   // Renk: midede lapaya, kalın bağırsakta kahverengiye döner
   const target = stageIdx >= 4 ? 0x6d4c2f : stageIdx >= 2 ? 0xd9b98a : food.color;
   bolusMat.color.lerp(tmpC.setHex(target), 1 - Math.exp(-dt * 0.8));
@@ -458,23 +585,25 @@ sim.onUpdate((dt, t) => {
   updateParticles(dt);
   heartPulse = Math.max(0, heartPulse - dt * 3);
   const hb = 1 + 0.08 * Math.max(0, Math.sin(t * 7.5)) + heartPulse * 0.15;
-  heart.scale.set(hb, hb * 1.15, hb * 0.9);
+  heart.scale.setScalar(hb);
   // Göstergeler
   mProg.set(done ? 1 : u, done ? 'tamamlandı' : `%${Math.round(u * 100)}`);
   stClock.set(hours(bodyMin));
   stStage.set(`${ST[stageIdx].emoji} ${ST[stageIdx].name}`);
   for (const k of Object.keys(NUTS)) meters[k].set(food.n[k] ? absorbed[k] / food.n[k] : 0, food.n[k] > 0.04 ? `%${Math.round((absorbed[k] / food.n[k]) * 100)}` : 'yok denecek kadar az');
 });
+const wv = new THREE.Vector3();
 sim.onRender((dt) => {
   if (follow.value) {
     const c = sim.controls;
-    c.target.lerp(bolus.position, 1 - Math.exp(-dt * 3));
-    tv.copy(bolus.position).add(new THREE.Vector3(1.4, 0.6, 5.5));
+    bolus.getWorldPosition(wv);
+    c.target.lerp(wv, 1 - Math.exp(-dt * 3));
+    tv.copy(wv).add(new THREE.Vector3(1.4, 0.6, 5.5).multiplyScalar(K));
     sim.camera.position.lerp(tv, 1 - Math.exp(-dt * 2));
   }
 });
 
-sim.onReset(() => { restart(); newFact(); if (!follow.value) sim.moveCamera([0, 1.2, 13], [0, 1.0, 0]); });
+sim.onReset(() => { restart(); newFact(); if (!follow.value) sim.moveCamera(HOME[0], HOME[1]); });
 showFood();
 newFact();
 restart();
@@ -482,3 +611,20 @@ restart();
 const _setFood = setFood;
 foodSeg.el.addEventListener('click', () => showFood());
 void _setFood; void stopT;
+
+// Ölçekli gruplar: prosedürel kabartma gücü görünüm (dünya) birimindedir → nesnenin dünya ölçeğine uyarlanır (benekli görünüm olmasın)
+{
+  const done = new WeakSet(), ws = new THREE.Vector3();
+  const fixBump = () => sim.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material || [])) {
+      const u = m.userData?.uniforms?.pBump;
+      if (!u || done.has(m)) continue;
+      done.add(m);
+      o.getWorldScale(ws);
+      u.value *= Math.max(ws.x, 1e-4) < 0.999 ? ws.x : 1;
+    }
+  });
+  let nb = 0;
+  sim.onRender(() => { if (nb++ % 30 === 0) fixBump(); });
+}

@@ -175,7 +175,10 @@ render();
 
 const t0 = Date.now();
 const coreExists = fs.existsSync(path.join(DIST, 'assets/simcore.js'));
-if (!only || !coreExists) await buildCore();
+// Çekirdek kaynağı (src/core/**) derlenmiş paketten yeniyse --only ile de yeniden derle
+const newest = (d) => fs.readdirSync(d, { withFileTypes: true }).reduce((m, e) => Math.max(m, e.isDirectory() ? newest(path.join(d, e.name)) : fs.statSync(path.join(d, e.name)).mtimeMs), 0);
+const coreStale = coreExists && newest(path.join(ROOT, 'src/core')) > fs.statSync(path.join(DIST, 'assets/simcore.js')).mtimeMs;
+if (!only || !coreExists || coreStale) await buildCore();
 else fs.copyFileSync(path.join(ROOT, 'src/site/style.css'), path.join(DIST, 'assets/style.css'));
 
 const targets = SIMS.filter((s) => !only || only.includes(s.id));

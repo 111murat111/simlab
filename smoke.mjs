@@ -50,10 +50,13 @@ for (const s of list) {
   const url = pathToFileURL(path.join(ROOT, 'dist/sims', s.id, 'index.html')).href;
   let frames = 0, note = '';
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForFunction(() => (window.__sim?.frame ?? 0) > 3, null, { timeout: 30000 }).catch(() => {});
+    await page.goto(url, { waitUntil: 'commit', timeout: 60000 });
+    await page.waitForFunction(() => (window.__sim?.frame ?? 0) > 3, null, { timeout: 150000 }).catch(() => {});
     await page.waitForTimeout(1500);
     if (shots) await page.screenshot({ path: path.join(shotDir, `${s.id}.png`) });
+    // Sahne kutusunu kurcalamadan ÖNCE al: SwiftShader'da ağır simlerde kare süresi 10-30 sn olabildiğinden
+    // kurcalama sonrası locator (RAF bekler) 30 sn'de zaman aşımına düşüyordu; bu bir sim hatası değil.
+    const box = await page.locator('#stage').boundingBox({ timeout: 300000 });
     // Kontrolleri kurcala: kaydırıcılar, anahtarlar, seçimler, düğmeler, sahneye tıklama
     await page.evaluate(async () => {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -78,7 +81,6 @@ for (const s of list) {
       for (const b of document.querySelectorAll('.hud button')) { b.click(); await wait(50); }
     });
     // Sahneye birkaç tıklama
-    const box = await page.locator('#stage').boundingBox();
     for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.6], [0.7, 0.4]]) {
       await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
     }

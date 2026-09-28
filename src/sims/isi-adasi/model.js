@@ -9,6 +9,7 @@ export const SURF = {
   park: { a: 0.2, b: 0.55, C: 1.0e5, e: 0.96 },
   tree: { a: 0.17, b: 0.7, C: 0.9e5, e: 0.97 },
   roof: { a: 0.1, b: 0, C: 0.5e5, e: 0.92 },
+  tile: { a: 0.25, b: 0, C: 0.6e5, e: 0.9 },   // eskimiş kil kiremit (albedo ≈0,2–0,3)
   white: { a: 0.7, b: 0, C: 0.5e5, e: 0.9 },
   green: { a: 0.2, b: 0.45, C: 0.8e5, e: 0.95 },
 };

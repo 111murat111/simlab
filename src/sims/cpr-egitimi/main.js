@@ -1,11 +1,12 @@
 // İlk Yardım: CPR Eğitimi — yetişkin temel yaşam desteği (ERC/AHA): zincir adımları, 30:2 göğüs basısı, OED, canlı geri bildirim ve puan.
-import { createSim, THREE, RoundedBoxGeometry, clamp, lerp, fmt, makeGround } from '@core';
+import { createSim, THREE, RoundedBoxGeometry, clamp, lerp, fmt, mat, procedural, textPlane, textTexture, makePerson } from '@core';
+import { sEllipsoid, sdfMesh, loftTube } from './bio.js';
+import { STAND, bodyItems } from './human.js';
 
 const sim = createSim({
-  background: 0x0d1424,
-  camera: { position: [5.8, 7.6, 9.2], target: [0.4, 1.4, 0], fov: 45 },
-  controls: { minDistance: 6, maxDistance: 22, maxPolarAngle: Math.PI * 0.45 },
-  shadows: false,
+  studio: { mood: 'day', color: 0x9c978f, warmth: 0.3, fill: 1.15, key: { el: 44, az: 248, power: 1.1 }, radius: 11, height: 5 },
+  camera: { position: [1.5, 1.3, 1.85], target: [0.22, 0.4, -0.2], fov: 40, near: 0.02, far: 60 },
+  controls: { minDistance: 0.6, maxDistance: 3.2, maxPolarAngle: Math.PI * 0.47 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Yerde yanıtsız yatan bir yetişkin (eğitim mankeni) ve senin kolların. Önce <b>hayat zincirinin</b> ilk adımlarını
@@ -26,118 +27,405 @@ const sim = createSim({
     Acil durumda <b>112</b>'yi ara.</p>`,
 });
 
-// --- Sahne ---
-sim.scene.add(makeGround(40, 0x1a2436));
-const SKIN = 0xe6c3a0;
-const skinMat = new THREE.MeshStandardMaterial({ color: SKIN, roughness: 0.6 });
-const manikin = new THREE.Group();
-sim.scene.add(manikin);
-const UP = new THREE.Vector3(0, 1, 0);
-function capsule(a, b, r, mat) {
-  const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b);
-  const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, A.distanceTo(B), 6, 16), mat);
-  m.position.copy(A).add(B).multiplyScalar(0.5);
-  m.quaternion.setFromUnitVectors(UP, B.sub(A).normalize());
-  return m;
-}
-// Göğüs (basıyla ezilir): tabanı y=0'da
-const CHEST_H = 2.3;
-const chestGeo = new RoundedBoxGeometry(2.9, CHEST_H, 3.5, 4, 0.7).translate(0, CHEST_H / 2, 0);
-const chest = new THREE.Mesh(chestGeo, skinMat);
-chest.position.set(0.1, 0, 0);
-manikin.add(chest);
-const abdomen = new THREE.Mesh(new RoundedBoxGeometry(2.4, 1.9, 3.2, 4, 0.6).translate(0, 0.95, 0), skinMat);
-abdomen.position.set(2.6, 0, 0);
-manikin.add(abdomen);
-const hips = new THREE.Mesh(new RoundedBoxGeometry(1.8, 1.8, 3.4, 4, 0.6).translate(0, 0.9, 0), new THREE.MeshStandardMaterial({ color: 0x33415c, roughness: 0.8 }));
-hips.position.set(4.5, 0, 0);
-manikin.add(hips);
-const legMat = hips.material;
-manikin.add(capsule([5, 0.7, 0.9], [10.5, 0.55, 1.0], 0.65, legMat), capsule([5, 0.7, -0.9], [10.5, 0.55, -1.0], 0.65, legMat));
-manikin.add(capsule([-1.0, 1.2, 2.05], [2.9, 0.6, 2.25], 0.5, skinMat), capsule([-1.0, 1.2, -2.05], [2.9, 0.6, -2.25], 0.5, skinMat));
-manikin.add(capsule([-1.5, 1.1, 0], [-2.4, 1.1, 0], 0.55, skinMat));
-const head = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), skinMat);
-head.scale.set(1.05, 0.95, 0.9);
-head.position.set(-3.25, 1.05, 0);
-manikin.add(head);
+// --- Sahne: eğitim salonu zemini, mavi egzersiz minderi, sırtüstü yatan yetişkin, sol yanında diz çökmüş kurtarıcı ---
+// Birimler metre. Kurtarıcı +z'ye bakar; hasta başı −x'te, yüzü yukarıda (hastanın sağı +z).
+const scene = sim.scene;
+const LOWQ = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+const CELL = LOWQ ? 0.012 : 0.009;
+const MAT_H = 0.022; // minder kalınlığı
 {
-  const dark = new THREE.MeshStandardMaterial({ color: 0x3a2a22, roughness: 0.9 });
-  for (const z of [-0.33, 0.33]) { const e = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 8), dark); e.position.set(-3.35, 1.95, z); e.scale.y = 0.4; manikin.add(e); }
-  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 8), skinMat); nose.position.set(-3.6, 1.95, 0); manikin.add(nose);
-  const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.04, 6, 16, Math.PI), dark); mouth.rotation.set(-Math.PI / 2, 0, Math.PI / 2); mouth.position.set(-3.9, 1.8, 0); manikin.add(mouth);
-  // Göğüs kemiği işareti ve bası noktası
-  const sternum = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.02, 0.35), new THREE.MeshStandardMaterial({ color: 0xcfa983, roughness: 0.7 }));
-  sternum.position.set(0.05, CHEST_H - 0.005, 0);
-  chest.add(sternum);
+  const mm = new THREE.Mesh(new RoundedBoxGeometry(2.0, MAT_H, 0.95, 3, 0.008), mat.rubber({ color: 0x1f5fa8, scale: 4 }));
+  mm.position.set(0.42, MAT_H / 2, 0.02); scene.add(mm);
+  // minder dikiş çizgileri (katlama yerleri)
+  for (const x of [-0.25, 0.42, 1.09]) {
+    const s = new THREE.Mesh(new RoundedBoxGeometry(0.012, 0.004, 0.93, 1, 0.002), mat.rubber({ color: 0x184c88 }));
+    s.position.set(x, MAT_H, 0.02); scene.add(s);
+  }
 }
-const target = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.55, 40), new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false }));
+
+// --- İlk yardım eğitim salonu: meşe parke, lambri, solda güneş alan pencereler, arkada pano, OED dolabı, masa, sandalyeler ---
+{
+  const shell = [];
+  const put = (m, x, y, z, ry = 0) => { m.position.set(x, y, z); m.rotation.y = ry; scene.add(m); return m; };
+  const parquet = procedural({
+    key: 'cpr-parke', physical: true, bump: 0.004,
+    params: { color: 0xb08457, roughness: 0.45, clearcoat: 0.5, clearcoatRoughness: 0.25 },
+    pattern: `
+      vec2 uv = vec2(p.x/1.2, p.z/0.14);
+      float row = floor(uv.y); uv.x += h13(vec3(row, 1.0, 0.0))*5.0;
+      float id = h13(vec3(row, floor(uv.x), 2.0)); vec2 f = fract(uv);
+      float gap = smoothstep(0.0, 0.035, f.y)*smoothstep(1.0, 0.965, f.y)*smoothstep(0.0, 0.004, f.x)*smoothstep(1.0, 0.996, f.x);
+      float grain = fbm3(vec3(p.x*3.0 + id*9.0, id*4.0, p.z*55.0), 4);
+      col *= (0.8 + 0.32*id)*(0.82 + 0.3*grain);
+      col *= mix(0.45, 1.0, gap);
+      rough = mix(0.8, 0.38 + 0.15*grain, gap); h = gap*0.6 + grain*0.3;`,
+  });
+  const paint = (color) => procedural({
+    key: 'cpr-duvar', bump: 0.003, params: { color, roughness: 0.86 },
+    pattern: `float n = fbm3(p*1.8, 4), g = vn3(p*80.0); col *= 0.94 + 0.08*n + 0.03*(g - 0.5); h = g*0.5 + n*0.5;`,
+  });
+  const X0 = -2.7, X1 = 4.6, Z0 = -2.8, Z1 = 3.6, H = 3.0;
+  shell.push(put(new THREE.Mesh(new THREE.BoxGeometry(X1 - X0, 0.06, Z1 - Z0), parquet), (X0 + X1) / 2, -0.031, (Z0 + Z1) / 2));
+  shell.push(put(new THREE.Mesh(new THREE.BoxGeometry(X1 - X0, 0.08, Z1 - Z0), paint(0xf1efea)), (X0 + X1) / 2, H + 0.04, (Z0 + Z1) / 2));
+  shell.push(put(new THREE.Mesh(new THREE.BoxGeometry(X1 - X0, H, 0.15), paint(0xdfe3de)), (X0 + X1) / 2, H / 2, Z0 - 0.075));
+  shell.push(put(new THREE.Mesh(new THREE.BoxGeometry(X1 - X0, H, 0.15), paint(0xdfe3de)), (X0 + X1) / 2, H / 2, Z1 + 0.075));
+  shell.push(put(new THREE.Mesh(new THREE.BoxGeometry(0.15, H, Z1 - Z0), paint(0xe4e1d8)), X1 + 0.075, H / 2, (Z0 + Z1) / 2));
+  // Sol duvar: iki pencere boşluklu (dışarıda gündüz: gök, ağaçlar, karşı bina)
+  const WINS = [{ z: -1.7, w: 1.5 }, { z: 0.55, w: 1.5 }], WY0 = 0.95, WY1 = 2.45;
+  {
+    const sh = new THREE.Shape([[Z0, 0], [Z1, 0], [Z1, H], [Z0, H]].map(([a, b]) => new THREE.Vector2(a, b)));
+    for (const w of WINS) sh.holes.push(new THREE.Path([[w.z - w.w / 2, WY0], [w.z + w.w / 2, WY0], [w.z + w.w / 2, WY1], [w.z - w.w / 2, WY1]].map(([a, b]) => new THREE.Vector2(a, b))));
+    const g = new THREE.ExtrudeGeometry(sh, { depth: 0.15, bevelEnabled: false, curveSegments: 1 });
+    g.rotateY(-Math.PI / 2);   // (z, y, derinlik) → (−derinlik, y, z)
+    const lw = new THREE.Mesh(g, paint(0xe4e1d8));
+    lw.position.set(X0, 0, 0); scene.add(lw); shell.push(lw);
+    // dış görünüm
+    const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+    const x = c.getContext('2d');
+    const gr = x.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, '#8fb6e0'); gr.addColorStop(0.6, '#d8e6f0'); gr.addColorStop(1, '#e9eef0');
+    x.fillStyle = gr; x.fillRect(0, 0, 512, 256);
+    x.fillStyle = '#c9c2b4'; x.fillRect(300, 70, 170, 186); x.fillStyle = '#9aa3a8';
+    for (let i = 0; i < 5; i++) for (let j = 0; j < 6; j++) x.fillRect(312 + i * 32, 84 + j * 28, 18, 16);
+    for (let i = 0; i < 26; i++) { const tx = (i * 97) % 512, ty = 150 + (i % 5) * 12, r = 26 + (i * 13) % 30; x.fillStyle = ['#4f7a3a', '#5e8a44', '#3f6a33'][i % 3]; x.beginPath(); x.arc(tx, ty, r, 0, 7); x.fill(); }
+    x.fillStyle = '#7d8a6a'; x.fillRect(0, 222, 512, 34);
+    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+    const out = new THREE.Mesh(new THREE.PlaneGeometry(9, 4.5), new THREE.MeshBasicMaterial({ map: tex, color: new THREE.Color(1.7, 1.7, 1.7), fog: false }));
+    out.rotation.y = Math.PI / 2; out.position.set(X0 - 1.6, 1.7, -0.5); out.userData.noFit = true; scene.add(out);
+    const frameM = mat.plastic({ color: 0xf2f2ef, gloss: 0.35 });
+    const glassM = mat.glass({ tint: 0xeef6f8, rough: 0.02, thickness: 0.004 });
+    for (const w of WINS) {
+      const fr = (h, d, zz, yy, len, vert) => {
+        const m = new THREE.Mesh(new RoundedBoxGeometry(0.12, vert ? len : h, vert ? h : len, 2, 0.012), frameM);
+        m.position.set(X0 + 0.01, yy, zz); scene.add(m); return m;
+      };
+      fr(0.07, 0, w.z, WY1 - 0.035, w.w, false); fr(0.07, 0, w.z, WY0 + 0.035, w.w, false);
+      fr(0.07, 0, w.z - w.w / 2 + 0.035, (WY0 + WY1) / 2, WY1 - WY0, true); fr(0.07, 0, w.z + w.w / 2 - 0.035, (WY0 + WY1) / 2, WY1 - WY0, true);
+      fr(0.06, 0, w.z, (WY0 + WY1) / 2, WY1 - WY0, true);
+      const gl = new THREE.Mesh(new THREE.PlaneGeometry(w.w - 0.1, WY1 - WY0 - 0.1), glassM);
+      gl.rotation.y = Math.PI / 2; gl.position.set(X0 - 0.02, (WY0 + WY1) / 2, w.z); gl.userData.noCast = true; scene.add(gl);
+      const sill = new THREE.Mesh(new RoundedBoxGeometry(0.28, 0.04, w.w + 0.16, 2, 0.012), mat.ceramic({ color: 0xe8e4dc }));
+      sill.position.set(X0 + 0.12, WY0 - 0.02, w.z); scene.add(sill);
+    }
+  }
+  // Lambri (alt duvar paneli) ve süpürgelik: arka ve sağ duvar
+  const wainM = paint(0x6f8577);   // boyalı lambri (adaçayı yeşili)
+  put(new THREE.Mesh(new RoundedBoxGeometry(X1 - X0, 0.9, 0.03, 2, 0.008), wainM), (X0 + X1) / 2, 0.45, Z0 + 0.015);
+  put(new THREE.Mesh(new RoundedBoxGeometry(X1 - X0, 0.05, 0.06, 2, 0.015), wainM), (X0 + X1) / 2, 0.91, Z0 + 0.03);
+  put(new THREE.Mesh(new RoundedBoxGeometry(0.03, 0.9, Z1 - Z0, 2, 0.008), wainM), X1 - 0.015, 0.45, (Z0 + Z1) / 2);
+  put(new THREE.Mesh(new RoundedBoxGeometry(0.06, 0.1, Z1 - Z0, 2, 0.01), wainM), X0 + 0.03, 0.05, (Z0 + Z1) / 2);
+  // Tavan: gömme LED paneller (parlar)
+  const led = mat.glow({ color: 0xfff6ea, intensity: 2.6 }), trimM = mat.paintedMetal({ color: 0xeeeeea, wear: 0 });
+  for (const x of [-1.0, 1.6]) for (const z of [-1.6, 0.9]) {
+    const t = put(new THREE.Mesh(new RoundedBoxGeometry(0.66, 0.03, 0.66, 2, 0.01), trimM), x, H - 0.01, z); t.userData.noCast = true;
+    const l = put(new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.012, 0.6), led), x, H - 0.03, z); l.userData.noCast = true;
+  }
+  // Pano: "Hayat zinciri" eğitim afişi ve 30:2 şeması
+  const poster = (w, h, draw) => {
+    const c = document.createElement('canvas'); c.width = 512; c.height = Math.round(512 * h / w);
+    const g = c.getContext('2d'); draw(g, c.width, c.height);
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+    return new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshStandardMaterial({ map: t, roughness: 0.6 }));
+  };
+  const chain = poster(1.6, 0.9, (g, W, Hh) => {
+    g.fillStyle = '#fbfaf6'; g.fillRect(0, 0, W, Hh);
+    g.fillStyle = '#c0392b'; g.fillRect(0, 0, W, 64);
+    g.fillStyle = '#fff'; g.font = '700 36px system-ui'; g.textAlign = 'center'; g.fillText('HAYAT ZİNCİRİ', W / 2, 45);
+    const steps = [['112', 'Ara'], ['30:2', 'CPR'], ['OED', 'Şok'], ['+', 'İleri bakım']];
+    steps.forEach(([a, b], i) => {
+      const cx = 64 + i * 128, cy = 150;
+      g.fillStyle = ['#c0392b', '#e67e22', '#27ae60', '#2c6fbb'][i]; g.beginPath(); g.arc(cx, cy, 48, 0, 7); g.fill();
+      g.fillStyle = '#fff'; g.font = '800 30px system-ui'; g.fillText(a, cx, cy + 10);
+      g.fillStyle = '#333'; g.font = '600 22px system-ui'; g.fillText(b, cx, cy + 86);
+      if (i < 3) { g.strokeStyle = '#999'; g.lineWidth = 6; g.beginPath(); g.moveTo(cx + 52, cy); g.lineTo(cx + 76, cy); g.stroke(); }
+    });
+    g.fillStyle = '#555'; g.font = '500 19px system-ui'; g.fillText('100–120 bası/dk · 5–6 cm derinlik · tam geri bırak', W / 2, Hh - 22);
+  });
+  put(chain, 0.5, 1.75, Z0 + 0.018);
+  const pcork = put(new THREE.Mesh(new RoundedBoxGeometry(1.72, 1.02, 0.03, 2, 0.01), mat.wood({ color: 0x5a4030, varnish: true, scale: 3 })), 0.5, 1.75, Z0 + 0.0);
+  pcork.position.z = Z0 - 0.003;
+  // OED duvar dolabı: beyaz kasa, yeşil tabela (ışıklı)
+  {
+    const cab = put(new THREE.Mesh(new RoundedBoxGeometry(0.42, 0.52, 0.2, 3, 0.02), mat.plastic({ color: 0xf4f4f1, gloss: 0.5 })), 2.35, 1.35, Z0 + 0.1);
+    const door = new THREE.Mesh(new RoundedBoxGeometry(0.36, 0.44, 0.012, 2, 0.006), mat.glass({ tint: 0xeaf6ee, rough: 0.05, thickness: 0.003 })); door.position.z = 0.104; cab.add(door);
+    const inside = new THREE.Mesh(new RoundedBoxGeometry(0.26, 0.3, 0.08, 3, 0.02), mat.plastic({ color: 0x1f9d55, gloss: 0.5 })); inside.position.set(0, -0.03, 0.02); cab.add(inside);
+    const t = textTexture('OED', { size: 64, color: '#ffffff', bg: '#138a46', pad: 14 });
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.34 / t.userData.aspect), new THREE.MeshBasicMaterial({ map: t, color: new THREE.Color(1.3, 1.3, 1.3) }));
+    sign.position.set(2.35, 1.78, Z0 + 0.012); scene.add(sign);
+  }
+  // Duvar saati
+  {
+    const c = document.createElement('canvas'); c.width = c.height = 128;
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.beginPath(); g.arc(64, 64, 62, 0, 7); g.fill();
+    g.strokeStyle = '#222'; g.lineWidth = 3; for (let i = 0; i < 12; i++) { const a = i * Math.PI / 6; g.beginPath(); g.moveTo(64 + Math.cos(a) * 50, 64 + Math.sin(a) * 50); g.lineTo(64 + Math.cos(a) * 58, 64 + Math.sin(a) * 58); g.stroke(); }
+    g.lineWidth = 5; g.beginPath(); g.moveTo(64, 64); g.lineTo(64 + 26, 64 - 16); g.stroke(); g.lineWidth = 3; g.beginPath(); g.moveTo(64, 64); g.lineTo(64 - 6, 64 - 44); g.stroke();
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+    const rim = put(new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.014, 12, 48), mat.paintedMetal({ color: 0x2a2a2a, wear: 0.05 })), -1.35, 2.4, Z0 + 0.02);
+    const face = new THREE.Mesh(new THREE.CircleGeometry(0.155, 40), new THREE.MeshStandardMaterial({ map: t, roughness: 0.4 })); face.position.z = -0.004; rim.add(face);
+  }
+  // Masa: eğitim malzemeleri (ilk yardım çantası, OED eğitim cihazı, cep maskeleri)
+  {
+    const tbl = new THREE.Group();
+    const top = new THREE.Mesh(new RoundedBoxGeometry(1.4, 0.035, 0.7, 2, 0.012), mat.plastic({ color: 0xe9e6de, gloss: 0.3 })); top.position.y = 0.74; tbl.add(top);
+    const legM = mat.brushedMetal({ color: 0xa9adb3 });
+    for (const [x, z] of [[-0.64, -0.3], [0.64, -0.3], [-0.64, 0.3], [0.64, 0.3]]) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.72, 12), legM); l.position.set(x, 0.36, z); tbl.add(l); }
+    const kit = new THREE.Mesh(new RoundedBoxGeometry(0.4, 0.2, 0.26, 3, 0.04), mat.fabric({ color: 0xc0392b, scale: 2 })); kit.position.set(-0.35, 0.86, 0); tbl.add(kit);
+    const cross = textPlane('✚', 0.12, { color: '#ffffff' }); cross.position.set(-0.35, 0.87, 0.132); tbl.add(cross);
+    const trainer = new THREE.Mesh(new RoundedBoxGeometry(0.3, 0.09, 0.24, 4, 0.03), mat.plastic({ color: 0xf2c230, gloss: 0.5 })); trainer.position.set(0.18, 0.8, 0.02); tbl.add(trainer);
+    const trf = new THREE.Mesh(new RoundedBoxGeometry(0.22, 0.01, 0.16, 2, 0.004), mat.plastic({ color: 0x2b2f33, gloss: 0.4 })); trf.position.set(0.18, 0.846, 0.02); tbl.add(trf);
+    for (let i = 0; i < 3; i++) { const m = new THREE.Mesh(new THREE.SphereGeometry(0.06, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), mat.plastic({ color: 0xdfe8ee, gloss: 0.7 })); m.scale.set(1, 0.6, 1.2); m.position.set(0.5, 0.758 + i * 0.022, -0.12); tbl.add(m); }
+    put(tbl, 2.6, 0, -2.2);
+  }
+  // İstiflenmiş sandalyeler (plastik kabuk, çelik ayak) — sağ duvar boyunca
+  {
+    const seatG = new THREE.LatheGeometry([[0, 0], [0.2, 0], [0.22, 0.02], [0.2, 0.03], [0, 0.03]].map(([r, y]) => new THREE.Vector2(r, y)), 32);
+    const seatM = mat.plastic({ color: 0x2c6fbb, gloss: 0.4 }), legM = mat.brushedMetal({ color: 0x9ea3a9 });
+    for (let i = 0; i < 3; i++) {
+      const ch = new THREE.Group();
+      const seat = new THREE.Mesh(seatG, seatM); seat.scale.set(1.05, 1, 1); seat.position.y = 0.45; ch.add(seat);
+      const back = new THREE.Mesh(new RoundedBoxGeometry(0.42, 0.34, 0.03, 3, 0.012), seatM); back.position.set(0, 0.72, -0.2); back.rotation.x = -0.12; ch.add(back);
+      for (const [x, z] of [[-0.18, -0.18], [0.18, -0.18], [-0.18, 0.18], [0.18, 0.18]]) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.46, 8), legM); l.position.set(x, 0.225, z); ch.add(l); }
+      put(ch, 4.1, 0, -1.4 + i * 0.62, -Math.PI / 2);
+    }
+  }
+  // İkinci eğitim mankeni (yarım gövde) kırmızı minderde, arka planda
+  {
+    const mm = put(new THREE.Mesh(new RoundedBoxGeometry(1.2, 0.02, 0.7, 3, 0.008), mat.rubber({ color: 0xa8322a, scale: 4 })), 0.9, 0.01, -1.75);
+    mm.userData.noFit = true;
+    const items = bodyItems(STAND, { parts: { arms: false, legs: false } });
+    items.push({ p: [sEllipsoid([0, 0.84, 0], [0.4, 0.06, 0.4])], k: 0.02, op: 'sub' });
+    const g = sdfMesh(items, { cell: LOWQ ? 0.016 : 0.012 });
+    const M = new THREE.Matrix4().makeBasis(new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 1, 0)).setPosition(0.9 + 1.2, 0.12, -1.75);
+    g.applyMatrix4(M);
+    const man = new THREE.Mesh(g, mat.plastic({ color: 0xd7b59c, gloss: 0.25 }));
+    man.userData.noFit = true; scene.add(man);
+  }
+  shell.forEach((m) => { m.userData.noCast = true; m.userData.noFit = true; });
+}
+
+// İnsanlar: motorun eklemli figürleri (@core makePerson). Hasta sırtüstü ('lie'; baş −x, yüz +y, sağ taraf +z), göğsü açık;
+// kurtarıcı sol yanında diz çökmüş ('kneel'): kalçadan öne eğilir, kollar dirsekten kilitli ve düz, omuzlar ellerin üstünde,
+// eller üst üste göğüs kemiğinin alt yarısında (avuç içi aşağı, parmaklar hastanın karşı yanına). Üst gövde basıyla iner.
+const STERNUM = [0.065, 0]; // bası noktası (x, z)
+// makePerson parça ağları ilk karede motorun parça sırasıyla eklenir (uzak kademe ağlarından sonra); günlük kısa kollu kıyafette
+const PART_NAMES = ['pelvis', 'torso', 'neck', 'head', 'eyes', 'hair', 'uarmL', 'uarmR', 'sleeveL', 'sleeveR', 'farmL', 'farmR', 'handL', 'handR',
+  'thighL', 'thighR', 'shinL', 'shinR', 'footL', 'footR'];
+function partsOf(person) {
+  const ms = person.children.filter((m) => m.isInstancedMesh && !m.geometry.attributes.iAnim);
+  return ms.length === PART_NAMES.length ? Object.fromEntries(PART_NAMES.map((k, i) => [k, ms[i]])) : null;
+}
+const pressU = { value: new THREE.Vector4(STERNUM[0], STERNUM[1], 0.11, 0) };
+/** Malzeme kopyası: bası noktasında dünya y ekseninde yerel çökme (göğüs basısı) — yalnız hastanın gövdesine */
+function pressed(m, color) {
+  const c = m.clone(), base = m.onBeforeCompile, key = m.customProgramCacheKey();
+  c.userData = m.userData;
+  if (color != null) c.color.setHex(color);
+  c.onBeforeCompile = (sh, r) => {
+    base.call(c, sh, r);
+    sh.uniforms.uPress = pressU;
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nuniform vec4 uPress;')
+      .replace('#include <project_vertex>', `
+        vec4 mvPosition = vec4(transformed, 1.0);
+        #ifdef USE_INSTANCING
+          mvPosition = instanceMatrix*mvPosition;
+        #endif
+        {
+          vec4 wp = modelMatrix*mvPosition;
+          float r = length(wp.xz - uPress.xy);
+          wp.y -= uPress.w*exp(-r*r/(uPress.z*uPress.z))*smoothstep(0.05, 0.16, wp.y);
+          mvPosition = viewMatrix*wp;
+        }
+        gl_Position = projectionMatrix*mvPosition;`);
+  };
+  c.customProgramCacheKey = () => key + '-bas' + (color != null ? '-' + color : '');
+  return c;
+}
+const V_SKIN = 0xc28a6c;
+const victim = makePerson({ seed: 5, sex: 'm', height: 1.76, build: 1.05, pose: 'lie', outfit: 'casual', sleeves: 'short', skin: V_SKIN,
+  hair: { style: 'short', color: 0x2b1d15 }, colors: { top: V_SKIN, bottom: 0x3b4a5e, shoe: 0x2a2a2c } });
+victim.rotation.y = Math.PI / 2;   // baş −x, sağ taraf +z
+scene.add(victim);
+const vParts = partsOf(victim);
+if (vParts) {
+  // göğüs açık (OED pedleri çıplak göğse yapışır): gövde ve kol ağızları deri; gözler kapalı (göz kapağı rengi)
+  const skinP = pressed(vParts.head.material);
+  for (const k of ['torso', 'sleeveL', 'sleeveR']) vParts[k].material = skinP;
+  vParts.eyes.material = pressed(vParts.head.material, 0xb98068);
+}
+// Bası noktası gövde ekseninde göğüs kemiğinin alt yarısında (gövde kemiğinde ≈ 0,29 m): o nokta STERNUM'a gelecek şekilde yerleştir
+{
+  victim.updateMatrixWorld(true);
+  const m = new THREE.Matrix4(), p = new THREE.Vector3(0, 0.29, 0);
+  if (vParts) { vParts.torso.getMatrixAt(0, m); p.applyMatrix4(m).applyMatrix4(victim.matrixWorld); } else p.set(-0.3, 0, 0);
+  victim.position.set(STERNUM[0] - p.x, MAT_H, STERNUM[1] - p.z);
+  victim.updateMatrixWorld(true);
+}
+// Göğüs üstü yüksekliği (bası noktasında), ışınla
+const ray = new THREE.Raycaster(new THREE.Vector3(STERNUM[0], 1, STERNUM[1]), new THREE.Vector3(0, -1, 0));
+const CHEST_TOP = ray.intersectObject(victim, true)[0]?.point.y ?? 0.22;
+
+// Kurtarıcı
+const RESC = [STERNUM[0], 0.018];
+const rescuer = makePerson({ seed: 11, sex: 'm', height: 1.78, build: 1.05, pose: 'kneel', outfit: 'casual', sleeves: 'short', skin: 0xa8765a,
+  hair: { style: 'short', color: 0x3a2618 }, colors: { top: 0xb8322a, bottom: 0x33415c, shoe: 0x2b2e33 } });
+scene.add(rescuer);
+const rParts = partsOf(rescuer);
+const UPPER = ['torso', 'neck', 'head', 'eyes', 'hair', 'uarmL', 'uarmR', 'sleeveL', 'sleeveR', 'farmL', 'farmR', 'handL', 'handR'];
+const rig = (() => {
+  if (!rParts) { rescuer.position.set(RESC[0], RESC[1], -0.5); return null; }
+  const hs = 1.78 / 1.75, ARM = (0.29 + 0.25) * hs;
+  const m = new THREE.Matrix4(), tA = new THREE.Vector3(), tB = new THREE.Vector3();
+  const at = (k, v) => { rParts[k].getMatrixAt(0, m); return v.setFromMatrixPosition(m); };
+  const hip = at('thighL', tA).clone().add(at('thighR', tB)).multiplyScalar(0.5);
+  const sh0 = { L: at('uarmL', tA).clone(), R: at('uarmR', tB).clone() };
+  const flex = (a, v) => v.clone().sub(hip).applyAxisAngle(new THREE.Vector3(1, 0, 0), a).add(hip);
+  // Eller (dünya): alttaki sağ elin topuğu bası noktasında, soldaki üstünde kenetli; bilek eklemi topuğun biraz gerisinde
+  const WW = { R: new THREE.Vector3(STERNUM[0] + 0.004, CHEST_TOP + 0.016, STERNUM[1] - 0.035), L: new THREE.Vector3(STERNUM[0] - 0.004, CHEST_TOP + 0.045, STERNUM[1] - 0.045) };
+  // Kalça bükümü a: omuzlar ellerin tam üstünde (yandan dik kollar) ve omuz–bilek = kol boyu
+  const reach = (a) => {
+    const sL = flex(a, sh0.L), sR = flex(a, sh0.R), mid = sL.clone().add(sR).multiplyScalar(0.5);
+    const oz = WW.R.z - mid.z;                       // kurtarıcı kökünün z'si
+    const wl = WW.L.clone().sub(new THREE.Vector3(RESC[0], RESC[1], oz));
+    return { oz, d: sL.distanceTo(wl) };
+  };
+  let lo = 0, hi = 1.3;
+  for (let i = 0; i < 40; i++) { const a = (lo + hi) / 2; if (reach(a).d > ARM) lo = a; else hi = a; }
+  const A = (lo + hi) / 2, OZ = reach(A).oz;
+  rescuer.position.set(RESC[0], RESC[1], OZ);
+  const HIP = new THREE.Matrix4().makeTranslation(hip.x, hip.y, hip.z).multiply(new THREE.Matrix4().makeRotationX(A)).multiply(new THREE.Matrix4().makeTranslation(-hip.x, -hip.y, -hip.z));
+  const W = { L: WW.L.clone().sub(rescuer.position), R: WW.R.clone().sub(rescuer.position) };
+  // el: avuç içi aşağı, parmaklar +z (hastanın karşı yanı); kemik −y parmak yönü, avuç normali sol elde −x, sağda +x
+  const handQ = {
+    L: new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0))),
+    R: new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3(0, -1, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(1, 0, 0))),
+  };
+  const T = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3(), q2 = new THREE.Quaternion(), dn = new THREE.Vector3();
+  const w = new THREE.Vector3(), S = new THREE.Vector3(), dir = new THREE.Vector3();
+  const put = (k, fn) => { const im = rParts[k]; im.getMatrixAt(0, m); fn(m); im.setMatrixAt(0, m); im.instanceMatrix.needsUpdate = true; };
+  return (dy) => {
+    T.makeTranslation(0, dy, 0);
+    put('pelvis', (mm) => mm.premultiply(HIP));
+    for (const k of UPPER) put(k, (mm) => mm.premultiply(HIP).premultiply(T));
+    for (const sd of ['L', 'R']) {
+      w.copy(W[sd]).y += dy;
+      let len = 0;
+      put('uarm' + sd, (mm) => {
+        mm.decompose(S, q, s);
+        dir.copy(w).sub(S); len = dir.length(); dir.normalize();
+        dn.set(0, -1, 0).applyQuaternion(q); q2.setFromUnitVectors(dn, dir).multiply(q);
+        mm.compose(S, q2, s);
+      });
+      put('sleeve' + sd, (mm) => { mm.decompose(p, q, s); mm.compose(S, q2, s); });
+      put('farm' + sd, (mm) => {                  // dirsek kilitli: önkol üst kolun doğrultusunda, bileğe kadar
+        mm.decompose(p, q, s);
+        p.copy(S).addScaledVector(dir, 0.29 * hs);
+        s.y *= Math.max(0.6, (len - 0.29 * hs) / (0.25 * hs));
+        mm.compose(p, q2, s);
+      });
+      put('hand' + sd, (mm) => { mm.decompose(p, q, s); mm.compose(w, handQ[sd], s); });
+    }
+  };
+})();
+let rescDrop = 0;
+function setRescuerDrop(dy) { rescDrop = dy; }
+sim.onRender(() => { rescuer.update(performance.now() / 1000); if (rig) rig(rescDrop); });
+
+// Bası noktası hedefi ve metronom halkası (veri katmanı): göğüs kemiğinin alt yarısı
+const target = new THREE.Mesh(new THREE.RingGeometry(0.042, 0.055, 48), new THREE.MeshBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false }));
 target.rotation.x = -Math.PI / 2;
-target.position.set(0.55, CHEST_H + 0.02, 0);
-chest.add(target);
-// Metronom halkası
-const beatRing = new THREE.Mesh(new THREE.RingGeometry(0.62, 0.7, 48), new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
+target.position.set(STERNUM[0] - 0.012, CHEST_TOP + 0.004, STERNUM[1]);
+scene.add(target);
+const beatRing = new THREE.Mesh(new THREE.RingGeometry(0.062, 0.07, 48), new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
 beatRing.rotation.x = -Math.PI / 2;
-beatRing.position.set(0.55, CHEST_H + 0.03, 0);
-chest.add(beatRing);
+beatRing.position.copy(target.position).y += 0.002;
+scene.add(beatRing);
 
-// Kurtarıcının elleri ve kolları (dik kollar, omuzlar ellerin üstünde)
-const rescuer = new THREE.Group();
-sim.scene.add(rescuer);
-const handMat = new THREE.MeshStandardMaterial({ color: 0xc58c5f, roughness: 0.6 });
-const sleeve = new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.7, transparent: true, opacity: 0.9 });
-const hand1 = new THREE.Mesh(new RoundedBoxGeometry(1.0, 0.3, 0.75, 3, 0.14), handMat);
-hand1.position.set(0.65, CHEST_H + 0.16, 0);
-const hand2 = new THREE.Mesh(new RoundedBoxGeometry(0.95, 0.3, 0.7, 3, 0.14), handMat);
-hand2.position.set(0.65, CHEST_H + 0.42, 0);
-hand2.rotation.y = 0.35;
-rescuer.add(hand1, hand2);
-rescuer.add(capsule([0.75, CHEST_H + 0.55, 0.25], [0.75, CHEST_H + 3.4, 1.0], 0.28, handMat));
-rescuer.add(capsule([0.75, CHEST_H + 0.55, -0.25], [0.75, CHEST_H + 3.4, -1.0], 0.28, handMat));
-rescuer.add(capsule([0.75, CHEST_H + 3.2, 0.95], [0.75, CHEST_H + 5.2, 1.5], 0.36, sleeve));
-rescuer.add(capsule([0.75, CHEST_H + 3.2, -0.95], [0.75, CHEST_H + 5.2, -1.5], 0.36, sleeve));
-const shoulders = capsule([0.75, CHEST_H + 5.3, -1.6], [0.75, CHEST_H + 5.3, 1.6], 0.42, sleeve);
-rescuer.add(shoulders);
-
-// Derinlik göstergesi (3B cetvel): 1 cm = 0,3 birim
-const GS = 0.3;
+// Derinlik göstergesi (3B cetvel, veri katmanı): 1 cm = 0,03 m, hastanın sağ yanında
+const GS = 0.03;
 const gauge = new THREE.Group();
-gauge.position.set(0.65, CHEST_H + 0.05, -2.6);
-sim.scene.add(gauge);
+gauge.position.set(STERNUM[0], CHEST_TOP + 0.005, 0.27);
+scene.add(gauge);
 {
-  const bg = new THREE.Mesh(new THREE.BoxGeometry(0.35, 8 * GS, 0.08), new THREE.MeshBasicMaterial({ color: 0x1e293b }));
+  const bg = new THREE.Mesh(new RoundedBoxGeometry(0.035, 8 * GS + 0.01, 0.01, 2, 0.004), mat.plastic({ color: 0x1e293b, gloss: 0.6 }));
   bg.position.y = -4 * GS;
-  const band = new THREE.Mesh(new THREE.BoxGeometry(0.38, 1 * GS, 0.1), new THREE.MeshBasicMaterial({ color: 0x16a34a }));
+  const band = new THREE.Mesh(new THREE.BoxGeometry(0.038, 1 * GS, 0.012), mat.glow({ color: 0x16a34a, intensity: 1.2 }));
   band.position.y = -5.5 * GS;
   gauge.add(bg, band);
-  for (const d of [0, 2, 4, 5, 6, 8]) sim.label(`${d} cm`, { parent: gauge, position: [0.55, -d * GS, 0], className: 'plain' }).el.style.fontSize = '10.5px';
+  for (const d of [0, 2, 4, 6, 8]) {
+    const t = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.0015, 0.013), new THREE.MeshBasicMaterial({ color: 0xe2e8f0 }));
+    t.position.set(0.012, -d * GS, 0); gauge.add(t);
+  }
+  for (const d of [0, 2, 4, 5, 6, 8]) sim.label(`${d} cm`, { parent: gauge, position: [0.055, -d * GS, 0], className: 'plain' }).el.style.fontSize = '10.5px';
 }
-const marker = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.3, 3), new THREE.MeshBasicMaterial({ color: 0xfacc15 }));
+const marker = new THREE.Mesh(new THREE.ConeGeometry(0.014, 0.028, 3), new THREE.MeshBasicMaterial({ color: 0xfacc15 }));
 marker.rotation.z = -Math.PI / 2;
-marker.position.x = -0.35;
+marker.position.x = -0.034;
 gauge.add(marker);
-sim.label('Derinlik', { parent: gauge, position: [0, 0.45, 0], className: 'plain' });
+sim.label('Derinlik', { parent: gauge, position: [0, 0.04, 0], className: 'plain' });
 
-// OED (AED) cihazı ve pedler
+// Telefon: hoparlörde 112 (parlayan ekran)
+{
+  const ph = new THREE.Group();
+  const body = new THREE.Mesh(new RoundedBoxGeometry(0.075, 0.009, 0.155, 3, 0.004), mat.plastic({ color: 0x15171a, gloss: 0.9 }));
+  const scr = new THREE.Mesh(new THREE.PlaneGeometry(0.066, 0.142), mat.glow({ color: 0x2f7d4f, intensity: 1.1 }));
+  scr.rotation.x = -Math.PI / 2; scr.position.y = 0.0048;
+  const lab = textPlane('112', 0.03, { color: '#ffffff' });
+  lab.rotation.x = -Math.PI / 2; lab.rotation.z = Math.PI / 2; lab.position.set(0, 0.0052, 0);
+  ph.add(body, scr, lab);
+  ph.position.set(-0.52, MAT_H + 0.0045, 0.36); ph.rotation.y = 0.5;
+  scene.add(ph);
+}
+
+// OED (AED) cihazı: yuvarlatılmış gövde, sap, ekran, parlayan şok düğmesi, ped kablosu
 const aed = new THREE.Group();
 {
-  const box = new THREE.Mesh(new RoundedBoxGeometry(1.6, 0.55, 1.2, 3, 0.12), new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.5 }));
-  box.position.y = 0.28;
-  const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.4), new THREE.MeshBasicMaterial({ color: 0x0f172a }));
-  screen.rotation.x = -Math.PI / 2; screen.position.set(-0.3, 0.56, 0);
-  const btn = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.06, 20), new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0x440000 }));
-  btn.position.set(0.4, 0.58, 0);
-  aed.add(box, screen, btn);
+  const shell = new THREE.Mesh(new RoundedBoxGeometry(0.28, 0.085, 0.24, 5, 0.03), mat.plastic({ color: 0x1f9d55, gloss: 0.55 }));
+  shell.position.y = 0.0425;
+  const face = new THREE.Mesh(new RoundedBoxGeometry(0.22, 0.01, 0.18, 3, 0.004), mat.plastic({ color: 0x2b2f33, gloss: 0.4 }));
+  face.position.y = 0.086;
+  const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.075, 0.05), mat.glow({ color: 0x7dd3fc, intensity: 0.9 }));
+  screen.rotation.x = -Math.PI / 2; screen.position.set(-0.05, 0.0915, -0.03);
+  const btnBase = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.026, 0.006, 32), mat.rubber({ color: 0x333333 }));
+  btnBase.position.set(0.06, 0.093, 0.02);
+  const btn = new THREE.Mesh(new THREE.SphereGeometry(0.018, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), mat.glow({ color: 0xff3322, intensity: 0.6 }));
+  btn.scale.y = 0.45; btn.position.set(0.06, 0.095, 0.02);
+  const handle = new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.011, 12, 32, Math.PI), mat.rubber({ color: 0x222222 }));
+  handle.position.set(0, 0.085, -0.09);
+  const bolt = textPlane('⚡', 0.022, { color: '#ffffff' });
+  bolt.rotation.x = -Math.PI / 2; bolt.position.set(0.06, 0.1, 0.055);
+  aed.add(shell, face, screen, btnBase, btn, handle, bolt);
   aed.userData.btn = btn;
-  sim.label('OED', { parent: aed, position: [0, 0.9, 0], className: 'plain' });
+  sim.label('OED', { parent: aed, position: [0, 0.16, 0], className: 'plain' });
 }
-aed.position.set(-1.2, 0, 3.4);
+aed.position.set(-0.48, MAT_H, 0.3);
+aed.rotation.y = -0.4;
 aed.visible = false;
-sim.scene.add(aed);
-const padMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.6 });
-const pads = [new THREE.Mesh(new RoundedBoxGeometry(0.9, 0.05, 0.7, 2, 0.02), padMat), new THREE.Mesh(new RoundedBoxGeometry(0.9, 0.05, 0.7, 2, 0.02), padMat)];
-pads[0].position.set(-0.75, CHEST_H + 0.02, -0.95); // sağ köprücük altı (hastanın sağı = -z tarafı)
-pads[1].position.set(0.9, CHEST_H - 0.1, 1.45); pads[1].rotation.x = 0.5; // sol koltuk altı
-pads.forEach((p) => { p.visible = false; chest.add(p); });
+scene.add(aed);
+// Pedler: göğüs yüzeyine oturtulur (sağ köprücük altı, sol koltuk altı çizgisi)
+const padMat = mat.plastic({ color: 0xf1f5f9, gloss: 0.2 });
+padMat.emissive = new THREE.Color(0xa8dcff); padMat.emissiveIntensity = 0;
+const pads = [];
+// ayakta koordinattan (ped yerleri) hastanın yatış çerçevesine: gövde kemiği (göğüs kemiği ≈ ayakta y 1,25 m, gövde kemiğinde 0,29)
+const vTorso = new THREE.Matrix4();
+if (vParts) { vParts.torso.getMatrixAt(0, vTorso); vTorso.premultiply(victim.matrixWorld); vTorso.multiply(new THREE.Matrix4().makeTranslation(0, -1.25 + 0.29, 0)); }
+for (const [sx, sy, sz, rot] of [[-0.075, 1.335, 0.1, 0.2], [0.13, 1.19, 0.04, -0.5]]) {
+  const p = new THREE.Vector3(sx, sy, sz).applyMatrix4(vTorso);
+  const r = new THREE.Raycaster(new THREE.Vector3(p.x, 0.6, p.z), new THREE.Vector3(0, -1, 0));
+  const hit = r.intersectObject(victim, true)[0];
+  const pad = new THREE.Mesh(new RoundedBoxGeometry(0.12, 0.004, 0.085, 2, 0.0018), padMat);
+  if (hit) {
+    pad.position.copy(hit.point);
+    const mw = new THREE.Matrix4();
+    if (hit.object.isInstancedMesh) hit.object.getMatrixAt(hit.instanceId, mw);
+    const n = hit.face.normal.clone().transformDirection(mw.premultiply(hit.object.matrixWorld));
+    pad.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
+    pad.rotateY(rot);
+  }
+  pad.visible = false; scene.add(pad); pads.push(pad);
+}
+{ // ped kablosu (OED'den pedlere)
+  const cable = new THREE.Mesh(loftTube(new THREE.CatmullRomCurve3([new THREE.Vector3(-0.44, MAT_H + 0.05, 0.25), new THREE.Vector3(-0.3, MAT_H + 0.01, 0.2), new THREE.Vector3(-0.12, MAT_H + 0.02, 0.18), pads[0].position.clone()]), () => 0.0035, { segs: 40, radial: 6 }), mat.rubber({ color: 0x202020 }));
+  cable.visible = false; scene.add(cable); pads.push(cable);
+}
 
 // --- Ses: metronom (kullanıcı açınca) ---
 let actx = null;
@@ -395,6 +683,12 @@ const metro = ui.toggle({ label: '🔊 Metronom (110/dk)', value: false, onChang
 } });
 const onlyCompr = ui.toggle({ label: 'Yalnız göğüs basısı (nefessiz CPR)', value: false });
 ui.text('<small>ERC: Kurtarıcı nefes vermeyi bilmiyor ya da istemiyorsan <b>kesintisiz göğüs basısı</b> yap; bu da hayat kurtarır.</small>');
+ui.section('Görünüm');
+ui.buttons([
+  { label: '🏫 Salon', onClick: () => sim.moveCamera([1.5, 1.3, 1.85], [0.22, 0.4, -0.2]) },
+  { label: '✋ Eller (yakın)', onClick: () => sim.moveCamera([0.62, 0.72, 0.72], [0.06, 0.3, -0.03]) },
+  { label: '↔ Yandan', onClick: () => sim.moveCamera([2.3, 0.75, -0.15], [0.3, 0.4, -0.12]) },
+]);
 ui.section('Oturum');
 ui.buttons([
   { label: '▶ Oturumu başlat', variant: 'primary', onClick: () => startCPR() },
@@ -439,14 +733,16 @@ sim.onRender((rdt) => {
   }
   // Görseller
   const d = G.depth;
-  chest.scale.y = (CHEST_H - (d / 10) + G.rise * 0.12) / CHEST_H;
-  rescuer.position.y = -d / 10 + G.rise * 0.12;
+  const drop = d / 100 - G.rise * 0.012; // m
+  pressU.value.w = drop;
+  setRescuerDrop(-drop);
+  target.position.y = CHEST_TOP + 0.004 - drop; beatRing.position.y = target.position.y + 0.002;
   marker.position.y = -d * GS;
   marker.material.color.setHex(d >= 4.95 && d <= 6.05 ? 0x22c55e : d > 6.05 ? 0xef4444 : 0xfacc15);
   G.rise = Math.max(0, G.rise - rdt * 1.1);
   G.flash = Math.max(0, (G.flash || 0) - rdt * 2);
-  sim.scene.background.setRGB(0.05 + G.flash * 0.6, 0.08 + G.flash * 0.6, 0.14 + G.flash * 0.3);
-  if (aed.visible) aed.userData.btn.material.emissive.setHex(G.aedStage === 3 && (performance.now() / 300) % 2 < 1 ? 0xff2222 : 0x440000);
+  padMat.emissiveIntensity = G.flash * 8;
+  if (aed.visible) aed.userData.btn.material.emissiveIntensity = G.aedStage === 3 && (performance.now() / 300) % 2 < 1 ? 5 : 0.6;
   // Metronom
   metroPh += rdt * 110 / 60;
   if (metroPh >= 1) { metroPh %= 1; if (metro.value) click(); }

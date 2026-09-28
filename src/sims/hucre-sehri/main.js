@@ -1,17 +1,20 @@
 // Hücre Şehri — hayvan hücresini bir şehir gibi yönet: glikoz + O₂ → ATP, protein üretimi, kargo ve virüs savunması.
-import { createSim, THREE, BufferGeometryUtils, clamp, rand, pick, fmt, TAU } from '@core';
+import { createSim, THREE, BufferGeometryUtils, clamp, rand, pick, fmt, TAU, mat as M, procedural } from '@core';
+import { darkMedium, blobGeometry, loftTube, fbm, tissue, softDot } from './bio.js';
 
 const CELL_R = 10, ZS = 0.82;        // hücre yarıçapı ve z basıklığı (elips)
 const STEP = 0.1;                    // sabit simülasyon adımı (sn)
 const ATP_MAX = 400;
 
 const sim = createSim({
-  background: 0x0b1628,
-  camera: { position: [0, 17, 14], target: [0, 0, 0.8], fov: 50 },
+  studio: { mood: 'lab', color: 0x3a4a52, warmth: 0.1, key: { el: 62, az: 200, power: 1.4 }, radius: 80, height: 40 },
+  camera: { position: [2.2, 11.6, 13.4], target: [0, -0.3, 0.4], fov: 48 },
   controls: { maxPolarAngle: 1.3, minDistance: 8, maxDistance: 42 },
   info: `
     <h3>Ne görüyorsun?</h3>
-    <p>Bir <b>hayvan hücresi</b>ni yukarıdan görüyorsun. Her organel şehirde bir göreve benzer:
+    <p>Bir <b>hayvan hücresi</b>ni tepesi kesilip açılmış hâlde (kesit görünümü) yukarıdan görüyorsun: kalın <b>zar</b>ın içinde yarı saydam
+    <b>sitoplazma</b>, çift zarlı <b>çekirdek</b> (porları ve içindeki kromatinle), içi <b>krista</b> kıvrımlarıyla dolu mitokondriler,
+    üst üste dizilmiş Golgi keseleri ve kıvrımlı ER tabakaları. Her organel şehirde bir göreve benzer:
     <b>çekirdek</b> belediye (DNA'daki planlar), <b>mitokondri</b> enerji santrali, <b>ribozom</b> fabrika,
     <b>ER</b> üretim hattı, <b>Golgi</b> kargo merkezi, <b>lizozom</b> geri dönüşüm, <b>hücre zarı</b> sınır kapısı.
     Sarı noktalar glikoz, mavi noktalar oksijen, parlak altın noktalar <b>ATP</b> (hücrenin pili), yeşiller protein,
@@ -50,43 +53,129 @@ const INFO = {
   tcell: { t: '🛡️ T hücresi', d: 'Bağışıklık sisteminin askeri. Enfekte hücrenin yüzeyindeki "yardım bayrağını" (MHC) görünce o hücreyi kontrollü biçimde yok eder, böylece virüs komşulara yayılamaz.', f: 'Buna programlı hücre ölümü (apoptoz) denir.' },
 };
 
-// --- Malzemeler ---
+// --- Ortam: koyu hücre dışı sıvı, derin sis, süzülen parçacıklar (elektron mikroskobu esintili renk sanatı) ---
+darkMedium(sim, { top: 0x1f5058, bottom: 0x081a20, glow: 0x2f7a80, glowDir: [0.3, 0.8, -0.5], tint: 0x5a2c56, cloud: 1.4,
+  fog: 0x0d2a30, density: 0.022, motes: 520, box: [70, 26, 60], center: [0, -2, -6], moteColor: 0xa6f0ff, moteColor2: 0xffd0e8, moteSize: 0.16, moteOpacity: 0.3 });
+const LOWQ = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+
+// --- Malzemeler --- (ıslak, yarı saydam görünümlü biyolojik yüzeyler; parlaklık oyun durumuna göre değişir)
 const organMats = {}; // anahtar → [materyal, temel parlaklık]
 function mat(key, color, opts = {}) {
-  const m = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.15, roughness: 0.55, ...opts });
+  const m = tissue({ color, veins: opts.veins ?? 0.15, scale: opts.scale ?? 1.4 });
+  delete opts.veins; delete opts.scale;
+  m.emissive = new THREE.Color(color); m.emissiveIntensity = 0.15;
+  m.clearcoat = 0.7; m.clearcoatRoughness = 0.25; m.roughness = 0.42;
+  Object.assign(m, opts);
   (organMats[key] ||= []).push(m);
   return m;
 }
 const clickables = [];
 const tag = (obj, key) => { obj.userData.org = key; clickables.push(obj); return obj; };
+const noisy = (g, amp, freq, seed = 0) => { // yüzeyi normal boyunca gürültüyle boz (organik)
+  const p = g.attributes.position, v = new THREE.Vector3();
+  if (!g.attributes.normal) g.computeVertexNormals(); const n = g.attributes.normal;
+  for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); const d = amp * fbm(v.x * freq + seed, v.y * freq, v.z * freq - seed, 3) * 2; p.setXYZ(i, v.x + n.getX(i) * d, v.y + n.getY(i) * d, v.z + n.getZ(i) * d); }
+  g.computeVertexNormals(); return g;
+};
+
+/** Kesit: yüzeyin bir düzlemin üstünde kalan üçgenlerini at (organelin içini göstermek için). up: 'y' ekseninde kesme yüksekliği */
+function cutAbove(g, yCut) {
+  const q = g.index ? g.toNonIndexed() : g;
+  const p = q.attributes.position, keep = [];
+  for (let i = 0; i < p.count; i += 3) {
+    const cy = (p.getY(i) + p.getY(i + 1) + p.getY(i + 2)) / 3;
+    if (cy <= yCut) keep.push(i);
+  }
+  const out = new THREE.BufferGeometry();
+  for (const name of ['position', 'normal']) {
+    const a = q.attributes[name];
+    if (!a) continue;
+    const arr = new Float32Array(keep.length * 9);
+    keep.forEach((i, k) => { for (let j = 0; j < 9; j++) arr[k * 9 + j] = a.array[i * 3 + j]; });
+    out.setAttribute(name, new THREE.BufferAttribute(arr, 3));
+  }
+  if (!out.attributes.normal) out.computeVertexNormals();
+  return out;
+}
+const DS = { side: THREE.DoubleSide };
 
 // --- Hücre: sitoplazma, zar, kapılar ---
 const cell = new THREE.Group();
 scene.add(cell);
-const floorMat = mat('sito', 0x1f7a8c, { roughness: 0.9 });
-floorMat.emissiveIntensity = 0.12;
-const floor = tag(new THREE.Mesh(new THREE.CircleGeometry(CELL_R, 72), floorMat), 'sito');
+const floorMat = mat('sito', 0x1f7a8c, { veins: 0.35, scale: 0.9 });
+floorMat.emissiveIntensity = 0.12; floorMat.roughness = 0.6; floorMat.clearcoat = 0.4;
+const floorGeo = new THREE.RingGeometry(0.001, CELL_R, 128, 40);
+{ // sitoplazma tabanı: hafif çukur, kabarcıklı
+  const p = floorGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) { const x = p.getX(i), y = p.getY(i), r = Math.min(1, Math.hypot(x, y) / CELL_R); p.setZ(i, -1.7 * Math.sqrt(1 - r * r) * (0.75 + 0.25 * (1 - r)) + 0.1 * fbm(x * 0.5, y * 0.5, 3.1, 3)); }
+  floorGeo.computeVertexNormals();
+}
+const floor = tag(new THREE.Mesh(floorGeo, floorMat), 'sito');
 floor.rotation.x = -Math.PI / 2;
 floor.scale.set(1, ZS, 1); // döndürülmüş dairede y ölçeği dünyada z olur
 floor.position.y = -0.05;
 cell.add(floor);
 const floorBase = new THREE.Color(0x1f7a8c), floorDirty = new THREE.Color(0x6b5a2e), floorSick = new THREE.Color(0x7a2e4a);
 
-const domeMat = mat('zar', 0xf9a8d4, { transparent: true, opacity: 0.13, depthWrite: false, side: THREE.DoubleSide });
-const dome = new THREE.Mesh(new THREE.SphereGeometry(CELL_R, 56, 20, 0, TAU, 0, Math.PI / 2), domeMat);
-dome.scale.set(1, 0.32, ZS);
+// Hücre zarı: kalınlığı olan elipsoit kabuk; tepesi kesilip açılmış (kesit), kesik kenarda lipit çift katmanı görünür
+const DOME_H = 3.0, CUT = 0.42, THK = 0.3;
+const domeMat = mat('zar', 0xe8c0dc, { transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide, veins: 0.05, scale: 3 });
+domeMat.sheen = 1; domeMat.sheenRoughness = 0.35; domeMat.clearcoat = 1; domeMat.clearcoatRoughness = 0.12;
+const domeGeo = (() => {
+  const pr = [], N = 40, Ri = CELL_R - THK, Hi = DOME_H - THK;
+  for (let i = 0; i <= N; i++) { const y = (i / N) * CUT * DOME_H; pr.push(new THREE.Vector2(CELL_R * Math.sqrt(1 - (y / DOME_H) ** 2), y)); }
+  const yc = CUT * DOME_H;
+  for (let i = N; i >= 0; i--) { const y = (i / N) * yc; pr.push(new THREE.Vector2(Ri * Math.sqrt(Math.max(0, 1 - (y / Hi) ** 2)), y)); }
+  const g = new THREE.LatheGeometry(pr, LOWQ ? 96 : 160);
+  g.scale(1, 1, ZS);
+  return noisy(g, 0.06, 0.6);
+})();
+const dome = new THREE.Mesh(domeGeo, domeMat);
+dome.userData.noCast = true;
 cell.add(dome);
-const rimMat = mat('zar', 0xec4899, { roughness: 0.4 });
-const rim = tag(new THREE.Mesh(new THREE.TorusGeometry(CELL_R, 0.32, 10, 120), rimMat), 'zar');
+// Kesik kenar: zarın iki lipit tabakası (dış açık, iç koyu), kalın ve ıslak
+const rimMat = mat('zar', 0xd9a0c8, { veins: 0.15, scale: 4 });
+const lipR = CELL_R * Math.sqrt(1 - CUT * CUT) - THK * 0.2;
+const rim = tag(new THREE.Mesh(noisy(new THREE.TorusGeometry(lipR, 0.11, 12, 200), 0.03, 2), rimMat), 'zar');
 rim.rotation.x = -Math.PI / 2;
 rim.scale.set(1, ZS, 1);
-cell.add(rim);
+rim.position.y = CUT * DOME_H;
+const rimIn = new THREE.Mesh(noisy(new THREE.TorusGeometry(lipR - 0.22, 0.09, 10, 200), 0.03, 2), mat('zar', 0x9a4a8a, { veins: 0.1, scale: 4 }));
+rimIn.rotation.x = -Math.PI / 2; rimIn.scale.set(1, ZS, 1); rimIn.position.y = CUT * DOME_H - 0.12;
+cell.add(rim, rimIn);
+// Ekvator: kubbe ile taban zarının birleştiği kalın zar kuşağı (yan kesitte zar kalınlığı)
+const belt = tag(new THREE.Mesh(noisy(new THREE.TorusGeometry(CELL_R - 0.08, 0.2, 14, 220), 0.05, 1.4), mat('zar', 0xd98ab8, { veins: 0.2, scale: 2 })), 'zar');
+belt.rotation.x = -Math.PI / 2; belt.scale.set(1, ZS, 1); belt.position.y = 0.02;
+cell.add(belt);
+// Sitoplazma: kalabalık protein ve metabolitlerin yarı saydam pusu (hacim hissi, derinlikte katmanlanır)
+{
+  const NP = LOWQ ? 700 : 1500, pos = new Float32Array(NP * 3), col = new Float32Array(NP * 3);
+  const c1 = new THREE.Color(0x7fe0e8), c2 = new THREE.Color(0xf0c0e0);
+  for (let i = 0; i < NP; i++) {
+    const a = rand(0, TAU), r = Math.sqrt(Math.random()) * (CELL_R - 0.6), rr = r / CELL_R;
+    const top = DOME_H * Math.sqrt(1 - rr * rr) * 0.95, bot = -1.5 * Math.sqrt(1 - rr * rr);
+    pos[i * 3] = Math.cos(a) * r; pos[i * 3 + 1] = rand(bot, Math.min(top, CUT * DOME_H)); pos[i * 3 + 2] = Math.sin(a) * r * ZS;
+    const c = Math.random() < 0.8 ? c1 : c2, k = rand(0.5, 1.2);
+    col[i * 3] = c.r * k; col[i * 3 + 1] = c.g * k; col[i * 3 + 2] = c.b * k;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const haze = new THREE.Points(g, new THREE.PointsMaterial({ map: softDot(), size: 0.22, vertexColors: true, transparent: true, opacity: 0.3,
+    depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true }));
+  haze.raycast = () => {}; haze.frustumCulled = false;
+  cell.add(haze);
+}
 
 const membranePoint = (th, out, r = CELL_R) => out.set(Math.cos(th) * r, 0.35, Math.sin(th) * r * ZS);
-{
-  const n = 20, gate = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.3, 0.3, 1.0, 10), mat('zar', 0xfacc15), n);
+{ // taşıyıcı proteinler: zarı delen, ortası kanallı kabarcık kümeleri
+  const tg = BufferGeometryUtils.mergeGeometries([0, 1, 2].map((k) => {
+    const a = (k / 3) * TAU;
+    return blobGeometry(0.19, { detail: 3, amp: 0.1, freq: 3, seed: k, stretch: [1, 2.6, 1] }).translate(Math.cos(a) * 0.17, 0, Math.sin(a) * 0.17);
+  }));
+  const n = 20, gate = new THREE.InstancedMesh(tg, mat('zar', 0xfacc15, { veins: 0.05, scale: 4 }), n);
   const d = new THREE.Object3D();
-  for (let i = 0; i < n; i++) { membranePoint((i / n) * TAU + 0.1, d.position); d.updateMatrix(); gate.setMatrixAt(i, d.matrix); }
+  for (let i = 0; i < n; i++) { membranePoint((i / n) * TAU + 0.1, d.position); d.rotation.y = i; d.updateMatrix(); gate.setMatrixAt(i, d.matrix); }
   cell.add(tag(gate, 'zar'));
 }
 
@@ -95,24 +184,47 @@ const NUC = V3(-2.9, 0.9, -0.4);
 {
   const g = new THREE.Group();
   g.position.copy(NUC);
-  const env = new THREE.Mesh(new THREE.SphereGeometry(2.6, 40, 24), mat('cekirdek', 0xa78bfa, { transparent: true, opacity: 0.55, depthWrite: false }));
-  env.scale.y = 0.6;
-  g.add(tag(env, 'cekirdek'));
-  const nucleolus = new THREE.Mesh(new THREE.SphereGeometry(0.85, 24, 16), mat('cekirdek', 0x6d28d9));
-  nucleolus.position.set(0.5, 0, 0.3);
+  // Çift zarlı çekirdek kılıfı: dış ve iç zar, tepesi kesik (içteki kromatin ve çekirdekçik görünür)
+  const envG = blobGeometry(2.6, { detail: LOWQ ? 14 : 20, amp: 0.035, freq: 1.2 }).scale(1, 0.6, 1);
+  const env = new THREE.Mesh(cutAbove(envG, 0.62), mat('cekirdek', 0x9c86e8, { veins: 0.12, scale: 2, ...DS }));
+  const envIn = new THREE.Mesh(cutAbove(blobGeometry(2.42, { detail: LOWQ ? 14 : 20, amp: 0.035, freq: 1.2 }).scale(1, 0.56, 1), 0.5),
+    mat('cekirdek', 0x5b3fa8, { veins: 0.2, scale: 3, ...DS }));
+  g.add(tag(env, 'cekirdek'), tag(envIn, 'cekirdek'));
+  // Nükleoplazma: kesitten görünen koyu, dokulu iç yüzey
+  const npl = new THREE.Mesh(new THREE.CircleGeometry(2.3, 64).rotateX(-Math.PI / 2), mat('cekirdek', 0x3a2470, { veins: 0.35, scale: 3 }));
+  npl.position.y = -0.55; npl.scale.z = 0.95;
+  g.add(tag(npl, 'cekirdek'));
+  const nucleolus = new THREE.Mesh(blobGeometry(0.85, { detail: 10, amp: 0.12, freq: 2.2 }), mat('cekirdek', 0x6d28d9, { veins: 0.4, scale: 4 }));
+  nucleolus.position.set(0.5, -0.05, 0.3);
+  nucleolus.scale.y = 0.7;
   g.add(tag(nucleolus, 'cekirdek'));
   const pts = [];
-  for (let i = 0; i < 26; i++) pts.push(V3(rand(-1.8, 1.8), rand(-0.6, 0.6), rand(-1.8, 1.8)).clampLength(0, 1.9));
-  const chrom = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 260, 0.07, 5), mat('cekirdek', 0xf0abfc));
+  for (let i = 0; i < 30; i++) pts.push(V3(rand(-1.8, 1.8), rand(-0.45, 0.35), rand(-1.8, 1.8)).clampLength(0, 1.95));
+  const chromMat = mat('cekirdek', 0xe7a4f5, { veins: 0.05, scale: 6, ...DS });
+  const chrom = new THREE.Mesh(loftTube(new THREE.CatmullRomCurve3(pts), (t) => 0.075 * (1 + 0.45 * Math.sin(t * 140)), { segs: LOWQ ? 600 : 900, radial: 7, noiseAmp: 0.22, noiseFreq: 3 }), chromMat);
   g.add(tag(chrom, 'cekirdek'));
-  const pores = new THREE.InstancedMesh(new THREE.TorusGeometry(0.16, 0.05, 6, 12), mat('cekirdek', 0x4c1d95), 16);
+  // Heterokromatin: zarın iç yüzüne yapışık yoğun kümeler
+  const hg = blobGeometry(0.34, { detail: 3, amp: 0.3, freq: 2.4, seed: 3 });
+  const het = new THREE.InstancedMesh(hg, mat('cekirdek', 0xb57ad8, { veins: 0.2, scale: 5 }), 14);
+  { const d = new THREE.Object3D();
+    for (let i = 0; i < 14; i++) { const a = (i / 14) * TAU + rand(-0.2, 0.2); d.position.set(Math.cos(a) * 2.05, rand(-0.45, -0.1), Math.sin(a) * 2.05); d.rotation.set(rand(0, 3), rand(0, 3), 0); d.scale.set(rand(0.8, 1.4), 0.6, rand(0.8, 1.2)); d.updateMatrix(); het.setMatrixAt(i, d.matrix); } }
+  g.add(tag(het, 'cekirdek'));
+  // Por kompleksleri: sekiz alt birimli halkalar, kılıf yüzeyine dik
+  const poreG = BufferGeometryUtils.mergeGeometries([...Array(8)].map((_, k) => {
+    const a = (k / 8) * TAU;
+    return blobGeometry(0.065, { detail: 1, amp: 0.15, freq: 3, seed: k }).scale(1, 1, 1.6).translate(Math.cos(a) * 0.17, Math.sin(a) * 0.17, 0);
+  }));
+  const NPORE = LOWQ ? 40 : 70, pores = new THREE.InstancedMesh(poreG, mat('cekirdek', 0xd9c8ff, { veins: 0, scale: 6 }), NPORE);
   const d = new THREE.Object3D();
-  for (let i = 0; i < 16; i++) {
-    const a = (i / 16) * TAU;
-    d.position.set(Math.cos(a) * 2.45, 0.35 * Math.sin(i * 2.3), Math.sin(a) * 2.45);
-    d.lookAt(0, 0, 0); d.updateMatrix(); pores.setMatrixAt(i, d.matrix);
+  let np = 0;
+  for (let i = 0; np < NPORE && i < 800; i++) {
+    const u = rand(-1, 1), a = rand(0, TAU), q = Math.sqrt(1 - u * u);
+    const pos = V3(q * Math.cos(a) * 2.6, u * 2.6 * 0.6, q * Math.sin(a) * 2.6);
+    if (pos.y > 0.5) continue;
+    d.position.copy(pos); d.lookAt(pos.x * 2, pos.y + pos.y / 0.36, pos.z * 2); d.updateMatrix(); pores.setMatrixAt(np++, d.matrix);
   }
-  g.add(pores);
+  pores.count = np;
+  g.add(tag(pores, 'cekirdek'));
   cell.add(g);
 }
 
@@ -124,12 +236,14 @@ const riboPos = [];
   const g = new THREE.Group();
   g.position.set(NUC.x, 0.25, NUC.z);
   g.rotation.y = ER_PSI;
-  const erMat = mat('er', 0x60a5fa);
-  for (const r of ER_R) {
-    const m = new THREE.Mesh(new THREE.TorusGeometry(r, 0.17, 8, 56, ER_ARC), erMat);
-    m.rotation.x = -Math.PI / 2;
+  const erMat = mat('er', 0x6aa8f0, { veins: 0.12, scale: 3, ...DS });
+  // Kıvrımlı sisterna keseleri: ana üç tabaka + araya katlanan ince kıvrımlar (hacimli, dalgalı perdeler)
+  [...ER_R.map((r, n) => [r, n, 0.2, 0]), ...ER_R.slice(0, 2).map((r, n) => [r + 0.27, n + 3, 0.14, 0.18]), [ER_R[0] - 0.27, 5, 0.13, -0.15]].forEach(([r, n, w, dy]) => {
+    const pts = [];
+    for (let i = 0; i <= 28; i++) { const a = (i / 28) * ER_ARC, rr = r + 0.12 * Math.sin(a * 5 + n); pts.push(V3(rr * Math.cos(a), dy + 0.22 * Math.sin(a * 6 + n * 2), -rr * Math.sin(a))); }
+    const m = new THREE.Mesh(loftTube(new THREE.CatmullRomCurve3(pts), (t) => w * (0.75 + 0.25 * Math.sin(t * 31 + n)) * Math.min(1, Math.sin(Math.PI * t) * 6), { segs: 140, radial: 16, squash: 0.5, view: [0, 1, 0], noiseAmp: 0.1, noiseFreq: 2.5 }), erMat);
     g.add(tag(m, 'er'));
-  }
+  });
   cell.add(g);
   for (const r of ER_R) for (let k = 0; k < 24; k++) {
     const p = erPoint(r + pick([-0.24, 0.24]), (k + 0.5) / 24 * ER_ARC, new THREE.Vector3());
@@ -140,9 +254,11 @@ const riboPos = [];
     const p = V3(Math.cos(a) * r, 0.2, Math.sin(a) * r * ZS);
     if (p.distanceTo(NUC) > 3) riboPos.push(p);
   }
-  const ribo = new THREE.InstancedMesh(new THREE.SphereGeometry(0.14, 8, 6), mat('ribozom', 0xfb3f6c), riboPos.length);
+  // ribozom: büyük + küçük alt birim
+  const rg = BufferGeometryUtils.mergeGeometries([blobGeometry(0.13, { detail: 3, amp: 0.12, freq: 3 }), blobGeometry(0.09, { detail: 3, amp: 0.12, freq: 3, seed: 2 }).translate(0.05, 0.1, 0.02)]);
+  const ribo = new THREE.InstancedMesh(rg, mat('ribozom', 0xfb3f6c, { veins: 0, scale: 6 }), riboPos.length);
   const d = new THREE.Object3D();
-  riboPos.forEach((p, i) => { d.position.copy(p); d.updateMatrix(); ribo.setMatrixAt(i, d.matrix); });
+  riboPos.forEach((p, i) => { d.position.copy(p); d.rotation.set(rand(0, 3), rand(0, 3), 0); d.updateMatrix(); ribo.setMatrixAt(i, d.matrix); });
   cell.add(tag(ribo, 'ribozom'));
 }
 
@@ -152,13 +268,18 @@ const GOL = V3(4.3, 0.4, -1.4);
   const g = new THREE.Group();
   g.position.copy(GOL);
   g.rotation.y = -1.0;
-  const cols = [0xfb7185, 0xf59e0b, 0xfbbf24, 0xfde047];
-  cols.forEach((c, k) => {
-    const m = new THREE.Mesh(new THREE.TorusGeometry(1.0 + k * 0.38, 0.19, 8, 32, 2.0), mat('golgi', c));
-    m.rotation.x = -Math.PI / 2;
-    m.position.y = k * 0.06;
+  const cols = [0xf07a8e, 0xf0985a, 0xf0b850, 0xf0d060];
+  // Üst üste 6 yassı sisterna (cis → trans), ortası ince, uçları şişkin; kesecik tomurcukları
+  for (let k = 0; k < 6; k++) {
+    const r = 0.95 + k * 0.3, pts = [], arc = 2.0 - k * 0.08;
+    for (let i = 0; i <= 18; i++) { const a = (i / 18) * arc + k * 0.04; pts.push(V3(r * Math.cos(a), 0.08 * Math.sin(a * 4 + k), -r * Math.sin(a))); }
+    const m = new THREE.Mesh(loftTube(new THREE.CatmullRomCurve3(pts), (t) => 0.21 * (0.8 + 0.7 * Math.pow(Math.abs(t - 0.5) * 2, 5)), { segs: 70, radial: 16, squash: 0.42, view: [0, 1, 0], noiseAmp: 0.06, noiseFreq: 3 }),
+      mat('golgi', cols[Math.min(3, Math.floor(k * 4 / 6))], { veins: 0.1, scale: 3, ...DS }));
+    m.position.y = 0.05 + k * 0.17;
     g.add(tag(m, 'golgi'));
-  });
+  }
+  const vg = blobGeometry(0.16, { detail: 4, amp: 0.1 });
+  for (let k = 0; k < 12; k++) { const v = new THREE.Mesh(vg, organMats.golgi[k % 4]); const a = rand(-0.2, 2.2), r = rand(1.0, 2.4); v.position.set(r * Math.cos(a) + 0.3, rand(0, 0.35), -r * Math.sin(a) + rand(-0.2, 0.2)); g.add(tag(v, 'golgi')); }
   cell.add(g);
 }
 const GOL_OUT = V3(6.0, 0.5, -1.5); // paketlerin çıktığı nokta
@@ -166,19 +287,33 @@ const GOL_OUT = V3(6.0, 0.5, -1.5); // paketlerin çıktığı nokta
 // --- Mitokondriler (santral) ---
 const M_SLOTS = [[-6.9, 3.2, 0.4], [0.9, 4.8, -0.3], [6.1, 3.3, 0.9], [-6.4, -3.9, -0.6], [2.0, -5.9, 0.2],
   [-3.4, 5.6, 1.2], [7.8, -3.4, 1.3], [-8.3, 0.1, 1.6], [4.2, 5.7, -0.8], [-1.2, -6.4, 0.5]];
-const mitoGeo = new THREE.CapsuleGeometry(0.55, 1.5, 4, 14);
+// Kesit mitokondri: dış zar + iç zar (tepesi açık), içeride iç zarın kıvrımları (krista) karşılıklı raflar gibi
+const mitoGeo = cutAbove(noisy(new THREE.CapsuleGeometry(0.55, 1.5, 10, 28).rotateZ(Math.PI / 2), 0.05, 1.4), 0.2);
+const mitoInGeo = cutAbove(noisy(new THREE.CapsuleGeometry(0.46, 1.4, 10, 28).rotateZ(Math.PI / 2), 0.04, 1.6, 2), 0.12);
 const cristaeGeo = (() => {
-  const pts = [];
-  for (let i = 0; i <= 8; i++) pts.push(V3(-0.95 + i * 0.24, 0.3, i % 2 ? 0.34 : -0.34));
-  return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.1), 60, 0.07, 5);
+  const parts = [];
+  for (let i = 0; i < 9; i++) {
+    const x = -0.8 + i * 0.2, side = i % 2 ? 1 : -1;
+    const pg = new THREE.PlaneGeometry(0.62, 0.5, 8, 6);
+    const pp = pg.attributes.position;
+    for (let k = 0; k < pp.count; k++) { const u = pp.getX(k), v = pp.getY(k); pp.setZ(k, 0.035 * Math.sin(v * 22 + i) + 0.02 * Math.sin(u * 14)); }
+    pg.rotateY(Math.PI / 2).translate(x, -0.12, side * 0.13);
+    parts.push(pg);
+  }
+  return BufferGeometryUtils.mergeGeometries(parts);
 })();
-const mitoMat = mat('mito', 0xf97316);
-const cristaeMat = mat('mito', 0xffedd5);
+const mitoMat = mat('mito', 0xe86a2a, { veins: 0.2, scale: 3, ...DS });
+const mitoInMat = mat('mito', 0xb8401e, { veins: 0.25, scale: 4, ...DS });
+const cristaeMat = mat('mito', 0xffd9b8, { veins: 0.1, scale: 5, ...DS });
+const matrixMat = mat('mito', 0x6a1a10, { veins: 0.3, scale: 6 });
+const matrixGeo = new THREE.CapsuleGeometry(0.4, 1.3, 4, 16).rotateZ(Math.PI / 2).scale(1, 0.25, 1).translate(0, -0.3, 0);
 const mitos = M_SLOTS.map(([x, z, r]) => {
   const g = new THREE.Group();
   const outer = new THREE.Mesh(mitoGeo, mitoMat);
-  outer.rotation.z = Math.PI / 2;
-  g.add(tag(outer, 'mito'), tag(new THREE.Mesh(cristaeGeo, cristaeMat), 'mito'));
+  const inner = new THREE.Mesh(mitoInGeo, mitoInMat);
+  const mx = new THREE.Mesh(matrixGeo, matrixMat);
+  const cr = new THREE.Mesh(cristaeGeo, cristaeMat);
+  g.add(tag(outer, 'mito'), tag(inner, 'mito'), tag(mx, 'mito'), tag(cr, 'mito'));
   g.position.set(x, 0.45, z);
   g.rotation.y = r;
   g.scale.set(1, 0.65, 1);
@@ -189,8 +324,8 @@ const mitos = M_SLOTS.map(([x, z, r]) => {
 
 // --- Lizozomlar (geri dönüşüm) ---
 const L_SLOTS = [[-4.6, 3.3], [2.9, 2.3], [-4.5, -5.3], [5.6, -4.8], [-8.2, -2.6], [0.9, -3.9], [2.4, 6.4], [8.4, 1.0]];
-const lysoGeo = new THREE.SphereGeometry(0.42, 18, 12);
-const lysoMat = mat('lizozom', 0x4ade80);
+const lysoGeo = blobGeometry(0.42, { detail: 8, amp: 0.1, freq: 1.8 });
+const lysoMat = mat('lizozom', 0x4ade80, { veins: 0.3, scale: 5 });
 const lysos = L_SLOTS.map(([x, z]) => {
   const m = tag(new THREE.Mesh(lysoGeo, lysoMat), 'lizozom');
   m.position.set(x, 0.5, z);
@@ -198,12 +333,72 @@ const lysos = L_SLOTS.map(([x, z]) => {
   cell.add(m);
   return { mesh: m, home: V3(x, 0.5, z), phase: rand(0, TAU) };
 });
+// Hücre iskeleti (mikrotübüller): çekirdekten zara uzanan ince, hafif ışıyan lifler
+{
+  const fm = tissue({ color: 0x2a6070, veins: 0, scale: 4 });
+  Object.assign(fm, { transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide });
+  fm.emissive = new THREE.Color(0x7fe0ff); fm.emissiveIntensity = 0.35;
+  const parts = [];
+  for (let k = 0; k < 26; k++) {
+    const a = (k / 26) * TAU + rand(-0.1, 0.1), r1 = CELL_R - 0.6;
+    const e = V3(Math.cos(a) * r1, 0.05, Math.sin(a) * r1 * ZS), s = NUC.clone().add(V3(Math.cos(a) * 2.7, -0.75, Math.sin(a) * 2.7 * 0.8));
+    const m = s.clone().lerp(e, 0.5).add(V3(rand(-0.8, 0.8), 0.1, rand(-0.8, 0.8)));
+    parts.push(loftTube(new THREE.CatmullRomCurve3([s, m, e]), () => 0.025, { segs: 30, radial: 4, caps: false }));
+  }
+  const cs = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(parts), fm);
+  cs.userData.noCast = true; cs.raycast = () => {};
+  cell.add(cs);
+}
+// Doku bağlamı: hücrenin oturduğu hücre dışı matris (bazal zar + kolajen lif demetleri) ve sisin içinde yan yana dizilmiş,
+// alçak komşu hücreler (tek katlı doku). Hepsi hücrenin altında/uzakta kalır; kadrajı kesen yakın kütle yok.
+{
+  const ecm = procedural({
+    key: 'hs-ecm', physical: true, bump: 0.04,
+    params: { color: 0xffffff, roughness: 0.55, sheen: 0.5, sheenRoughness: 0.5, sheenColor: new THREE.Color(0x9fdcd8) },
+    pattern: `
+      float n = fbm3(p*0.08, 4);
+      float f1 = pow(ridge3(vec3(p.x*0.35, 0.0, p.z*0.05) + n*1.5), 10.0);
+      float f2 = pow(ridge3(vec3(p.x*0.06 + 3.0, 0.0, p.z*0.3) + n*1.7), 10.0);
+      col = mix(vec3(0.06, 0.2, 0.22), vec3(0.14, 0.32, 0.33), n) + vec3(0.3, 0.22, 0.28)*(f1 + f2)*0.6;
+      rough = 0.5 + 0.2*n;
+      h = n*0.4 + (f1 + f2)*0.5;`,
+  });
+  const floorE = new THREE.Mesh(new THREE.PlaneGeometry(160, 160, 1, 1).rotateX(-Math.PI / 2), ecm);
+  floorE.position.y = -2.6; floorE.raycast = () => {}; floorE.userData.noCast = true;
+  scene.add(floorE);
+  // Kolajen lif demetleri: tabanda uzanan, hafif kıvrık ince tüpler
+  const colMat = tissue({ color: 0xc7b8c8, veins: 0.05, scale: 3 });
+  colMat.side = THREE.DoubleSide;
+  const fibs = [];
+  for (let k = 0; k < (LOWQ ? 26 : 50); k++) {
+    const a = rand(0, TAU), R = rand(11, 40), th = rand(0, Math.PI), L = rand(5, 12);
+    const c = V3(Math.cos(a) * R, -2.45, Math.sin(a) * R * 0.9 - 3), d = V3(Math.cos(th), 0, Math.sin(th));
+    const pts = [-1, -0.33, 0.33, 1].map((t, i) => c.clone().addScaledVector(d, t * L / 2).add(V3(rand(-0.5, 0.5), 0.12 * (i % 2), rand(-0.5, 0.5))));
+    fibs.push(loftTube(new THREE.CatmullRomCurve3(pts), () => rand(0.05, 0.1), { segs: 30, radial: 6, caps: true }));
+  }
+  const fm2 = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(fibs.map((g) => { const q = g.index ? g.toNonIndexed() : g; for (const k of Object.keys(q.attributes)) if (k !== 'position' && k !== 'normal') q.deleteAttribute(k); return q; })), colMat);
+  fm2.raycast = () => {}; fm2.userData.noCast = true;
+  scene.add(fm2);
+  // Komşu hücreler: alçak, basık kubbeler (sisle yumuşar); kameradan uzakta, halka biçiminde
+  const nm = tissue({ color: 0x3a7a80, veins: 0.2, scale: 0.6 });
+  nm.clearcoat = 0.4; nm.roughness = 0.45;
+  nm.emissive = new THREE.Color(0x0d3036); nm.emissiveIntensity = 0.5;
+  for (let k = 0; k < 9; k++) {
+    const a = (k / 9) * TAU + 0.3, R = rand(22.5, 25);
+    if (Math.sin(a) > 0.55) continue; // kameranın önündekiler (görüş dışı / yakın) atlanır
+    const n = new THREE.Mesh(blobGeometry(CELL_R * rand(0.95, 1.1), { detail: LOWQ ? 7 : 10, amp: 0.08, freq: 1.2, seed: k, stretch: [1, 0.2, 0.85] }), nm);
+    n.position.set(Math.cos(a) * R, -2.3, Math.sin(a) * R * 0.9);
+    n.raycast = () => {};
+    scene.add(n);
+  }
+}
 
 // --- Parçacık akışları (glikoz, O₂, ATP, protein, kargo, atık) ---
 function makePool(color, r, n, emissive = 0.4) {
-  const m = new THREE.InstancedMesh(new THREE.SphereGeometry(r, 8, 6),
-    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: emissive, roughness: 0.5 }), n);
+  const m = new THREE.InstancedMesh(blobGeometry(r, { detail: 2, amp: 0.08, freq: 3 }),
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: emissive * 1.6, roughness: 0.35 }), n);
   m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  m.userData.noCast = true;
   const arr = m.instanceMatrix.array;
   arr.fill(0);
   for (let i = 0; i < n; i++) arr[i * 16 + 15] = 1;
@@ -248,22 +443,23 @@ function clearPools() { for (const k in pools) { pools[k].alive.fill(0); pools[k
 
 // --- Virüsler, virüs kopyaları, interferon halkası, T hücresi ---
 function spikyGeometry(r, n, spikeLen, spikeR) {
-  const parts = [new THREE.IcosahedronGeometry(r, 1)];
+  const parts = [blobGeometry(r, { detail: 6, amp: 0.06, freq: 2.5 })];
   const dir = new THREE.Vector3(), q = new THREE.Quaternion(), up = V3(0, 1, 0);
   for (let i = 0; i < n; i++) {
     const y = 1 - (2 * (i + 0.5)) / n, rr = Math.sqrt(1 - y * y), th = i * 2.39996;
     dir.set(Math.cos(th) * rr, y, Math.sin(th) * rr);
     q.setFromUnitVectors(up, dir);
-    const c = new THREE.CylinderGeometry(spikeR * 0.5, spikeR * 0.5, spikeLen, 5).translate(0, r + spikeLen / 2, 0).applyQuaternion(q);
-    const tip = new THREE.SphereGeometry(spikeR, 6, 4).translate(0, r + spikeLen, 0).applyQuaternion(q);
+    const c = new THREE.CylinderGeometry(spikeR * 0.45, spikeR * 0.7, spikeLen, 8).translate(0, r * 0.96 + spikeLen / 2, 0).applyQuaternion(q);
+    const tip = new THREE.SphereGeometry(spikeR, 10, 6).translate(0, r * 0.96 + spikeLen, 0).applyQuaternion(q);
     parts.push(c, tip);
   }
-  return BufferGeometryUtils.mergeGeometries(parts.map((g) => { const x = g.index ? g.toNonIndexed() : g; x.deleteAttribute('uv'); return x; }));
+  return BufferGeometryUtils.mergeGeometries(parts.map((g) => { const x = g.index ? g.toNonIndexed() : g; if (x.attributes.uv) x.deleteAttribute('uv'); return x; }));
 }
 const virusGeo = spikyGeometry(0.36, 14, 0.2, 0.07);
-const virusMat = new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0x991b1b, emissiveIntensity: 0.6, roughness: 0.4 });
-const endoGeo = new THREE.SphereGeometry(0.7, 16, 10);
-const endoMat = new THREE.MeshStandardMaterial({ color: 0xe0f2fe, transparent: true, opacity: 0.25, depthWrite: false });
+const virusMat = tissue({ color: 0xef4444, veins: 0.2, scale: 6 });
+virusMat.emissive = new THREE.Color(0x991b1b); virusMat.emissiveIntensity = 0.8; virusMat.clearcoat = 0.8;
+const endoGeo = blobGeometry(0.7, { detail: 6, amp: 0.05 });
+const endoMat = new THREE.MeshPhysicalMaterial({ color: 0xe0f2fe, transparent: true, opacity: 0.22, depthWrite: false, roughness: 0.15, clearcoat: 1 });
 const VIRUS_TOTAL = 10;
 const viruses = [];
 for (let i = 0; i < 12; i++) {
@@ -274,7 +470,7 @@ for (let i = 0; i < 12; i++) {
   scene.add(m);
   viruses.push({ mesh: m, bub, phase: 'off', p: new THREE.Vector3(), target: new THREE.Vector3(), timer: 0, th: 0, spin: rand(0.5, 2) });
 }
-const copies = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.15, 0), virusMat, 120);
+const copies = new THREE.InstancedMesh(spikyGeometry(0.12, 8, 0.06, 0.03), virusMat, 120);
 const copyPos = [];
 {
   const d = new THREE.Object3D();
@@ -291,8 +487,9 @@ const ifnRing = new THREE.Mesh(new THREE.TorusGeometry(CELL_R, 0.18, 6, 96),
   new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0, depthWrite: false }));
 ifnRing.rotation.x = -Math.PI / 2;
 scene.add(ifnRing);
-const tcell = tag(new THREE.Mesh(spikyGeometry(1.3, 22, 0.35, 0.14),
-  new THREE.MeshStandardMaterial({ color: 0x4ade80, emissive: 0x166534, emissiveIntensity: 0.5, roughness: 0.5 })), 'tcell');
+const tcellMat = tissue({ color: 0x4ade80, veins: 0.25, scale: 2 });
+tcellMat.emissive = new THREE.Color(0x166534); tcellMat.emissiveIntensity = 0.6; tcellMat.clearcoat = 0.7;
+const tcell = tag(new THREE.Mesh(spikyGeometry(1.3, 70, 0.2, 0.11), tcellMat), 'tcell');
 tcell.visible = false;
 scene.add(tcell);
 

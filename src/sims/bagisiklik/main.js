@@ -1,5 +1,6 @@
 // Bağışıklık Sistemi Savaşı — mikrop çoğalması, doğuştan yanıt, B/T hücreleri, antikor, hafıza; aşı ve ikinci karşılaşma.
-import { createSim, THREE, BufferGeometryUtils, fmt, clamp, instanced, seeded, TAU } from '@core';
+import { createSim, THREE, BufferGeometryUtils, fmt, clamp, instanced, seeded, TAU, mat } from '@core';
+import { darkMedium, blobGeometry, loftTube, halfTube, rbcGeometry, fbm , tissue } from './bio.js';
 import { createModel, KP, H, MMAX } from './model.js';
 
 const DAYS_PER_SEC = 0.8;          // 1× hızda 1 sn = 0,8 gün
@@ -7,8 +8,7 @@ const SITE = new THREE.Vector3(2.5, 0.6, 2);   // mikrobun girdiği yer (yara)
 const VESSEL_Z = -4.5, VESSEL_Y = 1.3, VESSEL_R = 1.6;
 
 const sim = createSim({
-  background: 0x2a0f1c,
-  fog: [26, 60],
+  studio: { mood: 'lab', color: 0x4a2a32, warmth: 0.3, key: { el: 55, az: 200, power: 1.5 }, radius: 70, height: 30 },
   camera: { position: [0, 13, 16], target: [0, 0.5, 0], fov: 48 },
   controls: { maxDistance: 40, minDistance: 5 },
   info: `
@@ -47,63 +47,77 @@ const model = createModel();
 const { s, p } = model;
 sim.formatTime = () => `Gün ${fmt(s.t, 1)}`;
 
-// --- Işıklar ---
-sim.scene.add(new THREE.HemisphereLight(0xffe4ec, 0x3a1020, 1.5));
-const key = new THREE.DirectionalLight(0xffffff, 1.6);
-key.position.set(5, 14, 8);
-sim.scene.add(key);
+// --- Ortam: doku arası sıvı (koyu, kırmızımsı), derinlik sisi, süzülen parçacıklar ---
+darkMedium(sim, { top: 0x3a1422, bottom: 0x0a0306, glow: 0x6a2032, glowDir: [-0.3, 0.7, -0.7], tint: 0x401a3a,
+  fog: 0x14060b, density: 0.022, motes: 300, box: [50, 10, 36], center: [0, 3, 0], moteColor: 0xffc8d0, moteColor2: 0xfff0b0, moteSize: 0.12, moteOpacity: 0.25 });
+const wet = (m, cc = 0.8, r = 0.2) => { m.clearcoat = cc; m.clearcoatRoughness = r; return m; };
 
 // --- Doku ve damar ---
 {
-  const g = new THREE.PlaneGeometry(60, 40, 60, 40);
+  const g = new THREE.PlaneGeometry(60, 40, 120, 80);
   g.rotateX(-Math.PI / 2);
   const pos = g.attributes.position;
-  for (let i = 0; i < pos.count; i++) pos.setY(i, Math.sin(pos.getX(i) * 0.6) * 0.12 + Math.cos(pos.getZ(i) * 0.7) * 0.12);
+  for (let i = 0; i < pos.count; i++) { const x = pos.getX(i), z = pos.getZ(i); pos.setY(i, Math.sin(x * 0.6) * 0.12 + Math.cos(z * 0.7) * 0.12 + fbm(x * 0.25, z * 0.25, 1.7, 3) * 0.5); }
   g.computeVertexNormals();
-  sim.scene.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x8a3348, roughness: 0.9 })));
-  // Doku hücreleri (arka plan)
-  const cellG = new THREE.CylinderGeometry(0.8, 0.8, 0.3, 6);
-  cellG.translate(0, 0.02, 0);
-  const n = 220, cells = instanced(cellG, new THREE.MeshStandardMaterial({ color: 0xeeb0b8, roughness: 0.7 }), n);
-  const nuc = instanced(new THREE.SphereGeometry(0.22, 10, 8).scale(1, 0.6, 1).translate(0, 0.2, 0), new THREE.MeshStandardMaterial({ color: 0x8b3a68, roughness: 0.6 }), n);
+  sim.scene.add(new THREE.Mesh(g, wet(tissue({ color: 0x7a2a3e, veins: 0.6, scale: 0.35 }), 0.6)));
+  // Doku hücreleri (epitel benzeri, bal peteği): her biri biraz farklı, ıslak yastıkçıklar
+  const cellG = blobGeometry(0.8, { detail: 6, amp: 0.06, freq: 2, stretch: [1, 0.26, 1] });
+  cellG.translate(0, 0.1, 0);
+  const n = 220, cells = instanced(cellG, wet(tissue({ color: 0xeeb0b8, veins: 0.25, scale: 2 }), 0.9, 0.15), n);
+  const nuc = instanced(blobGeometry(0.24, { detail: 4, amp: 0.1, stretch: [1, 0.55, 1] }).translate(0, 0.26, 0), wet(tissue({ color: 0x8b3a68, veins: 0.3, scale: 6 }), 0.5), n);
   cells.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
   const r = seeded(2), o = new THREE.Object3D(), c = new THREE.Color();
   let k = 0;
-  // Bal peteği dizilimi (epitel benzeri)
+  // Bal peteği dizilimi (epitel benzeri); yara ağzında hücre yok (doku yırtık)
   for (let row = 0; row < 9; row++) for (let col = 0; col < 22; col++) {
     if (k >= n) break;
     o.position.set(-15.5 + col * 1.44 + (row % 2) * 0.72, 0.12, -2.4 + row * 1.25);
-    o.scale.set(0.92, 1, 0.92);
-    o.rotation.y = Math.PI / 6;
+    if (Math.hypot(o.position.x - SITE.x, o.position.z - SITE.z) < 1.25) continue;
+    const sc = 0.88 + r() * 0.12;
+    o.scale.set(sc, 0.8 + r() * 0.4, sc * (0.9 + r() * 0.15));
+    o.rotation.y = Math.PI / 6 + r();
     o.updateMatrix();
     cells.setMatrixAt(k, o.matrix);
-    cells.setColorAt(k, c.setHex(0xeeb0b8).offsetHSL((r() - 0.5) * 0.03, 0, (r() - 0.5) * 0.08));
+    cells.setColorAt(k, c.setHex(0xeeb0b8).offsetHSL((r() - 0.5) * 0.04, (r() - 0.5) * 0.1, (r() - 0.5) * 0.12));
     o.position.x += (r() - 0.5) * 0.3; o.position.z += (r() - 0.5) * 0.3;
+    o.scale.setScalar(1);
     o.updateMatrix();
     nuc.setMatrixAt(k, o.matrix);
     k++;
   }
   cells.count = nuc.count = k;
   sim.scene.add(cells, nuc);
-  // Kan damarı (yarı saydam tüp) ve akan alyuvarlar
-  const vessel = new THREE.Mesh(new THREE.CylinderGeometry(VESSEL_R, VESSEL_R, 60, 28, 1, true),
-    new THREE.MeshStandardMaterial({ color: 0xc2415a, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false, roughness: 0.4 }));
-  vessel.rotation.z = Math.PI / 2;
-  vessel.position.set(0, VESSEL_Y, VESSEL_Z);
+  // Kan damarı: önü kesik (içindeki alyuvarlar görünsün), et kalınlıklı, ıslak damar duvarı
+  const vc = new THREE.CatmullRomCurve3([-30, -15, 0, 15, 30].map((x, i) => new THREE.Vector3(x, VESSEL_Y + [0, 0.15, 0, -0.1, 0][i], VESSEL_Z + [0, -0.3, 0, 0.25, 0][i])));
+  const vessel = new THREE.Mesh(halfTube(vc, (t) => VESSEL_R * 1.12 * (1 + 0.04 * Math.sin(t * 40)), { segs: 200, radial: 32, thick: 0.14, view: [0, 0.62, 0.78], arc: 0.25 }),
+    wet(tissue({ color: 0xb03a52, veins: 0.5, scale: 0.8 }), 0.9, 0.15));
+  vessel.material.side = THREE.DoubleSide;
   sim.scene.add(vessel);
+  // Plazma: damar içinde hafif ışıyan kırmızı pus (derinlik hissi)
+  const plasma = new THREE.Mesh(loftTube(vc, () => VESSEL_R * 0.98, { segs: 120, radial: 24 }), new THREE.MeshBasicMaterial({ color: 0x5a0a18, transparent: true, opacity: 0.22, depthWrite: false }));
+  plasma.userData.noCast = true; plasma.raycast = () => {};
+  sim.scene.add(plasma);
 }
-const rbcG = new THREE.TorusGeometry(0.22, 0.12, 8, 14);
+const rbcG = rbcGeometry(0.3, 24);
 const RBC = 160;
-const rbc = instanced(rbcG, new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.5 }), RBC);
+const rbc = instanced(rbcG, wet(tissue({ color: 0xc8202c, veins: 0.05, scale: 8 }), 0.7), RBC);
+rbc.material.emissive = new THREE.Color(0x3a0508);
 rbc.frustumCulled = false;
 sim.scene.add(rbc);
 const rbcData = [];
 { const r = seeded(6); for (let i = 0; i < RBC; i++) rbcData.push({ x: (r() - 0.5) * 60, a: r() * TAU, d: Math.sqrt(r()) * (VESSEL_R - 0.35), rx: r() * 6, ry: r() * 6, v: 3 + r() * 1.5 }); }
 
-// Yara (giriş noktası)
-const wound = new THREE.Mesh(new THREE.CircleGeometry(1.1, 24), new THREE.MeshBasicMaterial({ color: 0x5b0f1f, transparent: true, opacity: 0.7 }));
+// Yara (giriş noktası): yırtık, kanamalı sığ çukur
+const woundGeo = new THREE.CircleGeometry(1.25, 48, 0, TAU);
+{
+  const p = woundGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) { const x = p.getX(i), y = p.getY(i), rr = Math.hypot(x, y) / 1.25; const edge = 1 + 0.18 * fbm(Math.atan2(y, x) * 2, 0.5, 0, 2); p.setXY(i, x * edge, y * edge); p.setZ(i, -0.35 * (1 - rr * rr) + 0.05 * fbm(x * 3, y * 3, 2, 2)); }
+  woundGeo.computeVertexNormals();
+}
+const wound = new THREE.Mesh(woundGeo, wet(tissue({ color: 0x5b0f1f, veins: 0.7, scale: 3 }), 1, 0.05));
+wound.material.emissive = new THREE.Color(0x2a0208);
 wound.rotation.x = -Math.PI / 2;
-wound.position.set(SITE.x, 0.3, SITE.z);
+wound.position.set(SITE.x, 0.2, SITE.z);
 sim.scene.add(wound);
 
 // --- Parçacık sürüleri ---
@@ -142,42 +156,44 @@ function swarm(geo, mat, max, { spawn, speed = 1, jitter = 1, scale = 1, spin = 
 }
 const aroundSite = (v, r, spread = 1) => v.set(SITE.x + (r() - 0.5) * 2 * spread, 0.5 + r() * 0.8, SITE.z + (r() - 0.5) * 2 * spread);
 const fromVessel = (v, r) => v.set((r() - 0.5) * 16, VESSEL_Y, VESSEL_Z + 0.4);
+const glowy = (color, emi, k = 1) => { const m = wet(tissue({ color, veins: 0.15, scale: 12 }), 0.8); m.emissive = new THREE.Color(emi); m.emissiveIntensity = k; return m; };
 
-// Bakteri: kapsül; virüs: dikenli küre
-const bactG = new THREE.CapsuleGeometry(0.1, 0.32, 4, 8);
+// Bakteri: kamçılı çubuk (basil); virüs: dikenli kapsid
+const bactG = BufferGeometryUtils.mergeGeometries([
+  loftTube(new THREE.CatmullRomCurve3([new THREE.Vector3(0, -0.26, 0), new THREE.Vector3(0.015, 0, 0), new THREE.Vector3(0, 0.26, 0)]), (t) => 0.1 * Math.pow(Math.sin(Math.PI * clamp(t, 0.001, 0.999)), 0.35), { segs: 16, radial: 12, view: [1, 0, 0] }),
+  loftTube(new THREE.CatmullRomCurve3(Array.from({ length: 9 }, (_, i) => new THREE.Vector3(Math.sin(i * 1.3) * 0.04, -0.24 - i * 0.05, Math.cos(i * 1.3) * 0.04))), () => 0.008, { segs: 24, radial: 4, view: [1, 0, 0] }),
+]);
 const virG = (() => {
-  const parts = [new THREE.IcosahedronGeometry(0.14, 1).toNonIndexed()];
+  const parts = [blobGeometry(0.14, { detail: 3, amp: 0.05, freq: 3 }).toNonIndexed()];
   const ico = new THREE.IcosahedronGeometry(1, 0), pp = ico.attributes.position;
   for (let i = 0; i < pp.count; i += 3) {
     const d = new THREE.Vector3(pp.getX(i), pp.getY(i), pp.getZ(i)).normalize();
-    const sp = new THREE.CylinderGeometry(0.015, 0.015, 0.1, 4);
-    sp.translate(0, 0.18, 0);
-    sp.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d));
-    parts.push(sp.toNonIndexed());
+    const sp = new THREE.CylinderGeometry(0.012, 0.02, 0.1, 6); sp.translate(0, 0.18, 0);
+    const tip = new THREE.SphereGeometry(0.03, 8, 6); tip.translate(0, 0.235, 0);
+    for (const g of [sp, tip]) { g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d)); g.deleteAttribute('uv'); parts.push(g.toNonIndexed()); }
   }
   return BufferGeometryUtils.mergeGeometries(parts);
 })();
 const MAXP = 400;
 let spread = 1;
-const bact = swarm(bactG, new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.4, emissive: 0x0a2a10 }), MAXP, { spawn: (v, r) => aroundSite(v, r, spread), jitter: 0.6, speed: 0.3, spin: 0.5, seed: 11 });
-const virus = swarm(virG, new THREE.MeshStandardMaterial({ color: 0xc084fc, roughness: 0.4, emissive: 0x2a0a3a }), MAXP, { spawn: (v, r) => aroundSite(v, r, spread), jitter: 0.8, speed: 0.3, spin: 1.2, seed: 12, scale: 1.3 });
+const bact = swarm(bactG, glowy(0x4ade80, 0x0f4a1c, 0.7), MAXP, { spawn: (v, r) => aroundSite(v, r, spread), jitter: 0.6, speed: 0.3, spin: 0.5, seed: 11 });
+const virus = swarm(virG, glowy(0xc084fc, 0x4a1470, 0.8), MAXP, { spawn: (v, r) => aroundSite(v, r, spread), jitter: 0.8, speed: 0.3, spin: 1.2, seed: 12, scale: 1.3 });
 
-const innateG = (() => { const g = new THREE.IcosahedronGeometry(0.42, 2); const pp = g.attributes.position; const r = seeded(4); for (let i = 0; i < pp.count; i++) { const k = 1 + (r() - 0.5) * 0.12; pp.setXYZ(i, pp.getX(i) * k, pp.getY(i) * k * 0.8, pp.getZ(i) * k); } g.computeVertexNormals(); return g; })();
-const innate = swarm(innateG, new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.55, flatShading: true }), 60, { spawn: fromVessel, speed: 1.6, jitter: 0.5, seed: 21 });
-const lymG = new THREE.SphereGeometry(0.26, 16, 12);
-const bcell = swarm(lymG, new THREE.MeshStandardMaterial({ color: 0x60a5fa, roughness: 0.35 }), 50, { spawn: fromVessel, speed: 1.4, jitter: 0.6, seed: 31 });
-const tcell = swarm(lymG, new THREE.MeshStandardMaterial({ color: 0x2dd4bf, roughness: 0.35 }), 50, { spawn: fromVessel, speed: 1.6, jitter: 0.6, seed: 32 });
-const abG = (() => {
-  const a = new THREE.CylinderGeometry(0.02, 0.02, 0.16, 4); a.translate(0, -0.08, 0);
-  const b = new THREE.CylinderGeometry(0.02, 0.02, 0.14, 4); b.translate(0, 0.07, 0); b.rotateZ(0.6);
-  const c = new THREE.CylinderGeometry(0.02, 0.02, 0.14, 4); c.translate(0, 0.07, 0); c.rotateZ(-0.6);
-  return BufferGeometryUtils.mergeGeometries([a.toNonIndexed(), b.toNonIndexed(), c.toNonIndexed()]);
+// Nötrofil/makrofaj: fırfırlı zarlı, düzensiz iri hücre; lenfositler: mikrovillüslü küçük hücre
+const innateG = blobGeometry(0.42, { detail: 8, amp: 0.14, freq: 3.2, oct: 4, stretch: [1, 0.8, 1] });
+const innate = swarm(innateG, wet(tissue({ color: 0xf1f5f9, veins: 0.2, scale: 5 }), 0.7), 60, { spawn: fromVessel, speed: 1.6, jitter: 0.5, seed: 21 });
+const lymG = blobGeometry(0.26, { detail: 7, amp: 0.1, freq: 9, oct: 2 });
+const bcell = swarm(lymG, glowy(0x60a5fa, 0x10306a, 0.5), 50, { spawn: fromVessel, speed: 1.4, jitter: 0.6, seed: 31 });
+const tcell = swarm(lymG, glowy(0x2dd4bf, 0x0d4a44, 0.5), 50, { spawn: fromVessel, speed: 1.6, jitter: 0.6, seed: 32 });
+const abG = (() => { // antikor (Y): yuvarlatılmış kollar
+  const arm = (a, b) => loftTube(new THREE.LineCurve3(new THREE.Vector3(...a), new THREE.Vector3(...b)), () => 0.022, { segs: 2, radial: 6, view: [0, 0, 1] });
+  return BufferGeometryUtils.mergeGeometries([arm([0, -0.16, 0], [0, 0, 0]), arm([0, 0, 0], [0.085, 0.12, 0]), arm([0, 0, 0], [-0.085, 0.12, 0])]);
 })();
-const antibody = swarm(abG, new THREE.MeshBasicMaterial({ color: 0xfde68a }), 400, {
+const antibody = swarm(abG, new THREE.MeshBasicMaterial({ color: new THREE.Color(2.0, 1.7, 0.8) }), 400, {
   spawn: (v, r) => { const src = bcell.n ? bcell.P[Math.floor(r() * bcell.n)].p : null; return src ? v.copy(src) : aroundSite(v, r, 4); },
   speed: 0.25, jitter: 1.2, spin: 2, seed: 41, scale: 1.4,
 });
-const memory = swarm(new THREE.SphereGeometry(0.24, 16, 12), new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0x9a5b00, roughness: 0.3 }), 24, {
+const memory = swarm(blobGeometry(0.24, { detail: 6, amp: 0.08, freq: 7, oct: 2 }), glowy(0xfbbf24, 0xc07a00, 1.4), 24, {
   spawn: (v, r) => v.set(-6 + (r() - 0.5) * 6, 0.6 + r() * 0.6, 5 + (r() - 0.5) * 3), speed: 0.1, jitter: 0.3, seed: 51,
 });
 const memTarget = new THREE.Vector3(-6, 0.8, 5);

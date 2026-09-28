@@ -1,14 +1,17 @@
 // Bir Yıldızın Hayatı — kütle–ışıklılık ve ömür ilişkileri, HR diyagramında evrim izi ve kütleye göre son (beyaz cüce / nötron yıldızı / kara delik).
-import { createSim, THREE, fmt, clamp, lerp, smoothstep, rand, TAU } from '@core';
+import { createSim, THREE, fmt, clamp, lerp, smoothstep, rand, TAU, NOISE3_GLSL, mat } from '@core';
+import { createStar, planckRGB, satOf } from './star.js';
+
+const LOW = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700;
 
 const T_SUN = 5772;
 const NS_LIMIT = 8, BH_LIMIT = 20; // yaklaşık sınırlar (M☉)
 
 const sim = createSim({
-  background: 0x02030a,
-  camera: { position: [0, 2.5, 9], target: [0, 0, 0], fov: 50, far: 3000 },
+  space: { star: [0, 0, 0], power: 1, milky: 1, nebula: 0.8, stars: 0.55, galaxyTilt: 40 },
+  look: { bloomStrength: 0.32 },
+  camera: { position: [0, 2.5, 9], target: [0, 0, 0], fov: 45, far: 3000 },
   controls: { maxDistance: 300, minDistance: 1.5, maxPolarAngle: Math.PI, enablePan: false },
-  lights: false,
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Seçtiğin kütlede doğan bir yıldız: 3B sahnede boyutu ve rengi (yüzey sıcaklığına göre), panelde ise
@@ -21,6 +24,10 @@ const sim = createSim({
       Yarıçap R ≈ M<sup>0,8</sup> (M &lt; 1) ya da M<sup>0,57</sup>; sıcaklık Stefan–Boltzmann yasasından: <b>L = 4πR²σT⁴</b>.</li>
       <li><b>Son:</b> ≲ 8 M☉ → gezegenimsi bulutsu + <b>beyaz cüce</b>; ≈ 8–20 M☉ → süpernova + <b>nötron yıldızı</b>;
       ≳ 20–25 M☉ → <b>kara delik</b>. Bu sınırlar yaklaşıktır; kütle kaybı, dönme ve metal bolluğuna göre değişir.</li>
+      <li><b>Yüzey görünümü:</b> renk, Planck kara cisim spektrumunun göz renk eşleme fonksiyonlarıyla (CIE 1931) çarpımından gelir
+      (görünürlük için doygunluk hafifçe artırıldı). Kenar kararması Eddington gri atmosfer yaklaşımıyla: kenarda daha soğuk, üst katmanı görürüz.
+      Soğuk yıldızlarda (≲ 7.500 K) konveksiyon <b>granülleri</b>, lekeler ve proninans ilmekleri; dev yıldızlarda birkaç dev konveksiyon hücresi.
+      Sıcak O/B yıldızlarında granül yok denecek kadar zayıftır; hafif benekler ve hızlı dönüşten kutupların daha sıcak olması görünür.</li>
       <li><b>Chandrasekhar sınırı ≈ 1,4 M☉:</b> Beyaz cüceyi elektron dejenerasyon basıncı taşır; kütle bu sınırı aşarsa basınç yetmez ve cüce çöker.
       Bu yüzden 8 M☉'lik bir yıldızın bile ardında bıraktığı beyaz cüce 1,4 M☉'den hafiftir: yıldız dış katmanlarını rüzgârla ve bulutsu olarak atar.
       Beyaz cüce kütlesi yaklaşık M<sub>BC</sub> ≈ 0,109·M + 0,394 (başlangıç–son kütle ilişkisi).</li>
@@ -114,29 +121,15 @@ function stateAt(life, u) {
   return out;
 }
 
-// Kara cisim rengi (Tanner Helland yaklaşımı)
+// Kara cisim rengi: Planck spektrumu × CIE 1931 eşleme fonksiyonları → sRGB (star.js)
 function bbColor(T, out = new THREE.Color()) {
-  const t = clamp(T, 1000, 40000) / 100;
-  let r, g, b;
-  if (t <= 66) {
-    r = 255; g = 99.47 * Math.log(t) - 161.12; b = t <= 19 ? 0 : 138.52 * Math.log(t - 10) - 305.04;
-  } else {
-    r = 329.7 * (t - 60) ** -0.1332; g = 288.12 * (t - 60) ** -0.0755; b = 255;
-  }
-  return out.setRGB(clamp(r, 0, 255) / 255, clamp(g, 0, 255) / 255, clamp(b, 0, 255) / 255, THREE.SRGBColorSpace);
+  const c = planckRGB(clamp(T, 1000, 1e6), satOf(clamp(T, 1000, 1e6)));
+  return out.setRGB(c[0], c[1], c[2]);
 }
 const cssColor = (T) => '#' + bbColor(T).getHexString(THREE.SRGBColorSpace);
 const visR = (R) => clamp(1.1 * R ** 0.33, 0.1, 22);
 
 // --- Sahne ---
-{
-  const n = 3000, pos = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) pos.set(new THREE.Vector3().randomDirection().multiplyScalar(rand(900, 1400)).toArray(), i * 3);
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  sim.scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xc7d2fe, size: 1.4, sizeAttenuation: false })));
-}
-
 function canvasTex(size, draw) {
   const c = document.createElement('canvas');
   c.width = c.height = size;
@@ -145,155 +138,221 @@ function canvasTex(size, draw) {
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
-const glowTex = canvasTex(128, (g, s) => {
+// Yumuşak yuvarlak parçacık dokusu
+const glowTex = canvasTex(64, (g, s) => {
   const gr = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
   gr.addColorStop(0, 'rgba(255,255,255,1)');
-  gr.addColorStop(0.2, 'rgba(255,255,255,.6)');
-  gr.addColorStop(0.5, 'rgba(255,255,255,.12)');
+  gr.addColorStop(0.25, 'rgba(255,255,255,.55)');
+  gr.addColorStop(0.6, 'rgba(255,255,255,.1)');
   gr.addColorStop(1, 'rgba(255,255,255,0)');
   g.fillStyle = gr;
   g.fillRect(0, 0, s, s);
 });
-const granTex = canvasTex(256, (g, s) => {
-  g.fillStyle = '#fff';
-  g.fillRect(0, 0, s, s);
-  for (let i = 0; i < 2200; i++) {
-    const x = rand(0, s), y = rand(0, s), r = rand(1.5, 5);
-    g.fillStyle = `rgba(${rand() < 0.5 ? '120,120,120' : '255,255,255'},${rand(0.05, 0.14)})`;
-    g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
-  }
-});
-// Yıldız yüzeyi: kenar kararması + granülasyon, ton eşlemesiz doygun renk
-function starMaterial(color) {
-  return new THREE.ShaderMaterial({
-    uniforms: { map: { value: granTex }, color: { value: new THREE.Color(color) }, limb: { value: 0.6 } },
-    vertexShader: `varying vec2 vUv; varying float vMu;
-      void main() { vUv = uv; vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        vMu = max(dot(normalize(normalMatrix * normal), normalize(-mv.xyz)), 0.0); gl_Position = projectionMatrix * mv; }`,
-    fragmentShader: `uniform sampler2D map; uniform vec3 color; uniform float limb; varying vec2 vUv; varying float vMu;
-      void main() { float g = texture2D(map, vUv * vec2(2.0, 1.0)).r;
-        float ld = 1.0 - limb * (1.0 - pow(vMu, 0.6));
-        gl_FragColor = vec4(color * ld * (0.75 + 0.35 * g), 1.0);
-        #include <colorspace_fragment>
-      }`,
-  });
-}
-// Kara cisim rengini göze daha belirgin göstermek için doygunluğu artır
-function vivid(c) {
-  const hsl = {};
-  c.getHSL(hsl);
-  return c.setHSL(hsl.h, Math.min(1, hsl.s * 1.15 + 0.03), Math.min(hsl.l, 0.78));
-}
-const nebTex = canvasTex(256, (g, s) => {
-  for (let i = 0; i < 500; i++) {
-    const a = rand(0, TAU), rr = rand(0.25, 0.48) * s;
-    const x = s / 2 + Math.cos(a) * rr, y = s / 2 + Math.sin(a) * rr;
-    const gr = g.createRadialGradient(x, y, 0, x, y, rand(6, 22));
-    gr.addColorStop(0, `rgba(255,255,255,${rand(0.05, 0.18)})`);
-    gr.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = gr;
-    g.fillRect(x - 25, y - 25, 50, 50);
-  }
-});
-const diskTex = canvasTex(256, (g, s) => {
-  const gr = g.createRadialGradient(s / 2, s / 2, s * 0.14, s / 2, s / 2, s / 2);
-  gr.addColorStop(0, 'rgba(255,255,255,1)');
-  gr.addColorStop(0.15, 'rgba(255,220,150,.9)');
-  gr.addColorStop(0.5, 'rgba(255,120,40,.45)');
-  gr.addColorStop(1, 'rgba(120,30,10,0)');
-  g.fillStyle = gr;
-  g.fillRect(0, 0, s, s);
-  g.globalCompositeOperation = 'destination-out';
-  for (let i = 0; i < 40; i++) {
-    g.strokeStyle = `rgba(0,0,0,${rand(0.1, 0.4)})`;
-    g.lineWidth = rand(1, 4);
-    g.beginPath(); g.arc(s / 2, s / 2, rand(0.18, 0.5) * s, rand(0, TAU), rand(0, TAU)); g.stroke();
-  }
-});
 
+// Gaz kabuğu (gezegenimsi bulutsu / süpernova kalıntısı): kenarda parlayan ince kabuk, lifli yapı, eklemeli HDR ışık
+const SHELL_VS = NOISE3_GLSL + /* glsl */ `
+uniform float uWarp, uSeed; varying vec3 vP; varying vec3 vN; varying vec3 vV;
+void main(){
+  vec3 p = position;
+  float d = fbm3(normalize(p)*2.2 + uSeed, 4) - 0.5;
+  p *= 1.0 + d*uWarp;
+  vP = normalize(position);
+  vN = normalize(normalMatrix*normal);
+  vec4 mv = modelViewMatrix*vec4(p, 1.0); vV = -mv.xyz;
+  gl_Position = projectionMatrix*mv;
+}`;
+const SHELL_FS = NOISE3_GLSL + /* glsl */ `
+uniform vec3 uA, uB; uniform float uOp, uSeed, uFil; varying vec3 vP; varying vec3 vN; varying vec3 vV;
+void main(){
+  float nv = abs(dot(normalize(vN), normalize(vV)));
+  float limb = pow(1.0 - nv, 2.2)*1.6 + 0.12;                   // kabuk kenarda kalın görünür
+  float f1 = fbm3(vP*4.0 + uSeed, 5), f2 = fbm3(vP*11.0 + uSeed*2.0, 4);
+  float fil = pow(1.0 - abs(f2*2.0 - 1.0), 6.0);                   // ince filamentler
+  float knots = smoothstep(0.6, 0.8, fbm3(vP*7.0 + 5.0, 4));
+  float I = limb*(0.45 + 0.9*f1) + fil*uFil*0.9 + knots*0.4*uFil;
+  vec3 col = mix(uA, uB, smoothstep(0.35, 0.75, f1 + (1.0 - nv)*0.35));
+  gl_FragColor = vec4(col*I*uOp, 1.0);
+}`;
+function shellMesh(a, b, { warp = 0.35, seed = rand(0, 10), fil = 1 } = {}) {
+  const U = { uA: { value: new THREE.Color(a) }, uB: { value: new THREE.Color(b) }, uOp: { value: 1 }, uSeed: { value: seed }, uWarp: { value: warp }, uFil: { value: fil } };
+  const m = new THREE.Mesh(new THREE.SphereGeometry(1, 96, 64), new THREE.ShaderMaterial({
+    uniforms: U, vertexShader: SHELL_VS, fragmentShader: SHELL_FS, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  }));
+  m.userData.noShadow = true;
+  m.raycast = () => {};
+  return m;
+}
+
+// Yıldız: kaynayan granülasyon, kenar kararması, lekeler, kromosfer, korona, proninans (star.js); renk Planck'tan
 const star = new THREE.Group();
 sim.scene.add(star);
-const starMat = starMaterial(0xffffff);
-const starMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 40), starMat);
-const glowMat = new THREE.SpriteMaterial({ map: glowTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
-const glow = new THREE.Sprite(glowMat);
-star.add(starMesh, glow);
+const S = createStar({ seed: 0.37, prominences: 3, low: LOW });
+const starMesh = S.surface;
+star.add(S.group);
 const starLabel = sim.label('', { parent: sim.scene, position: [0, 2, 0], className: 'plain' });
+
+// Derin uzay fonu: Samanyolu şeridi görüş alanından çapraz geçsin, toz şeritleri ve bulutsular belirgin olsun
+{
+  const U = sim.sky?.uniforms;
+  if (U) {
+    const d0 = new THREE.Vector3(0, -2.5, -9).normalize();
+    const N = new THREE.Vector3(0.62, 0.78, 0).normalize();
+    N.sub(d0.clone().multiplyScalar(N.dot(d0))).normalize();           // şerit merkezden geçer
+    const C = d0.clone().add(new THREE.Vector3().crossVectors(N, d0).multiplyScalar(0.35));
+    C.sub(N.clone().multiplyScalar(C.dot(N))).normalize();               // galaksi merkezi şeridin üstünde, çerçeveye yakın
+    U.uGalN.value.copy(N); U.uGalC.value.copy(C);
+    U.uMilky.value = 2.8; U.uNeb.value = 4; U.uStars.value = 0.9;
+  }
+}
 
 // Güneş (karşılaştırma)
 const sun = new THREE.Group();
-const sunMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 40, 28), starMaterial(vivid(bbColor(T_SUN))));
-const sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: vivid(bbColor(T_SUN)), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
-sunMesh.scale.setScalar(visR(1));
-sunGlow.scale.setScalar(visR(1) * 3.2);
-sun.add(sunMesh, sunGlow);
+const SUN = createStar({ seed: 0.81, prominences: 2, low: LOW }).set({ T: T_SUN, gran: 1, conv: 1, spots: 1, int: 1.25, corona: 0.55, chromo: 1, prom: 0.8 });
+const sunMesh = SUN.surface;
+SUN.group.scale.setScalar(visR(1));
+sun.add(SUN.group);
 sim.scene.add(sun);
 const sunLabel = sim.label('Güneş (bugün)', { parent: sun, position: [0, -visR(1) - 0.7, 0], className: 'plain' });
 
-// Gezegenimsi bulutsu
+// Gezegenimsi bulutsu: iç OIII (turkuaz) + dış Hα/NII (kırmızı) kabuk
 const nebula = new THREE.Group();
-const nebA = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), new THREE.MeshBasicMaterial({ map: nebTex, color: 0x3ee6c8, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
-const nebB = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), new THREE.MeshBasicMaterial({ map: nebTex, color: 0xff4d6d, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+const nebA = shellMesh(0x1fd6c0, 0x6fb8ff, { warp: 0.25, fil: 0.8 });
+const nebB = shellMesh(0xff3355, 0xff8a4d, { warp: 0.5, fil: 1.2 });
+nebA.scale.set(0.78, 0.9, 0.8);
 nebB.scale.set(1.25, 1.1, 1.25);
 nebB.rotation.set(0.4, 1, 0.2);
 nebula.add(nebA, nebB);
 sim.scene.add(nebula);
 
-// Süpernova kabuğu
-const SN_N = 2500;
-const snDirs = new Float32Array(SN_N * 3), snPos = new Float32Array(SN_N * 3), snCol = new Float32Array(SN_N * 3);
-for (let i = 0; i < SN_N; i++) {
-  const d = new THREE.Vector3().randomDirection().multiplyScalar(rand(0.6, 1));
-  snDirs.set(d.toArray(), i * 3);
-  const c = new THREE.Color().setHSL(rand(0.0, 0.15), 1, rand(0.5, 0.75));
-  if (rand() < 0.3) c.setHSL(0.55, 0.9, 0.7);
-  snCol.set([c.r, c.g, c.b], i * 3);
+// Süpernova: genişleyen ateşli kabuk + parçacık bulutu + HDR parlama
+const snShell = shellMesh(0xff7a2a, 0x7ad0ff, { warp: 0.45, fil: 1.6 });
+sim.scene.add(snShell);
+// Kabuk hacmi: homolog genişleme (r = v·t), Rayleigh–Taylor parmakları (kümelenmiş yönler), katmanlı bileşim:
+// iç Fe/Si (sıcak mavi-beyaz), orta O [OIII] (turkuaz), dış H (Hα kırmızısı)
+const SN_N = LOW ? 5000 : 14000;
+const snDir = new Float32Array(SN_N * 3), snCol = new Float32Array(SN_N * 3), snSize = new Float32Array(SN_N);
+{
+  const clumps = Array.from({ length: 70 }, () => new THREE.Vector3().randomDirection());
+  const d = new THREE.Vector3(), c = new THREE.Color();
+  for (let i = 0; i < SN_N; i++) {
+    let v;
+    if (rand() < 0.72) {
+      const k = clumps[(Math.random() * clumps.length) | 0];
+      v = rand(0.45, 1) ** 0.6;
+      const spread = 0.06 + 0.22 * (1 - v);                     // parmak ucu dar, kök geniş
+      d.copy(k).add(new THREE.Vector3().randomDirection().multiplyScalar(spread * Math.abs(rand(-1, 1)))).normalize();
+    } else { d.randomDirection(); v = rand(0.3, 1) ** 0.5; }
+    snDir.set([d.x * v, d.y * v, d.z * v], i * 3);
+    if (v < 0.62) c.setRGB(0.75, 0.85, 1.6);                     // iç: sıcak demir grubu
+    else if (v < 0.8) c.setRGB(0.25, 1.2, 1.0);                  // [OIII]
+    else c.setRGB(1.6, 0.35, 0.22);                             // Hα
+    c.multiplyScalar(rand(0.3, 0.75));
+    snCol.set([c.r, c.g, c.b], i * 3);
+    snSize[i] = rand(0.6, 1.6);
+  }
 }
 const snGeo = new THREE.BufferGeometry();
-snGeo.setAttribute('position', new THREE.BufferAttribute(snPos, 3));
+snGeo.setAttribute('position', new THREE.BufferAttribute(snDir, 3));
 snGeo.setAttribute('color', new THREE.BufferAttribute(snCol, 3));
-const snMat = new THREE.PointsMaterial({ size: 3, sizeAttenuation: false, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, map: glowTex });
+snGeo.setAttribute('size', new THREE.BufferAttribute(snSize, 1));
+const snMat = new THREE.ShaderMaterial({
+  uniforms: { uR: { value: 1 }, uOp: { value: 1 }, uPx: { value: 1 } },
+  vertexShader: `attribute vec3 color; attribute float size; uniform float uR, uPx; varying vec3 vC;
+    void main(){ vC = color; vec4 mv = modelViewMatrix*vec4(position*uR, 1.0);
+      gl_PointSize = clamp(size*uPx*(0.1 + uR*0.03)/max(-mv.z, 0.1), 1.5, 48.0); gl_Position = projectionMatrix*mv; }`,
+  fragmentShader: `uniform float uOp; varying vec3 vC;
+    void main(){ vec2 q = gl_PointCoord*2.0 - 1.0; float r2 = dot(q, q); if (r2 > 1.0) discard;
+      gl_FragColor = vec4(vC*exp(-r2*3.5)*uOp, 1.0); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
 const snPts = new THREE.Points(snGeo, snMat);
 snPts.frustumCulled = false;
+snPts.onBeforeRender = (r) => { snMat.uniforms.uPx.value = r.getDrawingBufferSize(new THREE.Vector2()).y; };
 sim.scene.add(snPts);
-const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xdfe8ff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+const flash = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: new THREE.Color(0xdfe8ff).multiplyScalar(4), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
 sim.scene.add(flash);
 
-// Pulsar ışınları
+// Pulsar ışınları: eksen boyunca sönen, kenarı yumuşak ışık konileri
 const beams = new THREE.Group();
 {
-  const bm = new THREE.MeshBasicMaterial({ color: 0x9ad8ff, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+  const bm = new THREE.ShaderMaterial({
+    uniforms: { uCol: { value: new THREE.Color(0x9ad8ff) } },
+    vertexShader: 'varying vec2 vUv; varying vec3 vN; varying vec3 vV; void main(){ vUv = uv; vN = normalize(normalMatrix*normal); vec4 mv = modelViewMatrix*vec4(position, 1.0); vV = -mv.xyz; gl_Position = projectionMatrix*mv; }',
+    fragmentShader: `uniform vec3 uCol; varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+      void main(){ float along = vUv.y; float edge = pow(abs(dot(normalize(vN), normalize(vV))), 1.5);
+        gl_FragColor = vec4(uCol*edge*pow(along, 2.0)*2.2, 1.0); }`,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  });
   for (const s of [1, -1]) {
-    const c = new THREE.Mesh(new THREE.ConeGeometry(0.5, 7, 20, 1, true), bm);
+    const c = new THREE.Mesh(new THREE.ConeGeometry(0.5, 7, 32, 1, true), bm);
     c.position.y = s * 3.5;
     c.rotation.x = s > 0 ? Math.PI : 0;
+    c.userData.noShadow = true;
     beams.add(c);
   }
   beams.rotation.z = 0.5;
+}
+// Pulsar kutup başlıkları: manyetik kutuplarda akan parçacıkların ısıttığı sıcak noktalar (ışınların tabanı)
+const polar = new THREE.Group();
+{
+  const capM = mat.glow({ color: 0xcfe6ff, intensity: 7 });
+  for (const s of [1, -1]) {
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.1215, 32, 6, 0, TAU, 0, 0.42), capM);
+    if (s < 0) cap.rotation.x = Math.PI;
+    cap.userData.noShadow = true;
+    polar.add(cap);
+  }
+  beams.add(polar);
 }
 const beamPivot = new THREE.Group();
 beamPivot.add(beams);
 sim.scene.add(beamPivot);
 
-// Kara delik
+// Kara delik: olay ufku, sıcaklığı içe doğru artan, Doppler ile bir yanı parlak yığılma diski ve foton halkası
 const bh = new THREE.Group();
+const diskU = { uTime: { value: 0 } };
 {
-  const hole = new THREE.Mesh(new THREE.SphereGeometry(0.7, 40, 28), new THREE.MeshBasicMaterial({ color: 0x000000 }));
-  const disk = new THREE.Mesh(new THREE.RingGeometry(0.95, 3.6, 96, 1), new THREE.MeshBasicMaterial({ map: diskTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
-  // Halka UV'lerini radyal dokuya eşle
-  const uv = disk.geometry.attributes.uv, p = disk.geometry.attributes.position;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, 0.5 + p.getX(i) / 7.2, 0.5 + p.getY(i) / 7.2);
+  const hole = new THREE.Mesh(new THREE.SphereGeometry(0.7, 64, 40), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+  const disk = new THREE.Mesh(new THREE.RingGeometry(0.95, 3.6, 192, 8), new THREE.ShaderMaterial({
+    uniforms: diskU,
+    vertexShader: 'varying vec2 vL; varying vec3 vW; varying vec3 vVel; void main(){ vL = position.xy; vVel = mat3(modelMatrix)*vec3(-position.y, position.x, 0.0); vec4 w = modelMatrix*vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }',
+    fragmentShader: NOISE3_GLSL + `uniform float uTime; varying vec2 vL; varying vec3 vW; varying vec3 vVel;
+      void main(){
+        float r = length(vL), a = atan(vL.y, vL.x);
+        float x = (r - 0.95)/(3.6 - 0.95);
+        float sw = a + 3.0/(r*r)*0.9 - uTime*1.2/pow(r, 1.5);          // Kepler: içte hızlı dönen spiral
+        float n = fbm3(vec3(cos(sw)*r*1.2, sin(sw)*r*1.2, r*3.0), 5);
+        float lanes = 0.6 + 0.8*n;
+        float T = pow(1.0 - x, 2.2);                                    // içe doğru ısınır
+        vec3 hot = vec3(1.0, 0.95, 0.9), warm = vec3(1.0, 0.55, 0.18), cool = vec3(0.6, 0.15, 0.05);
+        vec3 col = mix(mix(cool, warm, smoothstep(0.0, 0.5, T)), hot, smoothstep(0.5, 1.0, T));
+        // Doppler ışınımı: bize doğru dönen yan daha parlak
+        vec3 wv = normalize(vVel + vec3(0.0, 1e-6, 0.0));   // dünya uzayında yörünge hızı yönü (köşe gölgelendiricisinden)
+        float dop = 1.0 + 0.75*dot(wv, normalize(cameraPosition - vW));
+        float I = (0.25 + 3.2*T)*lanes*dop*dop*smoothstep(0.0, 0.05, x)*smoothstep(1.0, 0.6, x);
+        gl_FragColor = vec4(col*I, 1.0);
+      }`,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  }));
   disk.rotation.x = -Math.PI / 2 + 0.25;
   disk.name = 'disk';
-  const ring = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xffb070, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending }));
-  ring.scale.setScalar(3.4);
-  bh.add(ring, hole, disk);
+  // Foton halkası + diskin bükülmüş arka görüntüsü: kameraya bakan ince parlak halka
+  const ring = new THREE.Mesh(new THREE.PlaneGeometry(4.4, 4.4), new THREE.ShaderMaterial({
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position, 1.0); }',
+    fragmentShader: `varying vec2 vUv; void main(){ vec2 d = (vUv - 0.5)*4.4; float r = length(d);
+      float ph = exp(-pow((r - 0.78)/0.035, 2.0))*2.5;
+      float lens = exp(-pow((r - 1.05)/0.22, 2.0))*0.6*(0.4 + 0.6*smoothstep(-0.2, 0.9, d.y/r));
+      gl_FragColor = vec4(vec3(1.0, 0.72, 0.42)*(ph + lens), 1.0); }`,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  ring.onBeforeRender = (r, s, cam) => { ring.quaternion.copy(cam.quaternion); ring.updateMatrixWorld(); };
+  bh.add(hole, disk, ring);
+  bh.traverse((o) => { o.userData.noShadow = true; });
 }
 sim.scene.add(bh);
 
 // --- Durum ---
-let M = 1, life = buildLife(M), u = 0, cur = stateAt(life, 0);
-const tmpC = new THREE.Color();
+let M = 10, life = buildLife(M), u = 0, cur = stateAt(life, 0);   // açılışta 10 M☉: Güneş'le farkı (renk, boy, parlaklık) hemen görülsün
 let camDist = 9, camX = 0;
 
 function setMass(m) {
@@ -312,31 +371,50 @@ function update() {
   const vr = key === 'bh' ? 0.7 : key === 'ns' ? 0.12 : visR(cur.R);
   const snF = key === 'sn' ? cur.f : 0;
   starMesh.visible = key !== 'bh' && !(key === 'sn' && cur.f > 0.25);
-  glow.visible = key !== 'bh';
-  starMesh.scale.setScalar(vr);
-  const col = vivid(bbColor(cur.T || 6000, tmpC));
-  starMat.uniforms.color.value.copy(col);
-  starMat.uniforms.limb.value = cur.T < 4500 ? 0.75 : 0.55;
-  glowMat.color.copy(col);
+  S.corona.visible = key !== 'bh' && key !== 'sn';   // süpernovada korona yerine parlama + kabuk
+  S.group.scale.setScalar(vr);
+  // Görünüm evreye göre: konvektif zarf (T ≲ 7 500 K) → granül, leke, fakula, kromosfer ve proninans (manyetik etkinlik);
+  // O/B/A yüzeyi ışınımsal: pürüzsüz, hafif benekli, hızlı dönüşle kutuplar sıcak. Devlerde birkaç dev konveksiyon hücresi.
+  const T = key === 'ns' ? 6e5 : cur.T || 6000;
+  const giant = smoothstep(3, 60, cur.R || 1);
+  const conv = 1 - smoothstep(7000, 9500, T);
+  const rem = key === 'wd' || key === 'ns';
   const lg = Math.log10(Math.max(cur.L, 1e-6));
-  glow.scale.setScalar(key === 'ns' ? 2.2 : vr * clamp(2.4 + lg * 0.18, 1.8, 4));
-  glowMat.opacity = key === 'sn' ? clamp(1 - snF * 1.3, 0, 1) : 1;
+  // Sıcak yıldızda da (yüzey altı ince demir-konveksiyon katmanı, manyetik rüzgâr ilmekleri) düşük karşıtlı doku kalır
+  const hotTex = rem ? 0 : 0.35 * (1 - conv);
+  S.set({
+    T,
+    gran: rem ? 1 : lerp(1, 0.22, giant),
+    conv: rem ? 0 : Math.max(conv, hotTex),
+    spots: (key === 'ms' || key === 'sg' ? 1 : 0.35) * Math.max(conv, hotTex * 1.4),
+    grav: rem ? 0 : (1 - conv) * (key === 'ms' ? 0.06 : 0.02),
+    mottle: rem ? 0.15 : 1,
+    hot: rem ? 0 : 1 - conv,
+    // Yüzey parlaklığı tonlamada doymasın (granül/leke seçilsin); ışıklılık farkı korona büyüklüğüyle okunur
+    int: key === 'ns' ? 2.6 : key === 'wd' ? 1.7 : clamp(1.2 + lg * 0.03, 1.1, 1.45) * lerp(1, 1.3, 1 - conv),   // sıcak yıldız: merkez mavi-beyaz parlak, kenar kararır
+    corona: key === 'sn' ? clamp(1 - snF * 1.3, 0, 1) * 2.5 : key === 'ns' ? 1.6 : key === 'wd' ? 0.12 : clamp(0.4 + 0.12 * lg, 0.25, 1.2) * lerp(1, 0.45, giant),
+    chromo: rem ? 0 : Math.max(conv, 0.1) * (1 - giant * 0.6),   // sıcak yıldızda sert halka yok; yumuşak korona halesi
+    prom: rem || key === 'sn' ? 0 : Math.max(conv, 0.45) * (1 - giant * 0.7),
+  });
+  polar.visible = key === 'ns';
   // Bulutsu: PN evresinde genişler, beyaz cücenin başında söner
   let neb = 0, nebR = 1;
   if (key === 'pn') { neb = smoothstep(0, 0.25, cur.f); nebR = lerp(3, 9, cur.f); }
   if (key === 'wd' && M >= 0.5) { neb = 1 - smoothstep(0, 0.25, cur.f); nebR = 9 + cur.f * 10; }
   nebula.visible = neb > 0.01;
   nebula.scale.setScalar(nebR);
-  nebA.material.opacity = neb * 0.7;
-  nebB.material.opacity = neb * 0.45;
+  nebA.material.uniforms.uOp.value = neb * 0.9;
+  nebB.material.uniforms.uOp.value = neb * 0.7;
   // Süpernova: parlama + genişleyen kabuk; kalıntı evresinin başında söner
   let shell = 0, shR = 0;
   if (key === 'sn') { shell = smoothstep(0, 0.2, cur.f); shR = lerp(1, 14, cur.f); }
   if (key === 'ns' || key === 'bh') { shell = 1 - smoothstep(0, 0.3, cur.f); shR = 14 + cur.f * 20; }
   snPts.visible = shell > 0.01;
-  snMat.opacity = shell;
-  for (let i = 0; i < SN_N * 3; i++) snPos[i] = snDirs[i] * shR;
-  snGeo.attributes.position.needsUpdate = true;
+  snMat.uniforms.uOp.value = shell;
+  snShell.visible = shell > 0.01;
+  snShell.scale.setScalar(Math.max(shR * 0.92, 0.01));
+  snShell.material.uniforms.uOp.value = shell * 0.8;
+  snMat.uniforms.uR.value = Math.max(shR, 0.01);
   flash.visible = key === 'sn' && cur.f < 0.5;
   flash.scale.setScalar(lerp(10, 60, smoothstep(0, 0.15, cur.f)) * (1 - smoothstep(0.15, 0.5, cur.f) * 0.8));
   flash.material.opacity = 1 - smoothstep(0.1, 0.5, cur.f);
@@ -356,7 +434,7 @@ function update() {
 const ui = sim.ui;
 ui.section('Yıldız');
 const massOf = (v) => Math.min(40, 10 ** v);
-const massSl = ui.slider({ label: 'Başlangıç kütlesi', min: -1, max: 1.605, step: 0.005, value: 0,
+const massSl = ui.slider({ label: 'Başlangıç kütlesi', min: -1, max: 1.605, step: 0.005, value: 1,
   format: (v) => `${fmt(massOf(v), massOf(v) < 1 ? 2 : 1)} M☉`, onChange: (v) => setMass(massOf(v)) });
 const presets = [['Kırmızı cüce · 0,2', 0.2], ['Güneş · 1', 1], ['Sirius A benzeri · 2', 2], ['10 M☉', 10], ['25 M☉', 25], ['40 M☉', 40]];
 for (let i = 0; i < presets.length; i += 3) {
@@ -567,9 +645,10 @@ sim.onUpdate((dt) => {
 });
 sim.onRender((dt) => {
   starMesh.rotation.y += dt * 0.15;
+  S.update(sim.paused ? 0 : dt);
+  SUN.update(sim.paused ? 0 : dt);
+  diskU.uTime.value += sim.paused ? 0 : dt;
   beamPivot.rotation.y += dt * 6;
-  const disk = bh.getObjectByName('disk');
-  if (disk) disk.rotation.z += dt * 0.6;
   // Kamera uzaklığını yıldızın boyuna yumuşakça uydur
   const cam = sim.camera, tg = sim.controls.target;
   const dx = (camX - tg.x) * Math.min(1, dt * 2.5);

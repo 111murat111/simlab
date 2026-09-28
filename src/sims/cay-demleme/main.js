@@ -1,5 +1,6 @@
 // Mükemmel Çay Demleme — çaydanlık + demlik, sıcaklığa bağlı (Arrhenius) birinci derece özütleme, difüzyon, ince belli bardakta renk.
-import { createSim, THREE, fmt, clamp, rand, gauss, instanced } from '@core';
+import { createSim, THREE, RoundedBoxGeometry, fmt, clamp, rand, gauss, instanced, mat, procedural } from '@core';
+import { labRoom, glassGeometry, liquidGeometry, glassMesh, liquidMesh } from './labkit.js';
 
 const RG = 8.314, TREF = 368.15;       // 95 °C referans
 // Temsili hız sabitleri (1/dk, 95 °C'de) ve aktivasyon enerjileri (J/mol)
@@ -14,9 +15,10 @@ const kAt = (c, T) => c.k * Math.exp((-c.Ea / RG) * (1 / (T + 273.15) - 1 / TREF
 const viscosity = (T) => 2.414e-5 * 10 ** (247.8 / (T + 273.15 - 140)); // suyun viskozitesi (Pa·s), Vogel tipi yaklaşım
 
 const sim = createSim({
-  background: 0x1a1512,
-  camera: { position: [2.2, 4.6, 9.6], target: [0.6, 2.4, 0], fov: 45 },
-  controls: { minDistance: 4, maxDistance: 22 },
+  studio: { color: 0xc9c0b2, mood: 'day', warmth: 0.3, key: { el: 48, az: 210 }, radius: 22 },
+  look: { aoRadius: 0.02 },
+  camera: { position: [0.16, 1.25, 0.66], target: [0.044, 1.075, 0], fov: 45 },
+  controls: { minDistance: 0.25, maxDistance: 1.8 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Altta su kaynayan <b>çaydanlık</b>, üstte buharla sıcak tutulan <b>demlik</b>. Demliği cam yaptık ki içini görebilelim:
@@ -56,119 +58,192 @@ sim.formatTime = () => {
 let minutes = 0, stirT = 0;
 const ex = { renk: 0, kaf: 0, tanH: 0, tanY: 0 };
 
-// --- Sahne ---
-const counter = new THREE.Mesh(new THREE.BoxGeometry(14, 0.3, 7), new THREE.MeshStandardMaterial({ color: 0x5b4636, roughness: 0.8 }));
-counter.position.set(0.5, -0.15, 0);
-sim.scene.add(counter);
-const tile = new THREE.Mesh(new THREE.PlaneGeometry(30, 16), new THREE.MeshStandardMaterial({ color: 0x2d2520, roughness: 0.9 }));
-tile.position.set(0, 7, -4);
-sim.scene.add(tile);
-const warm = new THREE.PointLight(0xffe0b0, 14, 25, 1.5);
-warm.position.set(3, 7, 5);
-sim.scene.add(warm);
+// --- Sahne (metre ölçeği) ---
+// Mutfak tezgâhı: sahne içeriği "birim" cinsinden kurulur, content grubu U ile metreye ölçeklenir (1 birim = 6,25 cm:
+// ince belli bardak ≈ 10 cm, çaydanlık ≈ 18 cm çap).
+const U = 0.0625, BENCH = 0.9;
+const room = labRoom(sim.scene, { width: 2.4, depth: 0.62, benchH: BENCH, style: 'kitchen', wallZ: -0.3, shelf: true, window: true });
+const content = new THREE.Group();
+content.position.set(0, BENCH, 0.0);
+content.scale.setScalar(U);
+sim.scene.add(content);
+const W = (p) => [p[0] * U, BENCH + p[1] * U, p[2] * U];
+const add = (m, x = 0, y = 0, z = 0) => { m.position.set(x, y, z); content.add(m); return m; };
 
-// Ocak
+// Tezgâh üstü tek gözlü gaz ocağı: emaye gövde, pirinç brülör, döküm ızgara, düğme
 const KX = -1.2;
-const burner = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.7, 0.25, 40), new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.5, roughness: 0.5 }));
-burner.position.set(KX, 0.12, 0);
-sim.scene.add(burner);
-const flameMat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.8 });
+const HOB_H = 0.8, KY = 1.25;               // gövde yüksekliği, çaydanlık tabanı (ızgara üstü)
+const enamel = mat.paintedMetal({ color: 0x1c1d20, wear: 0.06, scale: U });
+add(new THREE.Mesh(new RoundedBoxGeometry(3.4, HOB_H, 3.2, 3, 0.09), enamel), KX, HOB_H / 2, 0);
+const brass = mat.brushedMetal({ color: 0xc9a25a, rough: 0.35, scale: U });
+add(new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.68, 0.12, 40), brass), KX, HOB_H + 0.06, 0);
+add(new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.07, 40), mat.paintedMetal({ color: 0x141414, wear: 0.4, scale: U })), KX, HOB_H + 0.155, 0);
+const iron = mat.paintedMetal({ color: 0x17181a, wear: 0.45, scale: U });
+for (let i = 0; i < 4; i++) {
+  const a = Math.PI / 4 + (i * Math.PI) / 2;
+  const arm = add(new THREE.Mesh(new RoundedBoxGeometry(0.95, 0.12, 0.13, 2, 0.03), iron), KX + Math.cos(a) * 1.13, KY - 0.06, Math.sin(a) * 1.13);
+  arm.rotation.y = -a;
+  add(new THREE.Mesh(new RoundedBoxGeometry(0.14, KY - HOB_H, 0.14, 2, 0.03), iron), KX + Math.cos(a) * 1.52, HOB_H + (KY - HOB_H) / 2, Math.sin(a) * 1.52);
+}
+const knob = add(new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.26, 32), mat.plastic({ color: 0x1a1a1a, gloss: 0.4, scale: U })), KX + 1.05, HOB_H * 0.5, 1.72);
+knob.rotation.x = Math.PI / 2;
+add(new THREE.Mesh(new RoundedBoxGeometry(0.06, 0.32, 0.06, 1, 0.02), mat.plastic({ color: 0x1a1a1a, gloss: 0.4, scale: U })), KX + 1.05, HOB_H * 0.5, 1.86).rotation.z = 0.6;
+// Alevler: halka brülörden dışa-yukarı eğik mavi koniler (HDR emisyon, toplamalı)
+const flameMat = mat.glow({ color: 0x2f6dff, intensity: 3.2 });
+flameMat.transparent = true; flameMat.opacity = 0.75; flameMat.blending = THREE.AdditiveBlending; flameMat.depthWrite = false;
+const flameGeo = new THREE.ConeGeometry(0.06, 0.26, 8, 1, true).translate(0, 0.13, 0);
 const flames = new THREE.Group();
-for (let i = 0; i < 16; i++) {
-  const f = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.25, 6), flameMat);
-  const a = (i / 16) * Math.PI * 2;
-  f.position.set(KX + Math.cos(a) * 0.7, 0.36, Math.sin(a) * 0.7);
+for (let i = 0; i < 18; i++) {
+  const a = (i / 18) * Math.PI * 2;
+  const f = new THREE.Mesh(flameGeo, flameMat);
+  f.position.set(KX + Math.cos(a) * 0.63, HOB_H + 0.08, Math.sin(a) * 0.63);
+  f.rotation.set(0, -a, 0, 'YXZ'); f.rotateZ(-0.75);
+  f.userData.noCast = true; f.userData.noShadow = true; f.userData.noAO = true;
   flames.add(f);
 }
-sim.scene.add(flames);
+content.add(flames);
+const flameLight = new THREE.PointLight(0x6d9bff, 0.35, 0.3, 2);
+flameLight.position.set(...W([KX, HOB_H + 0.2, 0]));
+sim.scene.add(flameLight);
 
-// Çaydanlık (alt, metal)
-const steel = new THREE.MeshStandardMaterial({ color: 0xd6d9de, metalness: 0.85, roughness: 0.25 });
-const kettle = new THREE.Mesh(new THREE.LatheGeometry([[0, 0], [1.25, 0], [1.4, 0.2], [1.45, 1.4], [1.3, 1.9], [0.95, 2.1], [0.9, 2.2]].map(([x, y]) => new THREE.Vector2(x, y)), 48), steel);
-kettle.position.set(KX, 0.3, 0);
-sim.scene.add(kettle);
-const spoutCurve = new THREE.CatmullRomCurve3([[KX + 1.3, 0.9, 0], [KX + 1.9, 1.5, 0], [KX + 2.25, 2.2, 0]].map((p) => new THREE.Vector3(...p)));
-sim.scene.add(new THREE.Mesh(new THREE.TubeGeometry(spoutCurve, 20, 0.12, 10), steel));
-const handle = new THREE.Mesh(new THREE.TorusGeometry(0.7, 0.07, 8, 24, Math.PI), new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.6 }));
-handle.position.set(KX - 1.4, 1.5, 0);
+// Çaydanlık (alt, parlak paslanmaz çelik)
+const steel = mat.brushedMetal({ color: 0xe2e5e9, rough: 0.14, scale: U });
+const kettle = add(new THREE.Mesh(new THREE.LatheGeometry([[0, 0], [1.25, 0], [1.4, 0.2], [1.45, 1.4], [1.3, 1.9], [0.95, 2.1], [0.9, 2.2]].map(([x, y]) => new THREE.Vector2(x, y)), 64), steel), KX, KY, 0);
+const krim = add(new THREE.Mesh(new THREE.TorusGeometry(0.9, 0.035, 10, 64), steel), KX, KY + 2.2, 0);
+krim.rotation.x = Math.PI / 2;
+const spoutCurve = new THREE.CatmullRomCurve3([[KX + 1.3, 0.6, 0], [KX + 1.9, 1.2, 0], [KX + 2.25, 1.9, 0]].map(([x, y, z]) => new THREE.Vector3(x, y + KY, z)));
+content.add(new THREE.Mesh(new THREE.TubeGeometry(spoutCurve, 24, 0.12, 14), steel));
+const handle = add(new THREE.Mesh(new THREE.TorusGeometry(0.7, 0.085, 12, 32, Math.PI), mat.plastic({ color: 0x151515, gloss: 0.35, scale: U })), KX - 1.4, KY + 1.2, 0);
 handle.rotation.z = Math.PI / 2;
-sim.scene.add(handle);
 
-// Demlik (üst, cam)
-const DY = 2.5, DR = 0.95, DH = 1.7;
-const glassMat = new THREE.MeshPhongMaterial({ color: 0xe8f4ff, transparent: true, opacity: 0.2, shininess: 120, specular: 0xffffff, side: THREE.DoubleSide, depthWrite: false });
-const demGlassMat = glassMat.clone();
-demGlassMat.opacity = 0.1;
-const demlik = new THREE.Mesh(new THREE.LatheGeometry([[0, 0], [0.8, 0], [DR, 0.25], [DR + 0.05, 1.1], [0.8, DH], [0.7, DH + 0.1]].map(([x, y]) => new THREE.Vector2(x, y)), 48), demGlassMat);
-demlik.position.set(KX, DY, 0);
+// profil yardımcıları
+const rAt = (prof, y) => {
+  for (let i = 1; i < prof.length - 1; i++) {
+    const [r0, y0] = prof[i], [r1, y1] = prof[i + 1];
+    if (y <= y1 || i === prof.length - 2) return r0 + (r1 - r0) * clamp((y - y0) / Math.max(y1 - y0, 1e-6), 0, 1);
+  }
+  return prof[1][0];
+};
+const glassOf = (geo, o = {}) => {
+  const m = glassMesh(geo, { thickness: 0.05, rough: 0.015, ...o });
+  m.material.depthWrite = false;
+  return m;
+};
+
+// Demlik (üst, ısıya dayanıklı cam)
+const DY = KY + 2.2, DR = 0.95, DH = 1.7, DT = 0.05;
+const demProf = [[0, 0], [0.8, 0], [DR, 0.25], [DR + 0.05, 1.1], [0.8, DH], [0.7, DH + 0.1]];
+const demlik = add(glassOf(glassGeometry(demProf, DT, 72)), KX, DY, 0);
 demlik.renderOrder = 4;
-sim.scene.add(demlik);
-const lid = new THREE.Mesh(new THREE.SphereGeometry(0.72, 32, 12, 0, Math.PI * 2, 0, Math.PI / 2), steel);
+const lid = add(new THREE.Mesh(new THREE.SphereGeometry(0.74, 48, 12, 0, Math.PI * 2, 0, Math.PI / 2), steel), KX, DY + DH + 0.1, 0);
 lid.scale.y = 0.35;
-lid.position.set(KX, DY + DH + 0.1, 0);
-const knob = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 8), steel);
-knob.position.set(KX, DY + DH + 0.38, 0);
-sim.scene.add(lid, knob);
+const lidKnob = add(new THREE.Mesh(new THREE.SphereGeometry(0.13, 20, 12), mat.plastic({ color: 0x151515, gloss: 0.4, scale: U })), KX, DY + DH + 0.38, 0);
+lidKnob.scale.y = 0.8;
 const dSpout = new THREE.CatmullRomCurve3([[KX + 0.9, DY + 0.5, 0], [KX + 1.35, DY + 0.9, 0], [KX + 1.55, DY + 1.4, 0]].map((p) => new THREE.Vector3(...p)));
-sim.scene.add(new THREE.Mesh(new THREE.TubeGeometry(dSpout, 16, 0.08, 8), glassMat));
-const demLiqMat = new THREE.MeshPhongMaterial({ color: 0xfff8ec, transparent: true, opacity: 0.35, depthWrite: false, shininess: 20, specular: 0x222222 });
+content.add(glassOf(new THREE.TubeGeometry(dSpout, 20, 0.08, 12), { thickness: 0.03 }));
+const dHandle = add(glassOf(new THREE.TorusGeometry(0.42, 0.075, 12, 32, Math.PI), { thickness: 0.15 }), KX - DR + 0.02, DY + 0.75, 0);
+dHandle.rotation.z = Math.PI / 2;
 const LIQ_H = 1.25;
-const demLiq = new THREE.Mesh(new THREE.LatheGeometry([[0, 0.03], [0.78, 0.03], [DR - 0.04, 0.27], [DR, LIQ_H]].map(([x, y]) => new THREE.Vector2(x, y)).concat([new THREE.Vector2(0, LIQ_H)]), 40), demLiqMat);
-demLiq.position.set(KX, DY, 0);
+const demLiq = add(liquidMesh(liquidGeometry((y) => rAt(demProf, y) - DT - 0.004, DT + 0.004, LIQ_H, { meniscus: 0.04, segs: 64 }), 0xfff8ec, 0.1), KX, DY, 0);
+const demLiqMat = demLiq.material;
+demLiqMat.depthWrite = false; demLiqMat.thickness = 1.6;
 demLiq.renderOrder = 2;
-sim.scene.add(demLiq);
 
-// Yapraklar
+// Yapraklar: kıvrık, koyu kahverengi-yeşil demlenmiş çay yaprağı parçaları
 const NL = 70;
-const leaves = instanced(new THREE.BoxGeometry(0.14, 0.02, 0.06), new THREE.MeshStandardMaterial({ color: 0x2b1a0e, roughness: 0.9 }), NL);
-const lf = Array.from({ length: NL }, () => ({ r: Math.sqrt(Math.random()) * 0.72, a: rand(0, Math.PI * 2), y: rand(0.06, 0.18), rot: rand(0, Math.PI), lift: 0 }));
-sim.scene.add(leaves);
+const leafMat = procedural({
+  key: 'cay-leaf', scale: U, bump: 0.01,
+  params: { color: 0x3a2412, roughness: 0.55 },
+  pattern: `
+    float n = fbm3(p*420.0 + seed*9.0, 3), v = vn3(p*1600.0);
+    col *= mix(vec3(0.75, 0.8, 0.55), vec3(1.2, 1.0, 0.85), n)*(0.75 + 0.5*seed);
+    rough = 0.45 + 0.2*v;
+    h = n*0.6 + v*0.4;`,
+});
+const leafGeo = new THREE.SphereGeometry(0.075, 10, 6).scale(1, 0.22, 0.5);
+const leaves = instanced(leafGeo, leafMat, NL);
+const lf = Array.from({ length: NL }, () => ({ r: Math.sqrt(Math.random()) * 0.72, a: rand(0, Math.PI * 2), y: rand(0.08, 0.2), rot: rand(0, Math.PI), lift: 0 }));
+leaves.userData.noCast = true;
+content.add(leaves);
+
+// Yumuşak nokta sprite'ları (difüzyon molekülleri ve buhar): boyut içerik biriminde, ekran ölçeği onRender'da
+const ptScale = { value: 400 };
+const cTmp = new THREE.Color();
+function sprites(n, size, frag, blending = THREE.NormalBlending) {
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3).fill(1), al = new Float32Array(n), sz = new Float32Array(n).fill(1);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('aA', new THREE.BufferAttribute(al, 1).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('aS', new THREE.BufferAttribute(sz, 1).setUsage(THREE.DynamicDrawUsage));
+  const m = new THREE.ShaderMaterial({
+    uniforms: { uScale: ptScale, uSize: { value: size * U } },
+    vertexShader: `attribute vec3 aColor; attribute float aA, aS; uniform float uScale, uSize; varying vec3 vC; varying float vA;
+      void main(){ vC = aColor; vA = aA; vec4 mv = modelViewMatrix*vec4(position, 1.0);
+        gl_PointSize = aA > 0.0 ? uSize*aS*uScale/max(-mv.z, 0.001) : 0.0; gl_Position = projectionMatrix*mv; }`,
+    fragmentShader: `varying vec3 vC; varying float vA; void main(){ float r = length(gl_PointCoord - 0.5)*2.0; if (r > 1.0) discard; ${frag} }`,
+    transparent: true, depthWrite: false, blending,
+  });
+  const p = new THREE.Points(g, m);
+  p.frustumCulled = false; p.renderOrder = 5;
+  content.add(p);
+  return { p, pos, col, al, sz, g,
+    color(i, hex) { cTmp.setHex(hex); col[i * 3] = cTmp.r; col[i * 3 + 1] = cTmp.g; col[i * 3 + 2] = cTmp.b; g.attributes.aColor.needsUpdate = true; },
+    flush() { g.attributes.position.needsUpdate = true; g.attributes.aA.needsUpdate = true; g.attributes.aS.needsUpdate = true; } };
+}
 
 // Difüzyon parçacıkları
 const NP = 320;
-const dots = instanced(new THREE.SphereGeometry(0.028, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffffff }), NP);
-dots.renderOrder = 3;
-sim.scene.add(dots);
-const COLS = { renk: 0xd9480f, kaf: 0xf8fafc, tan: 0x6b8e23 };
+const dots = sprites(NP, 0.075, `float core = smoothstep(0.75, 0.45, r), halo = exp(-r*r*5.0); gl_FragColor = vec4(vC*(core*1.05 + halo*0.35), vA*max(core, halo*0.6));`);
+const COLS = { renk: 0xe8591a, kaf: 0xf8fafc, tan: 0x8fbf3a };
 const dp = Array.from({ length: NP }, () => ({ on: false, x: 0, y: 0, z: 0 }));
 let dpNext = 0;
-const cc = new THREE.Color();
 function emit(kind) {
   const p = dp[dpNext];
   const l = lf[Math.floor(Math.random() * NL)];
   p.on = true;
   p.x = Math.cos(l.a) * l.r; p.z = Math.sin(l.a) * l.r; p.y = l.y + l.lift + 0.03;
-  dots.setColorAt(dpNext, cc.setHex(COLS[kind]));
-  dots.instanceColor.needsUpdate = true;
+  dots.color(dpNext, COLS[kind]);
   dpNext = (dpNext + 1) % NP;
 }
-dots.setColorAt(0, cc.setHex(0xffffff));
 
-// Buhar
+// Buhar: çaydanlığın ağzından yükselen yumuşak bulutçuklar
 const NS = 40;
-const steam = instanced(new THREE.SphereGeometry(0.12, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18, depthWrite: false }), NS);
+const steam = sprites(NS, 0.55, `gl_FragColor = vec4(vec3(0.93, 0.94, 0.95), vA*exp(-r*r*3.2)*smoothstep(1.0, 0.7, r));`);
 const sp = Array.from({ length: NS }, () => ({ t: Math.random() }));
-sim.scene.add(steam);
 
-// İnce belli bardak + tabak
+// İnce belli bardak + porselen tabak (yaldızlı kenar) + çay kaşığı
 const GX = 2.9, GZ = 0.9;
-const saucer = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.7, 0.08, 40), new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.3 }));
-saucer.position.set(GX, 0.04, GZ);
-sim.scene.add(saucer);
+const saucerProf = [[0, 0], [0.55, 0], [0.6, 0.02], [0.63, 0.05], [0.95, 0.11], [1.0, 0.145], [0.98, 0.16], [0.62, 0.095], [0.42, 0.08], [0, 0.08]];
+const saucer = add(new THREE.Mesh(new THREE.LatheGeometry(saucerProf.map(([x, y]) => new THREE.Vector2(x, y)), 64), mat.ceramic({ color: 0xf6f3ee, scale: U })), GX, 0, GZ);
+saucer.geometry.computeVertexNormals();
+const gilt = mat.brushedMetal({ color: 0xd8b25a, rough: 0.2, scale: U });
+const rim = add(new THREE.Mesh(new THREE.TorusGeometry(0.99, 0.013, 8, 80), gilt), GX, 0.153, GZ);
+rim.rotation.x = Math.PI / 2;
+const spoon = new THREE.Group();
+spoon.add(new THREE.Mesh(new THREE.SphereGeometry(0.14, 20, 10).scale(1, 0.22, 0.62), steel));
+const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.03, 1.2, 10), steel);
+stem.rotation.z = Math.PI / 2; stem.position.x = 0.72;
+spoon.add(stem);
+spoon.position.set(GX + 0.1, 0.13, GZ + 0.72); spoon.rotation.set(0, -0.35, -0.06);
+content.add(spoon);
+const GT = 0.028;
 const gprof = [[0, 0], [0.42, 0], [0.44, 0.08], [0.36, 0.45], [0.31, 0.7], [0.36, 1.0], [0.5, 1.55], [0.52, 1.6]];
-const tglass = new THREE.Mesh(new THREE.LatheGeometry(gprof.map(([x, y]) => new THREE.Vector2(x, y)), 48), glassMat);
-tglass.position.set(GX, 0.08, GZ);
+const tglass = add(glassOf(glassGeometry(gprof, GT, 72), { thickness: 0.04 }), GX, 0.08, GZ);
 tglass.renderOrder = 4;
-sim.scene.add(tglass);
-const cupLiqMat = new THREE.MeshPhongMaterial({ color: 0xb04a1a, transparent: true, opacity: 0.88, shininess: 80 });
-const lprof = [[0, 0.1], [0.38, 0.1], [0.33, 0.45], [0.28, 0.7], [0.33, 1.0], [0.45, 1.42], [0, 1.42]];
-const cupLiq = new THREE.Mesh(new THREE.LatheGeometry(lprof.map(([x, y]) => new THREE.Vector2(x, y)), 40), cupLiqMat);
-cupLiq.position.set(GX, 0.08, GZ);
+const cupLiq = add(liquidMesh(liquidGeometry((y) => rAt(gprof, y) - GT - 0.003, 0.05, 1.42, { meniscus: 0.03, segs: 64 }), 0xb04a1a, 0.04), GX, 0.08, GZ);
+const cupLiqMat = cupLiq.material;
+cupLiqMat.depthWrite = false; cupLiqMat.thickness = 0.7;
 cupLiq.renderOrder = 2;
-sim.scene.add(cupLiq);
-const glassLbl = sim.label('', { position: [GX, 2.15, GZ], className: 'plain' });
-const demLbl = sim.label('', { position: [KX, DY + DH + 0.9, 0], className: 'plain' });
-const tempLbl = sim.label('', { position: [KX + 0.2, 0.1, 2.0], className: 'plain' });
+
+// Çay kutusu (arkada): boyalı teneke, pirinç kapak
+add(new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.85, 2.4, 48), mat.paintedMetal({ color: 0x9b2226, wear: 0.08, scale: U })), -4.7, 1.2, -1.6);
+add(new THREE.Mesh(new THREE.CylinderGeometry(0.88, 0.88, 0.35, 48), gilt), -4.7, 2.55, -1.6);
+add(new THREE.Mesh(new THREE.CylinderGeometry(0.87, 0.87, 0.12, 48), gilt), -4.7, 0.5, -1.6);
+
+const glassLbl = sim.label('', { parent: content, position: [GX, 2.15, GZ], className: 'plain' });
+const demLbl = sim.label('', { parent: content, position: [KX, DY + DH + 0.9, 0], className: 'plain' });
+const tempLbl = sim.label('', { parent: content, position: [KX + 0.2, 0.1, 2.3], className: 'plain' });
 
 // --- Arayüz ---
 const ui = sim.ui;
@@ -195,6 +270,7 @@ ui.buttons([
   { label: '🥄 Karıştır', variant: 'primary', onClick: () => { stirT = 1.5; } },
   { label: '🔄 Yeniden demle', onClick: () => restart() },
 ]);
+ui.toggle({ label: 'Molekülleri göster (difüzyon)', value: true, onChange: (v) => { dots.p.visible = v; } });
 
 ui.section('Bardak');
 const demSl = ui.slider({ label: 'Dem oranı (koyu ↔ açık)', min: 10, max: 100, step: 5, value: 50, unit: '%', format: (v) => `%${v} dem · %${100 - v} su` });
@@ -255,6 +331,7 @@ sim.onUpdate((dt) => {
 });
 
 const dummy = new THREE.Object3D();
+const tmpV2 = new THREE.Vector2();
 let uiT = 0;
 sim.onRender((rdt) => {
   const T = tempSl.value;
@@ -284,32 +361,32 @@ sim.onRender((rdt) => {
       if (r > rmax) { p.x *= rmax / r; p.z *= rmax / r; }
       p.y = clamp(p.y, 0.06, LIQ_H - 0.05);
     }
-    dummy.position.set(KX + p.x, DY + p.y, p.z);
-    dummy.rotation.set(0, 0, 0);
-    dummy.scale.setScalar(p.on ? 1 : 0.0001);
-    dummy.updateMatrix();
-    dots.setMatrixAt(i, dummy.matrix);
+    dots.pos[i * 3] = KX + p.x; dots.pos[i * 3 + 1] = DY + p.y; dots.pos[i * 3 + 2] = p.z;
+    dots.al[i] = p.on ? 0.9 : 0;
   }
-  dots.instanceMatrix.needsUpdate = true;
+  dots.flush();
   // Buhar
   for (let i = 0; i < NS; i++) {
     const s = sp[i];
     s.t = (s.t + rdt * 0.35) % 1;
-    dummy.position.set(KX + 2.3 + Math.sin(i * 3.1 + s.t * 4) * 0.15 * s.t, 2.3 + s.t * 2.2, Math.cos(i * 1.7) * 0.15 * s.t);
-    dummy.scale.setScalar(0.4 + s.t * 1.6);
-    dummy.updateMatrix();
-    steam.setMatrixAt(i, dummy.matrix);
+    steam.pos[i * 3] = KX + 2.3 + Math.sin(i * 3.1 + s.t * 4) * 0.25 * s.t;
+    steam.pos[i * 3 + 1] = KY + 2.0 + s.t * 2.6;
+    steam.pos[i * 3 + 2] = Math.cos(i * 1.7) * 0.25 * s.t;
+    steam.sz[i] = 0.5 + s.t * 2.2;
+    steam.al[i] = 0.22 * Math.sin(Math.PI * s.t) * (0.4 + 0.6 * clamp(tempSl.value - 70, 0, 30) / 30);
   }
-  steam.instanceMatrix.needsUpdate = true;
+  steam.flush();
+  const vp = sim.renderer.getDrawingBufferSize(tmpV2);
+  ptScale.value = vp.y / (2 * Math.tan(THREE.MathUtils.degToRad(sim.camera.fov / 2)));
   flames.children.forEach((f, i) => (f.scale.y = 0.8 + 0.3 * Math.sin(sim.time * 20 + i)));
   // Renkler (Beer–Lambert)
   const leafF = leafSl.value / 15, demF = demSl.value / 100;
   const Adem = 2.2 * leafF * ex.renk;        // demlikteki dem (daha uzun ışık yolu)
-  teaColor(Adem, demLiqMat.color);
-  demLiqMat.opacity = 0.3 + 0.62 * clamp(Adem / 1.5, 0, 1);
+  teaColor(Adem, demLiqMat.attenuationColor);
+  demLiqMat.attenuationDistance = 2 * DR * U;   // demlik çapı boyunca ışık yolu
   const Ag = 2.4 * leafF * ex.renk * demF;   // bardak
-  teaColor(Ag, cupLiqMat.color);
-  cupLiqMat.opacity = 0.5 + 0.45 * clamp(Ag, 0, 1);
+  teaColor(Ag, cupLiqMat.attenuationColor);
+  cupLiqMat.attenuationDistance = 0.8 * U;      // bardak çapı boyunca ışık yolu
   uiT += rdt;
   if (uiT < 0.2) return;
   uiT = 0;

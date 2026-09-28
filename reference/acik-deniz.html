@@ -1,0 +1,1125 @@
+<title>Açık Deniz</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --ink: #E8F0F1;
+    --mute: #93A9AE;
+    --line: rgba(186, 222, 232, 0.14);
+    --glass: rgba(4, 16, 23, 0.64);
+    --glass-strong: rgba(4, 16, 23, 0.82);
+    --signal: #FF6A3D;
+    --signal-ink: #1A0A04;
+    --track: rgba(232, 240, 241, 0.16);
+    --ground: #06141C;
+    --display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+    --body: "Barlow", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: var(--ground); color: var(--ink); }
+  body { font: 14px/1.45 var(--body); -webkit-font-smoothing: antialiased; }
+  #sea { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; background: var(--ground); }
+  #sea.dragging { cursor: grabbing; }
+
+  .card {
+    background: var(--glass);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    backdrop-filter: blur(14px) saturate(1.2);
+  }
+
+  /* Durum kartı */
+  .hud {
+    position: fixed; left: 16px; top: calc(16px + env(safe-area-inset-top, 0px));
+    padding: 12px 16px 14px; display: grid; gap: 8px; pointer-events: none;
+    max-width: calc(100% - 32px - 96px);
+  }
+  .brand { font: 600 12px/1 var(--display); letter-spacing: 0.3em; text-transform: uppercase; color: var(--mute); }
+  .bft { display: flex; align-items: center; gap: 12px; }
+  .bft-num { font: 700 52px/0.85 var(--display); font-variant-numeric: tabular-nums; color: var(--ink); min-width: 1ch; }
+  .bft-lbl { font: 600 11px/1 var(--display); letter-spacing: 0.22em; text-transform: uppercase; color: var(--signal); }
+  .bft-name { font: 600 22px/1.1 var(--display); letter-spacing: 0.01em; text-wrap: balance; }
+  .stats { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; }
+  .stats div { display: flex; gap: 6px; align-items: baseline; }
+  .stats dt { font: 600 11px/1 var(--display); letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); }
+  .stats dd { margin: 0; font: 500 13px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+  .buoy-note { font: 400 12px/1.3 var(--body); color: var(--mute); }
+  .buoy-note b { color: var(--ink); font-weight: 500; }
+
+  /* Pusula */
+  .compass {
+    position: fixed; right: 16px; top: calc(16px + env(safe-area-inset-top, 0px));
+    width: 84px; height: 84px; border-radius: 50%; pointer-events: none; padding: 0;
+  }
+  .compass svg { width: 100%; height: 100%; display: block; }
+
+  /* Ayar paneli */
+  .panel {
+    position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    width: 312px; max-width: calc(100% - 32px);
+    max-height: calc(100% - 150px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--glass-strong);
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--line);
+  }
+  .panel.collapsed .panel-head { border-bottom-color: transparent; }
+  .panel-title { font: 600 13px/1 var(--display); letter-spacing: 0.24em; text-transform: uppercase; }
+  .panel-body { overflow-y: auto; padding: 12px 16px 16px; display: grid; gap: 16px; }
+  .panel.collapsed .panel-body { display: none; }
+  .panel h2 { margin: 0 0 4px; font: 600 11px/1 var(--display); letter-spacing: 0.24em; text-transform: uppercase; color: var(--mute); }
+  .group { display: grid; gap: 6px; }
+  .row { display: grid; gap: 0; }
+  .rowhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .rowhead label { font: 500 13px/1.3 var(--body); }
+  .rowhead output { font: 400 12px/1.3 var(--mono); font-variant-numeric: tabular-nums; color: var(--mute); white-space: nowrap; }
+
+  button {
+    font: 600 12px/1 var(--display); letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 999px;
+    padding: 8px 12px; cursor: pointer;
+  }
+  button:hover { border-color: rgba(232, 240, 241, 0.4); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+  button[aria-pressed="true"] { background: var(--signal); border-color: var(--signal); color: var(--signal-ink); }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; }
+  .icon-btn { width: 32px; height: 32px; padding: 0; display: grid; place-items: center; }
+  .icon-btn svg { transition: transform 0.2s ease; }
+  .panel.collapsed .icon-btn svg { transform: rotate(180deg); }
+  .time-row { display: flex; gap: 8px; align-items: end; }
+  .time-row .row { flex: 1; }
+
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 24px; margin: 0; background: transparent; cursor: pointer; }
+  input[type=range]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: linear-gradient(to right, var(--signal) var(--p, 50%), var(--track) var(--p, 50%)); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5.5px; border-radius: 50%; background: var(--ink); border: 2px solid var(--signal); }
+  input[type=range]::-moz-range-track { height: 3px; border-radius: 2px; background: var(--track); }
+  input[type=range]::-moz-range-progress { height: 3px; border-radius: 2px; background: var(--signal); }
+  input[type=range]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--ink); border: 2px solid var(--signal); }
+
+  .hint {
+    position: fixed; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    padding: 8px 12px; font: 400 12px/1.2 var(--body); color: var(--mute); pointer-events: none;
+    border-radius: 999px;
+  }
+  .hint b { color: var(--ink); font-weight: 500; }
+
+  .fail { position: fixed; inset: 0; display: grid; place-items: center; padding-inline: 16px; text-align: center; }
+  .fail p { max-width: 42ch; font-size: 15px; }
+
+  @media (max-width: 720px) {
+    .hud { padding: 10px 12px 12px; gap: 6px; }
+    .bft-num { font-size: 40px; }
+    .bft-name { font-size: 18px; }
+    .buoy-note { display: none; }
+    .compass { width: 64px; height: 64px; }
+    .panel { left: 16px; right: 16px; width: auto; max-height: 56%; }
+    .hint { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .icon-btn svg { transition: none; }
+  }
+</style>
+
+<canvas id="sea" aria-label="Gerçek zamanlı okyanus simülasyonu"></canvas>
+
+<div class="hud card" aria-live="polite">
+  <div class="brand">Açık Deniz</div>
+  <div class="bft">
+    <span class="bft-num" id="bftNum">5</span>
+    <div>
+      <div class="bft-lbl">Bofor</div>
+      <div class="bft-name" id="bftName">Sert rüzgâr</div>
+    </div>
+  </div>
+  <dl class="stats">
+    <div><dt>Rüzgâr</dt><dd id="stWind">Lodos 9.0 m/s</dd></div>
+    <div><dt>H<sub>s</sub></dt><dd id="stHs">1.7 m</dd></div>
+    <div><dt>T<sub>p</sub></dt><dd id="stTp">6.7 s</dd></div>
+  </dl>
+  <div class="buoy-note"><b>Emniyetli su şamandırası</b> · fener Mo(A) B 10s</div>
+</div>
+
+<div class="compass card" aria-hidden="true">
+  <svg viewBox="-50 -50 100 100">
+    <g id="rose">
+      <circle r="41" fill="none" stroke="rgba(232,240,241,.25)" stroke-width="1"></circle>
+      <g id="ticks"></g>
+      <text x="0" y="-27" text-anchor="middle" dominant-baseline="middle" fill="#FF6A3D" font-family="Barlow Condensed, sans-serif" font-weight="700" font-size="13">K</text>
+      <text x="27" y="0" text-anchor="middle" dominant-baseline="middle" fill="#93A9AE" font-family="Barlow Condensed, sans-serif" font-weight="600" font-size="10">D</text>
+      <text x="0" y="27" text-anchor="middle" dominant-baseline="middle" fill="#93A9AE" font-family="Barlow Condensed, sans-serif" font-weight="600" font-size="10">G</text>
+      <text x="-27" y="0" text-anchor="middle" dominant-baseline="middle" fill="#93A9AE" font-family="Barlow Condensed, sans-serif" font-weight="600" font-size="10">B</text>
+      <g id="windArrow">
+        <line x1="0" y1="-40" x2="0" y2="-12" stroke="#E8F0F1" stroke-width="2.2" stroke-linecap="round"></line>
+        <path d="M-5 -18 L0 -9 L5 -18 Z" fill="#E8F0F1"></path>
+      </g>
+      <g id="sunMark"><circle cx="0" cy="-41" r="4" fill="#FFC56B" stroke="#1A0A04" stroke-width="1"></circle></g>
+    </g>
+    <path d="M0 -49 L-3 -44 L3 -44 Z" fill="#E8F0F1"></path>
+  </svg>
+</div>
+
+<aside class="panel card" id="panel">
+  <div class="panel-head">
+    <span class="panel-title">Deniz durumu</span>
+    <button class="icon-btn" id="panelToggle" aria-expanded="true" aria-controls="panelBody" aria-label="Ayarları daralt">
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 5 L7 9 L11 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+    </button>
+  </div>
+  <div class="panel-body" id="panelBody">
+    <div class="presets" id="presets" role="group" aria-label="Hazır durumlar"></div>
+    <section class="group"><h2>Deniz</h2><div class="group" id="gSea"></div></section>
+    <section class="group"><h2>Gökyüzü</h2><div class="group" id="gSky"></div></section>
+    <section class="group"><h2>Zaman</h2>
+      <div class="time-row"><div id="gTime" class="row"></div><button id="pause" aria-pressed="false">Duraklat</button></div>
+    </section>
+  </div>
+</aside>
+
+<div class="hint card"><b>Sürükle</b> etrafında dön · <b>Tekerlek</b> yakınlaş</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------------------------------------------------------------- state */
+const S = { wind: 9, windDir: 225, fetch: 150, chop: 0.85, foam: 0.5, sunEl: 16, sunAz: 212, cloud: 0.3, speed: 1 };
+
+const WIND_NAMES = ['Yıldız', 'Poyraz', 'Gündoğusu', 'Keşişleme', 'Kıble', 'Lodos', 'Günbatısı', 'Karayel'];
+const POINTS = ['K', 'KD', 'D', 'GD', 'G', 'GB', 'B', 'KB'];
+const sector = v => Math.round(((v % 360) + 360) % 360 / 45) % 8;
+const BFT = [[0.5, 'Sakin'], [1.5, 'Esinti'], [3.3, 'Hafif rüzgâr'], [5.5, 'Tatlı rüzgâr'], [7.9, 'Mutedil rüzgâr'],
+  [10.7, 'Sert rüzgâr'], [13.8, 'Kuvvetli rüzgâr'], [17.1, 'Fırtınamsı rüzgâr'], [20.7, 'Fırtına'],
+  [24.4, 'Kuvvetli fırtına'], [28.4, 'Tam fırtına'], [32.6, 'Şiddetli fırtına'], [Infinity, 'Kasırga']];
+
+const CONTROLS = [
+  { id: 'wind', group: 'gSea', label: 'Rüzgâr hızı', min: 1, max: 30, step: 0.5, fmt: v => v.toFixed(1) + ' m/s', spec: true },
+  { id: 'windDir', group: 'gSea', label: 'Rüzgârın geldiği yön', min: 0, max: 355, step: 5, fmt: v => Math.round(v) + '° ' + WIND_NAMES[sector(v)], spec: true },
+  { id: 'fetch', group: 'gSea', label: 'Feç mesafesi', min: 5, max: 500, step: 5, fmt: v => Math.round(v) + ' km', spec: true },
+  { id: 'chop', group: 'gSea', label: 'Dalga sivriliği', min: 0, max: 1.4, step: 0.01, fmt: v => v.toFixed(2) },
+  { id: 'foam', group: 'gSea', label: 'Köpük', min: 0, max: 1, step: 0.01, fmt: v => Math.round(v * 100) + '%' },
+  { id: 'sunEl', group: 'gSky', label: 'Güneş yüksekliği', min: -4, max: 75, step: 0.5, fmt: v => v.toFixed(1) + '°', sky: true },
+  { id: 'sunAz', group: 'gSky', label: 'Güneşin yönü', min: 0, max: 359, step: 1, fmt: v => Math.round(v) + '° ' + POINTS[sector(v)], sky: true },
+  { id: 'cloud', group: 'gSky', label: 'Bulutluluk', min: 0, max: 1, step: 0.01, fmt: v => Math.round(v * 8) + '/8 okta' },
+  { id: 'speed', group: 'gTime', label: 'Akış hızı', min: 0.1, max: 2, step: 0.05, fmt: v => v.toFixed(2) + '×' },
+];
+
+const PRESETS = [
+  { name: 'Sakin sabah', v: { wind: 3, windDir: 45, fetch: 40, chop: 0.6, foam: 0.4, sunEl: 6, sunAz: 100, cloud: 0.15 } },
+  { name: 'İkindi', v: { wind: 9, windDir: 225, fetch: 150, chop: 0.85, foam: 0.5, sunEl: 16, sunAz: 212, cloud: 0.3 } },
+  { name: 'Fırtına', v: { wind: 21, windDir: 200, fetch: 450, chop: 1.0, foam: 0.75, sunEl: 22, sunAz: 190, cloud: 0.93 } },
+  { name: 'Alacakaranlık', v: { wind: 5, windDir: 250, fetch: 120, chop: 0.8, foam: 0.45, sunEl: -1.5, sunAz: 262, cloud: 0.3 } },
+];
+
+/* ---------------------------------------------------------------- UI */
+const $ = id => document.getElementById(id);
+const inputs = {};
+let specDirty = true, skyDirty = true, paused = false;
+
+for (const c of CONTROLS) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `<div class="rowhead"><label for="${c.id}">${c.label}</label><output id="${c.id}-o" for="${c.id}"></output></div>
+    <input type="range" id="${c.id}" min="${c.min}" max="${c.max}" step="${c.step}" value="${S[c.id]}">`;
+  $(c.group).appendChild(row);
+  const el = row.querySelector('input');
+  inputs[c.id] = { el, out: row.querySelector('output'), c };
+  el.addEventListener('input', () => {
+    S[c.id] = parseFloat(el.value);
+    if (c.spec) specDirty = true;
+    if (c.sky) skyDirty = true;
+    markPreset(null);
+    syncControl(c.id);
+    updateReadout();
+  });
+}
+function syncControl(id) {
+  const { el, out, c } = inputs[id];
+  el.value = S[id];
+  el.style.setProperty('--p', ((S[id] - c.min) / (c.max - c.min) * 100) + '%');
+  out.textContent = c.fmt(S[id]);
+}
+const presetBtns = PRESETS.map((p, i) => {
+  const b = document.createElement('button');
+  b.textContent = p.name;
+  b.setAttribute('aria-pressed', i === 1 ? 'true' : 'false');
+  b.addEventListener('click', () => {
+    Object.assign(S, p.v);
+    specDirty = skyDirty = true;
+    Object.keys(inputs).forEach(syncControl);
+    markPreset(i);
+    cam.yawGoal = -S.sunAz * Math.PI / 180 + 0.1;
+    updateReadout();
+  });
+  $('presets').appendChild(b);
+  return b;
+});
+function markPreset(i) { presetBtns.forEach((b, j) => b.setAttribute('aria-pressed', j === i ? 'true' : 'false')); }
+Object.keys(inputs).forEach(syncControl);
+
+$('pause').addEventListener('click', e => {
+  paused = !paused;
+  e.currentTarget.setAttribute('aria-pressed', paused ? 'true' : 'false');
+  e.currentTarget.textContent = paused ? 'Devam' : 'Duraklat';
+});
+const panel = $('panel'), toggle = $('panelToggle');
+function setCollapsed(c) {
+  panel.classList.toggle('collapsed', c);
+  toggle.setAttribute('aria-expanded', c ? 'false' : 'true');
+  toggle.setAttribute('aria-label', c ? 'Ayarları aç' : 'Ayarları daralt');
+}
+toggle.addEventListener('click', () => setCollapsed(!panel.classList.contains('collapsed')));
+if (window.matchMedia('(max-width: 720px)').matches) setCollapsed(true);
+
+// compass ticks
+(() => {
+  let s = '';
+  for (let i = 0; i < 36; i++) {
+    const a = i * 10 * Math.PI / 180, r0 = i % 9 === 0 ? 34 : 37.5;
+    s += `<line x1="${(Math.sin(a) * r0).toFixed(2)}" y1="${(-Math.cos(a) * r0).toFixed(2)}" x2="${(Math.sin(a) * 41).toFixed(2)}" y2="${(-Math.cos(a) * 41).toFixed(2)}" stroke="rgba(232,240,241,${i % 9 === 0 ? 0.7 : 0.3})" stroke-width="1"/>`;
+  }
+  $('ticks').innerHTML = s;
+})();
+
+/* ---------------------------------------------------------------- physics helpers (JS side) */
+const G = 9.81;
+function spectrumParams() {
+  const U = S.wind, F = S.fetch * 1000;
+  let wp = 22 * Math.pow(G * G / (U * F), 1 / 3);
+  wp = Math.max(wp, 0.855 * G / U);             // Pierson–Moskowitz: tam gelişmiş deniz sınırı
+  const alpha = 0.076 * Math.pow(U * U / (F * G), 0.22);
+  return { wp, alpha };
+}
+function jonswap(w, wp, alpha) {
+  const sigma = w <= wp ? 0.07 : 0.09;
+  const r = Math.exp(-((w - wp) ** 2) / (2 * sigma * sigma * wp * wp));
+  return alpha * G * G / w ** 5 * Math.exp(-1.25 * (wp / w) ** 4) * Math.pow(3.3, r);
+}
+function seaState() {
+  const { wp, alpha } = spectrumParams();
+  const w0 = Math.sqrt(G * 2 * Math.PI / CASCADES[0].L), w1 = 25;
+  let m0 = 0; const n = 3000, dw = (w1 - w0) / n;
+  for (let i = 0; i < n; i++) m0 += jonswap(w0 + (i + 0.5) * dw, wp, alpha) * dw;
+  return { Hs: 4 * Math.sqrt(m0), Tp: 2 * Math.PI / wp };
+}
+let HS = 1.5;
+function updateReadout() {
+  let b = 0; while (S.wind >= BFT[b][0]) b++;
+  $('bftNum').textContent = b;
+  $('bftName').textContent = BFT[b][1];
+  $('stWind').textContent = `${WIND_NAMES[sector(S.windDir)]} ${S.wind.toFixed(1)} m/s`;
+  const st = seaState(); HS = st.Hs;
+  $('stHs').textContent = st.Hs.toFixed(st.Hs < 1 ? 2 : 1) + ' m';
+  $('stTp').textContent = st.Tp.toFixed(1) + ' s';
+  $('windArrow').setAttribute('transform', `rotate(${S.windDir})`);
+  $('sunMark').setAttribute('transform', `rotate(${S.sunAz})`);
+}
+
+/* ---------------------------------------------------------------- WebGL setup */
+const canvas = $('sea');
+const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, depth: true, powerPreference: 'high-performance' });
+function fail(msg) {
+  const d = document.createElement('div');
+  d.className = 'fail';
+  d.innerHTML = `<p>${msg}</p>`;
+  document.body.appendChild(d);
+}
+if (!gl || !gl.getExtension('EXT_color_buffer_float')) {
+  fail('Bu simülasyon WebGL2 ve kayan noktalı render hedefleri gerektiriyor. Güncel bir Chrome, Edge, Firefox ya da Safari ile açmayı deneyin.');
+  updateReadout();
+  return;
+}
+const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+
+const LOW = Math.min(screen.width, screen.height) < 700 || matchMedia('(pointer: coarse)').matches;
+const N = LOW ? 128 : 256, LOGN = Math.log2(N);
+const GRID = LOW ? 320 : 512;
+const GRID_R = 15000;
+// Üç kademe (cascade): uzun ölü dalgadan kılcal dalgacığa. Oranlar tam sayı değil, böylece döşeme tekrarları hizalanmaz.
+const CASCADES = [{ L: 600 }, { L: 97 }, { L: 17 }];
+CASCADES[0].kmin = 1e-4; CASCADES[0].kmax = 6 * 2 * Math.PI / CASCADES[1].L;
+CASCADES[1].kmin = CASCADES[0].kmax; CASCADES[1].kmax = 6 * 2 * Math.PI / CASCADES[2].L;
+CASCADES[2].kmin = CASCADES[1].kmax; CASCADES[2].kmax = 1e9;
+const LOOP_T = 200; // saniye: dispersiyon bu periyoda kuantize edilir
+
+const HEAD = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+`;
+const COMMON = `
+const float PI = 3.14159265359;
+vec2 cmul(vec2 a, vec2 b){ return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
+vec2 eqUV(vec3 d){ return vec2(atan(d.z, d.x)/(2.0*PI) + 0.5, asin(clamp(d.y, -1.0, 1.0))/PI + 0.5); }
+vec3 eqDir(vec2 uv){ float ph = (uv.x - 0.5)*2.0*PI, el = (uv.y - 0.5)*PI; return vec3(cos(ph)*cos(el), sin(el), sin(ph)*cos(el)); }
+vec3 aces(vec3 x){ return clamp((x*(2.51*x + 0.03))/(x*(2.43*x + 0.59) + 0.14), 0.0, 1.0); }
+vec3 finish(vec3 c, float e){ return pow(aces(c*e), vec3(1.0/2.2)); }
+float hash21(vec2 p){ p = fract(p*vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x*p.y); }
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p); f = f*f*(3.0 - 2.0*f);
+  return mix(mix(hash21(i), hash21(i + vec2(1,0)), f.x), mix(hash21(i + vec2(0,1)), hash21(i + vec2(1,1)), f.x), f.y);
+}
+float fbm(vec2 p, int oct){
+  float s = 0.0, a = 0.5; mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
+  for (int i = 0; i < 6; i++){ if (i >= oct) break; s += a*vnoise(p); p = m*p + 7.1; a *= 0.5; }
+  return s;
+}
+`;
+const CLOUDS = `
+uniform float uCloud; uniform float uTime; uniform vec3 uSunDir; uniform vec3 uSunCol; uniform vec2 uCloudV;
+vec4 clouds(vec3 d, vec3 base, vec3 amb){
+  if (d.y <= 0.0 || uCloud < 0.005) return vec4(base, 0.0);
+  float t = 1800.0/(d.y + 0.035);
+  vec2 p = (d.xz*t - uCloudV*uTime)*0.00028;
+  float n = fbm(p, 6);
+  float th = mix(0.74, 0.28, uCloud);
+  float dens = smoothstep(th, th + 0.2, n);
+  float n2 = fbm(p + normalize(uSunDir.xz + 1e-4)*0.07, 4);
+  float lit = clamp(1.0 - (n2 - n)*5.0, 0.25, 1.3);
+  float silver = pow(max(dot(d, uSunDir), 0.0), 10.0)*(1.0 - dens)*3.0;
+  vec3 col = uSunCol*(0.5*lit + silver) + amb*mix(1.4, 0.8, uCloud);
+  col *= mix(1.0, 0.5, uCloud*uCloud*smoothstep(th, th + 0.45, n));
+  col = mix(col, base, 1.0 - exp(-t*0.000016));
+  float a = dens*smoothstep(0.0, 0.12, d.y);
+  return vec4(mix(base, col, a), a);
+}
+`;
+const VS_FULL = `#version 300 es
+void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p*2.0 - 1.0, 0.0, 1.0); }`;
+
+/* ---- spektrum: JONSWAP + Mitsuyasu yayılımı -> h0(k) */
+const FS_INIT = HEAD + COMMON + `
+uniform sampler2D uNoise; uniform float uN, uL, uKmin, uKmax, uWp, uAlpha, uU, uWindAng;
+out vec4 o;
+const float G = 9.81;
+float jonswap(float w){
+  float sg = w <= uWp ? 0.07 : 0.09;
+  float r = exp(-(w - uWp)*(w - uWp)/(2.0*sg*sg*uWp*uWp));
+  return uAlpha*G*G/pow(w, 5.0)*exp(-1.25*pow(uWp/w, 4.0))*pow(3.3, r);
+}
+float spread(float th, float w){
+  float sp = clamp(11.5*pow(G/(uWp*uU), 2.5), 2.0, 30.0);
+  float s = w <= uWp ? sp*pow(w/uWp, 5.0) : sp*pow(w/uWp, -2.5);
+  s = clamp(s, 0.4, 30.0);
+  float nrm = sqrt(s/PI)*0.5*(1.0 + 1.0/(8.0*s));
+  return nrm*pow(abs(cos(th*0.5)), 2.0*s);
+}
+float amp(vec2 k){
+  float kl = length(k);
+  if (kl < uKmin || kl >= uKmax) return 0.0;
+  float w = sqrt(G*kl);
+  float dwdk = G/(2.0*w);
+  float th = atan(k.y, k.x) - uWindAng;
+  float Sk = jonswap(w)*spread(th, w)*dwdk/kl;
+  Sk *= exp(-kl*kl*2.5e-5);
+  float dk = 2.0*PI/uL;
+  return 0.5*sqrt(Sk)*dk;
+}
+void main(){
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  int n = int(uN);
+  vec2 m = vec2(c); m -= uN*step(uN*0.5, m);
+  vec2 k = m*2.0*PI/uL;
+  ivec2 cm = (ivec2(n) - c) % ivec2(n);
+  vec2 h0 = texelFetch(uNoise, c, 0).xy*amp(k);
+  vec2 h0m = texelFetch(uNoise, cm, 0).xy*amp(-k);
+  o = vec4(h0, h0m.x, -h0m.y);
+}`;
+
+/* ---- zaman evrimi + 8 gerçek alanın 4 karmaşık alana paketlenmesi */
+const FS_TIME = HEAD + COMMON + `
+uniform sampler2D uH0; uniform float uN, uL, uT, uW0;
+layout(location = 0) out vec4 oA; layout(location = 1) out vec4 oB;
+vec2 I(vec2 v){ return vec2(-v.y, v.x); }
+void main(){
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 m = vec2(c); m -= uN*step(uN*0.5, m);
+  vec2 k = m*2.0*PI/uL;
+  float kl = length(k);
+  if (kl < 1e-6){ oA = vec4(0.0); oB = vec4(0.0); return; }
+  float w = floor(sqrt(9.81*kl)/uW0)*uW0;
+  vec4 h0 = texelFetch(uH0, c, 0);
+  float ph = w*uT;
+  vec2 e = vec2(cos(ph), sin(ph));
+  vec2 h = cmul(h0.xy, vec2(e.x, -e.y)) + cmul(h0.zw, e);
+  vec2 ih = I(h);
+  vec2 Dx = -k.x/kl*ih, Dz = -k.y/kl*ih;
+  vec2 Dydx = k.x*ih, Dydz = k.y*ih;
+  vec2 Dxdx = k.x*k.x/kl*h, Dzdz = k.y*k.y/kl*h, Dxdz = k.x*k.y/kl*h;
+  oA = vec4(Dx + I(h), Dz + I(Dxdz));
+  oB = vec4(Dydx + I(Dydz), Dxdx + I(Dzdz));
+}`;
+
+/* ---- Stockham FFT, tek aşama */
+const FS_FFT = HEAD + COMMON + `
+uniform sampler2D uA, uB; uniform float uN, uSub; uniform int uHoriz;
+layout(location = 0) out vec4 oA; layout(location = 1) out vec4 oB;
+void main(){
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  float idx = uHoriz == 1 ? float(c.x) : float(c.y);
+  float hs = uSub*0.5;
+  float ev = floor(idx/uSub)*hs + mod(idx, hs);
+  int ie = int(ev), io = int(ev + uN*0.5);
+  ivec2 ce = uHoriz == 1 ? ivec2(ie, c.y) : ivec2(c.x, ie);
+  ivec2 co = uHoriz == 1 ? ivec2(io, c.y) : ivec2(c.x, io);
+  float ang = 2.0*PI*idx/uSub;
+  vec2 tw = vec2(cos(ang), sin(ang));
+  vec4 ea = texelFetch(uA, ce, 0), oa = texelFetch(uA, co, 0);
+  vec4 eb = texelFetch(uB, ce, 0), ob = texelFetch(uB, co, 0);
+  oA = vec4(ea.xy + cmul(tw, oa.xy), ea.zw + cmul(tw, oa.zw));
+  oB = vec4(eb.xy + cmul(tw, ob.xy), eb.zw + cmul(tw, ob.zw));
+}`;
+
+/* ---- yer değiştirme, türevler, Jacobian'dan köpük */
+const FS_FINAL = HEAD + `
+uniform sampler2D uA, uB, uPrev; uniform float uLambda, uDt, uFoamBias, uFoamDecay;
+layout(location = 0) out vec4 oDisp; layout(location = 1) out vec4 oDeriv;
+void main(){
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec4 a = texelFetch(uA, c, 0), b = texelFetch(uB, c, 0);
+  float l = uLambda;
+  float jxx = 1.0 + l*b.z, jzz = 1.0 + l*b.w, jxz = l*a.w;
+  float J = jxx*jzz - jxz*jxz;
+  float foam = texelFetch(uPrev, c, 0).w*exp(-uFoamDecay*uDt);
+  foam = max(foam, clamp((uFoamBias - J)*1.6, 0.0, 1.0));
+  oDisp = vec4(l*a.x, a.y, l*a.z, foam);
+  oDeriv = vec4(b.x, b.y, l*b.z, l*b.w);
+}`;
+
+/* ---- atmosfer (Rayleigh + Mie tek saçılma) */
+const FS_SKYBASE = HEAD + COMMON + `
+uniform vec3 uSunDir; uniform vec2 uRes;
+out vec4 o;
+const float Re = 6360e3, Ra = 6460e3, HR = 8000.0, HM = 1200.0;
+const vec3 BR = vec3(5.5e-6, 13.0e-6, 22.4e-6); const float BM = 21e-6;
+vec2 rs(vec3 ro, vec3 rd, float r){ float b = dot(ro, rd), c = dot(ro, ro) - r*r, h = b*b - c; if (h < 0.0) return vec2(-1.0); h = sqrt(h); return vec2(-b - h, -b + h); }
+vec3 atmo(vec3 rd, vec3 sd){
+  vec3 ro = vec3(0.0, Re + 2.0, 0.0);
+  float tmax = rs(ro, rd, Ra).y;
+  float ds = tmax/20.0;
+  float mu = dot(rd, sd), g = 0.76;
+  float pR = 3.0/(16.0*PI)*(1.0 + mu*mu);
+  float pM = 3.0/(8.0*PI)*((1.0 - g*g)*(1.0 + mu*mu))/((2.0 + g*g)*pow(1.0 + g*g - 2.0*g*mu, 1.5));
+  vec3 sR = vec3(0.0), sM = vec3(0.0); float oR = 0.0, oM = 0.0;
+  for (int i = 0; i < 20; i++){
+    vec3 p = ro + rd*(float(i) + 0.5)*ds;
+    float h = length(p) - Re;
+    float dR = exp(-h/HR)*ds, dM = exp(-h/HM)*ds;
+    oR += dR; oM += dM;
+    if (rs(p, sd, Re).x > 0.0) continue;
+    float dl = rs(p, sd, Ra).y/8.0; float lR = 0.0, lM = 0.0;
+    for (int j = 0; j < 8; j++){ vec3 q = p + sd*(float(j) + 0.5)*dl; float hq = length(q) - Re; lR += exp(-hq/HR)*dl; lM += exp(-hq/HM)*dl; }
+    vec3 att = exp(-(BR*(oR + lR) + BM*1.1*(oM + lM)));
+    sR += dR*att; sM += dM*att;
+  }
+  return 20.0*(pR*BR*sR + pM*BM*sM) + vec3(0.0004, 0.0008, 0.0016);
+}
+void main(){
+  vec3 d = eqDir(gl_FragCoord.xy/uRes);
+  d.y = max(d.y, 0.0015);
+  o = vec4(atmo(normalize(d), uSunDir), 1.0);
+}`;
+
+/* ---- yansıma haritası: atmosfer + bulut */
+const FS_SKYREFL = HEAD + COMMON + CLOUDS + `
+uniform sampler2D uSkyBase; uniform vec2 uRes;
+out vec4 o;
+void main(){
+  vec3 d = eqDir(gl_FragCoord.xy/uRes);
+  vec3 base = textureLod(uSkyBase, eqUV(vec3(d.x, max(d.y, 0.0), d.z)), 0.0).rgb;
+  vec3 amb = textureLod(uSkyBase, vec2(0.5), 9.0).rgb;
+  o = vec4(clouds(d, base, amb).rgb, 1.0);
+}`;
+
+/* ---- arka plan gökyüzü */
+const FS_BG = HEAD + COMMON + CLOUDS + `
+uniform sampler2D uSkyBase; uniform vec2 uRes; uniform vec3 uF, uR, uU; uniform float uTan, uAsp, uExp;
+out vec4 o;
+void main(){
+  vec2 ndc = gl_FragCoord.xy/uRes*2.0 - 1.0;
+  vec3 d = normalize(uF + ndc.x*uTan*uAsp*uR + ndc.y*uTan*uU);
+  vec3 base = textureLod(uSkyBase, eqUV(vec3(d.x, max(d.y, 0.0), d.z)), 0.0).rgb;
+  float cd = dot(d, uSunDir);
+  base += uSunCol*(smoothstep(0.99993, 0.99997, cd)*40.0 + pow(max(cd, 0.0), 900.0)*1.5)*step(0.0, d.y + 0.003);
+  vec3 amb = textureLod(uSkyBase, vec2(0.5), 9.0).rgb;
+  o = vec4(finish(clouds(d, base, amb).rgb, uExp), 1.0);
+}`;
+
+/* ---- okyanus yüzeyi */
+const VS_OCEAN = HEAD + `
+in vec2 aGrid;
+uniform mat4 uVP; uniform float uR, uDu, uN; uniform vec3 uL;
+uniform sampler2D uD0, uD1, uD2;
+out vec3 vPos; out vec2 vUV;
+float mapc(float u){ float a = abs(u); return sign(u)*(64.0*a + (uR - 64.0)*a*a*a*a); }
+float spc(float u){ float a = abs(u); return (64.0 + 4.0*(uR - 64.0)*a*a*a)*uDu; }
+void main(){
+  vec2 p = vec2(mapc(aGrid.x), mapc(aGrid.y));
+  float sp = max(spc(aGrid.x), spc(aGrid.y));
+  vec3 d = textureLod(uD0, p/uL.x, max(0.0, log2(sp*uN/uL.x))).xyz
+         + textureLod(uD1, p/uL.y, max(0.0, log2(sp*uN/uL.y))).xyz
+         + textureLod(uD2, p/uL.z, max(0.0, log2(sp*uN/uL.z))).xyz;
+  vUV = p;
+  vPos = vec3(p.x, 0.0, p.y) + d;
+  gl_Position = uVP*vec4(vPos, 1.0);
+}`;
+const FS_OCEAN = HEAD + COMMON + `
+in vec3 vPos; in vec2 vUV;
+out vec4 o;
+uniform sampler2D uV0, uV1, uV2, uD0, uD1, uD2, uSky;
+uniform vec3 uL, uCam, uSunDir, uSunCol; uniform float uExp, uHs, uTime;
+vec3 skyL(vec3 d, float lod){ return textureLod(uSky, eqUV(d), lod).rgb; }
+void main(){
+  vec2 u0 = vUV/uL.x, u1 = vUV/uL.y, u2 = vUV/uL.z;
+  vec4 s = texture(uV0, u0) + texture(uV1, u1) + texture(uV2, u2);
+  vec2 slope = s.xy/max(vec2(0.2), 1.0 + s.zw);
+  vec3 V = uCam - vPos; float dist = length(V); V /= dist;
+  vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
+  float nv0 = dot(N, V);
+  if (nv0 < 0.03) N = normalize(N + V*(0.03 - nv0));
+  float NV = max(dot(N, V), 0.02);
+  vec3 L = uSunDir;
+  float rough = 0.05 + 0.22*smoothstep(20.0, 5000.0, dist);
+
+  vec3 R = reflect(-V, N); R.y = max(R.y, 0.004); R = normalize(R);
+  float F = 0.02 + 0.98*pow(1.0 - NV, 5.0);
+  vec3 refl = skyL(R, 0.5 + rough*10.0);
+
+  vec3 H = normalize(L + V);
+  float NH = max(dot(N, H), 0.0), NL = max(dot(N, L), 0.0);
+  float a2 = rough*rough;
+  float dd = NH*NH*(a2 - 1.0) + 1.0;
+  float D = a2/(PI*dd*dd);
+  float kk = rough*0.5;
+  float Gs = NL/(NL*(1.0 - kk) + kk)*NV/(NV*(1.0 - kk) + kk);
+  float Fh = 0.02 + 0.98*pow(1.0 - max(dot(H, V), 0.0), 5.0);
+  vec3 spec = uSunCol*D*Gs*Fh/(4.0*NV)*step(0.0, L.y);
+
+  vec3 amb = skyL(vec3(0.0, 1.0, 0.0), 8.0);
+  float hN = clamp(vPos.y/(uHs*0.5 + 0.2), 0.0, 2.0);
+  vec2 lh = normalize(L.xz + 1e-4), vh = normalize(-V.xz + 1e-4);
+  float back = pow(max(dot(lh, vh), 0.0), 4.0)*pow(max(0.5 - 0.5*dot(L, N), 0.0), 3.0);
+  vec3 deep = vec3(0.004, 0.024, 0.038);
+  vec3 sssC = vec3(0.03, 0.30, 0.25);
+  vec3 body = deep*(amb*2.2 + uSunCol*max(L.y, 0.0)*0.7)
+            + sssC*uSunCol*(hN*back*2.4 + 0.05*hN*NV*NV) + sssC*amb*0.06*hN;
+  vec3 col = mix(body, refl, F) + spec;
+
+  float fa = texture(uD0, u0).w + texture(uD1, u1).w*0.7 + texture(uD2, u2).w*0.35;
+  float pat = fbm(vUV*0.8 + vec2(uTime*0.04, 0.0), 3);
+  pat = mix(pat, 0.5, smoothstep(40.0, 400.0, dist));
+  float foam = smoothstep(0.3, 1.0, fa*(0.5 + pat*1.0));
+  vec3 foamC = vec3(0.86, 0.9, 0.92)*(amb*1.3 + uSunCol*(0.3 + 0.7*NL)*smoothstep(-0.05, 0.1, L.y));
+  col = mix(col, foamC, foam);
+
+  vec3 fogC = skyL(normalize(vec3(-V.x, 0.02, -V.z)), 3.0);
+  col = mix(col, fogC, 1.0 - exp(-dist/6500.0));
+  o = vec4(finish(col, uExp), 1.0);
+}`;
+
+/* ---- şamandıra: dalga alanının üzerinde yüzer */
+const BUOY_COMMON = `
+uniform sampler2D uD0, uD1, uD2, uV0, uV1; uniform vec3 uL;
+vec3 dispAt(vec2 x){ return textureLod(uD0, x/uL.x, 0.0).xyz + textureLod(uD1, x/uL.y, 0.0).xyz + textureLod(uD2, x/uL.z, 1.0).xyz; }
+mat3 buoyFrame(out vec3 org){
+  vec2 x0 = vec2(0.0);
+  for (int i = 0; i < 4; i++) x0 = -dispAt(x0).xz;
+  org = vec3(0.0, dispAt(x0).y, 0.0);
+  vec4 s = textureLod(uV0, x0/uL.x, 1.0) + textureLod(uV1, x0/uL.y, 3.0);
+  vec2 sl = s.xy/max(vec2(0.3), 1.0 + s.zw);
+  vec3 up = normalize(mix(vec3(0.0, 1.0, 0.0), normalize(vec3(-sl.x, 1.0, -sl.y)), 0.75));
+  vec3 xa = normalize(vec3(1.0, 0.0, 0.0) - up*up.x);
+  vec3 za = cross(xa, up);
+  return mat3(xa, up, za);
+}
+`;
+const VS_BUOY = HEAD + BUOY_COMMON + `
+in vec3 aPos; in vec3 aNor; in float aPart;
+uniform mat4 uVP;
+out vec3 vW; out vec3 vN; out vec3 vLoc; flat out int vPart;
+void main(){
+  vec3 org; mat3 M = buoyFrame(org);
+  vW = org + M*aPos; vN = M*aNor; vLoc = aPos; vPart = int(aPart + 0.5);
+  gl_Position = uVP*vec4(vW, 1.0);
+}`;
+const FS_BUOY = HEAD + COMMON + `
+in vec3 vW; in vec3 vN; in vec3 vLoc; flat in int vPart;
+out vec4 o;
+uniform sampler2D uSky; uniform vec3 uCam, uSunDir, uSunCol; uniform float uExp, uLamp;
+void main(){
+  vec3 N = normalize(vN), V = normalize(uCam - vW);
+  if (dot(N, V) < 0.0) N = -N;
+  vec3 red = vec3(0.6, 0.03, 0.018), white = vec3(0.78, 0.78, 0.74);
+  vec3 alb; float emis = 0.0;
+  if (vPart == 0){ float st = step(0.5, fract(atan(vLoc.z, vLoc.x)/(2.0*PI)*8.0)); alb = mix(red, white, st); }
+  else if (vPart == 1) alb = vec3(0.035, 0.04, 0.045);
+  else if (vPart == 2) alb = red;
+  else { alb = vec3(0.25, 0.24, 0.2); emis = uLamp; }
+  vec3 amb = textureLod(uSky, eqUV(normalize(vec3(N.x, max(N.y, 0.0) + 0.2, N.z))), 5.0).rgb;
+  float NL = max(dot(N, uSunDir), 0.0);
+  vec3 H = normalize(uSunDir + V);
+  vec3 c = alb*(amb*1.3 + uSunCol*NL) + uSunCol*pow(max(dot(N, H), 0.0), 60.0)*0.35*NL + vec3(1.0, 0.94, 0.8)*emis*14.0;
+  float dist = length(uCam - vW);
+  vec3 fogC = textureLod(uSky, eqUV(normalize(vec3(-V.x, 0.02, -V.z))), 3.0).rgb;
+  c = mix(c, fogC, 1.0 - exp(-dist/6500.0));
+  o = vec4(finish(c, uExp), 1.0);
+}`;
+const VS_GLOW = HEAD + BUOY_COMMON + `
+uniform mat4 uVP; uniform vec3 uRight, uUp, uCam; uniform float uSize;
+out vec2 vC;
+void main(){
+  const vec2 cs[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(1,1), vec2(-1,-1), vec2(1,1), vec2(-1,1));
+  vec2 c = cs[gl_VertexID]; vC = c;
+  vec3 org; mat3 M = buoyFrame(org);
+  vec3 lamp = org + M*vec3(0.0, 3.14, 0.0);
+  lamp += normalize(uCam - lamp)*0.7;
+  gl_Position = uVP*vec4(lamp + (uRight*c.x + uUp*c.y)*uSize, 1.0);
+}`;
+const FS_GLOW = HEAD + `
+in vec2 vC; out vec4 o; uniform float uGlow;
+void main(){ float r = length(vC); float g = exp(-r*r*7.0)*0.7 + exp(-r*16.0)*0.9; o = vec4(vec3(1.0, 0.92, 0.78)*g*uGlow*(1.0 - smoothstep(0.85, 1.0, r)), 1.0); }`;
+
+/* ---------------------------------------------------------------- GL helpers */
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vs, fs, attribs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  (attribs || []).forEach((a, i) => gl.bindAttribLocation(p, i, a));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const info = gl.getActiveUniform(p, i); u[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(p, info.name); }
+  return { p, u };
+}
+function texture(w, h, fmt, levels, minF, magF, wrapS, wrapT) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texStorage2D(gl.TEXTURE_2D, levels, fmt, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minF);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magF);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapS);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapT);
+  return t;
+}
+function framebuffer(texs) {
+  const f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  texs.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0));
+  gl.drawBuffers(texs.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('Framebuffer eksik');
+  return f;
+}
+function bindTex(P, name, unit, t) {
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.uniform1i(P.u[name], unit);
+}
+function mipmap(t) { gl.bindTexture(gl.TEXTURE_2D, t); gl.generateMipmap(gl.TEXTURE_2D); }
+
+let P;
+try {
+  P = {
+    init: program(VS_FULL, FS_INIT), time: program(VS_FULL, FS_TIME), fft: program(VS_FULL, FS_FFT),
+    fin: program(VS_FULL, FS_FINAL), skyBase: program(VS_FULL, FS_SKYBASE), skyRefl: program(VS_FULL, FS_SKYREFL),
+    bg: program(VS_FULL, FS_BG), ocean: program(VS_OCEAN, FS_OCEAN, ['aGrid']),
+    buoy: program(VS_BUOY, FS_BUOY, ['aPos', 'aNor', 'aPart']), glow: program(VS_GLOW, FS_GLOW),
+  };
+} catch (e) {
+  console.error(e);
+  fail('Gölgelendiriciler bu cihazda derlenemedi. Ayrıntı tarayıcı konsolunda.');
+  return;
+}
+
+/* ---------------------------------------------------------------- resources */
+const NEAREST = gl.NEAREST, LINEAR = gl.LINEAR, REPEAT = gl.REPEAT, CLAMP = gl.CLAMP_TO_EDGE;
+const MIPS = LOGN + 1;
+
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+CASCADES.forEach((c, ci) => {
+  const r = rng(1337 + ci * 7919);
+  const data = new Float32Array(N * N * 4);
+  for (let i = 0; i < N * N; i++) {
+    const u1 = Math.max(r(), 1e-7), u2 = r(), rad = Math.sqrt(-2 * Math.log(u1));
+    data[i * 4] = rad * Math.cos(2 * Math.PI * u2);
+    data[i * 4 + 1] = rad * Math.sin(2 * Math.PI * u2);
+  }
+  c.noise = texture(N, N, gl.RGBA32F, 1, NEAREST, NEAREST, REPEAT, REPEAT);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, N, N, gl.RGBA, gl.FLOAT, data);
+  c.h0 = texture(N, N, gl.RGBA32F, 1, NEAREST, NEAREST, REPEAT, REPEAT);
+  c.h0fb = framebuffer([c.h0]);
+  const mk = () => {
+    const t = texture(N, N, gl.RGBA16F, MIPS, gl.LINEAR_MIPMAP_LINEAR, LINEAR, REPEAT, REPEAT);
+    if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+    gl.generateMipmap(gl.TEXTURE_2D);
+    return t;
+  };
+  c.disp = [mk(), mk()];
+  c.deriv = mk();
+  c.fin = [framebuffer([c.disp[0], c.deriv]), framebuffer([c.disp[1], c.deriv])];
+  c.cur = 0;
+});
+const pp = [0, 1].map(() => {
+  const A = texture(N, N, gl.RGBA32F, 1, NEAREST, NEAREST, REPEAT, REPEAT);
+  const B = texture(N, N, gl.RGBA32F, 1, NEAREST, NEAREST, REPEAT, REPEAT);
+  return { A, B, fb: framebuffer([A, B]) };
+});
+
+const SKY_W = 512, SKY_H = 256, REFL_W = 256, REFL_H = 128;
+const skyBase = texture(SKY_W, SKY_H, gl.RGBA16F, 10, gl.LINEAR_MIPMAP_LINEAR, LINEAR, REPEAT, CLAMP);
+const skyBaseFb = framebuffer([skyBase]);
+const skyRefl = texture(REFL_W, REFL_H, gl.RGBA16F, 9, gl.LINEAR_MIPMAP_LINEAR, LINEAR, REPEAT, CLAMP);
+const skyReflFb = framebuffer([skyRefl]);
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+const emptyVao = gl.createVertexArray();
+
+// ocean grid
+const oceanVao = gl.createVertexArray();
+gl.bindVertexArray(oceanVao);
+{
+  const g = new Float32Array(GRID * GRID * 2);
+  for (let j = 0; j < GRID; j++) for (let i = 0; i < GRID; i++) {
+    g[(j * GRID + i) * 2] = i / (GRID - 1) * 2 - 1;
+    g[(j * GRID + i) * 2 + 1] = j / (GRID - 1) * 2 - 1;
+  }
+  const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, g, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const idx = new Uint32Array((GRID - 1) * (GRID - 1) * 6);
+  let k = 0;
+  for (let j = 0; j < GRID - 1; j++) for (let i = 0; i < GRID - 1; i++) {
+    const a = j * GRID + i, b = a + 1, c = a + GRID, d = c + 1;
+    idx[k++] = a; idx[k++] = c; idx[k++] = b; idx[k++] = b; idx[k++] = c; idx[k++] = d;
+  }
+  const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+}
+const OCEAN_COUNT = (GRID - 1) * (GRID - 1) * 6;
+
+// buoy mesh: 0 çizgili gövde, 1 koyu metal, 2 kırmızı küre tepelik, 3 fener
+const buoyVao = gl.createVertexArray();
+let BUOY_COUNT = 0;
+gl.bindVertexArray(buoyVao);
+{
+  const v = [];
+  const nrm = a => { const l = Math.hypot(a[0], a[1], a[2]); return [a[0] / l, a[1] / l, a[2] / l]; };
+  const put = (p, n, part) => v.push(p[0], p[1], p[2], n[0], n[1], n[2], part);
+  const tri = (a, b, c, na, nb, nc, part) => { put(a, na, part); put(b, nb, part); put(c, nc, part); };
+  const SEG = 40;
+  function lathe(r0, r1, y0, y1, part) {
+    const sl = (r0 - r1) / (y1 - y0);
+    for (let i = 0; i < SEG; i++) {
+      const a0 = i / SEG * 2 * Math.PI, a1 = (i + 1) / SEG * 2 * Math.PI;
+      const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+      const n0 = nrm([c0, sl, s0]), n1 = nrm([c1, sl, s1]);
+      const A = [r0 * c0, y0, r0 * s0], B = [r0 * c1, y0, r0 * s1], C = [r1 * c1, y1, r1 * s1], D = [r1 * c0, y1, r1 * s0];
+      tri(A, B, C, n0, n1, n1, part); tri(A, C, D, n0, n1, n0, part);
+    }
+  }
+  function disk(r, y, up, part) {
+    const n = [0, up ? 1 : -1, 0];
+    for (let i = 0; i < SEG; i++) {
+      const a0 = i / SEG * 2 * Math.PI, a1 = (i + 1) / SEG * 2 * Math.PI;
+      tri([0, y, 0], [r * Math.cos(a0), y, r * Math.sin(a0)], [r * Math.cos(a1), y, r * Math.sin(a1)], n, n, n, part);
+    }
+  }
+  function sphere(r, cy, part) {
+    const RINGS = 14;
+    const pt = (i, j) => { const th = j / RINGS * Math.PI, ph = i / SEG * 2 * Math.PI; return [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)]; };
+    for (let j = 0; j < RINGS; j++) for (let i = 0; i < SEG; i++) {
+      const a = pt(i, j), b = pt(i + 1, j), c = pt(i + 1, j + 1), d = pt(i, j + 1);
+      const s = q => [q[0] * r, q[1] * r + cy, q[2] * r];
+      tri(s(a), s(b), s(c), a, b, c, part); tri(s(a), s(c), s(d), a, c, d, part);
+    }
+  }
+  lathe(1.0, 1.0, -0.9, 0.45, 0); disk(1.0, -0.9, false, 0);
+  lathe(1.0, 0.32, 0.45, 0.8, 0);
+  lathe(0.32, 0.32, 0.8, 2.9, 0);
+  lathe(0.38, 0.38, 2.9, 3.0, 1); disk(0.38, 3.0, true, 1); disk(0.38, 2.9, false, 1);
+  lathe(0.15, 0.15, 3.0, 3.28, 3); disk(0.15, 3.28, true, 1);
+  lathe(0.035, 0.035, 3.28, 3.5, 1);
+  sphere(0.28, 3.76, 2);
+  const data = new Float32Array(v);
+  BUOY_COUNT = data.length / 7;
+  const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 28, 24);
+}
+gl.bindVertexArray(null);
+
+/* ---------------------------------------------------------------- math */
+const norm3 = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function perspective(fovy, asp, n, f) {
+  const t = 1 / Math.tan(fovy / 2);
+  return new Float32Array([t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0]);
+}
+function lookAt(e, c, up) {
+  const z = norm3([e[0] - c[0], e[1] - c[1], e[2] - c[2]]), x = norm3(cross3(up, z)), y = cross3(z, x);
+  return new Float32Array([x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot3(x, e), -dot3(y, e), -dot3(z, e), 1]);
+}
+function mul4(a, b) {
+  const r = new Float32Array(16);
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k]; r[i * 4 + j] = s; }
+  return r;
+}
+const D2R = Math.PI / 180;
+function sunDir() {
+  const el = S.sunEl * D2R, az = S.sunAz * D2R;
+  return [Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)];
+}
+// Güneş ışığının atmosferden geçişi (Kasten–Young hava kütlesi)
+function sunLight() {
+  const h = Math.max(S.sunEl, -1.5);
+  const am = 1 / (Math.sin(h * D2R) + 0.50572 * Math.pow(h + 6.07995, -1.6364));
+  const bR = [5.5e-6, 13.0e-6, 22.4e-6], bM = 21e-6 * 1.1;
+  const fade = Math.min(1, Math.max(0, (S.sunEl + 1.5) / 3));
+  const cl = 1 - 0.78 * Math.pow(S.cloud, 1.5);
+  return bR.map(b => Math.exp(-(b * 8000 + bM * 1200) * am) * 2.6 * fade * cl);
+}
+function exposure() {
+  const se = Math.sin(Math.max(S.sunEl, 0) * D2R);
+  let e = 1.0 / (0.22 + 0.95 * Math.sqrt(se));
+  if (S.sunEl < 0) e *= 1 + (-S.sunEl) * 0.35;
+  return e * (1 + 0.35 * S.cloud);
+}
+
+/* ---------------------------------------------------------------- camera + input */
+const TARGET = [0, 1.8, 0];
+const cam = { yaw: -S.sunAz * D2R + 0.1, pitch: 0.1, dist: 46, yawGoal: null };
+const pointers = new Map();
+let pinch0 = 0;
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  canvas.classList.add('dragging');
+  cam.yawGoal = null;
+  if (pointers.size === 2) { const [a, b] = [...pointers.values()]; pinch0 = Math.hypot(a[0] - b[0], a[1] - b[1]); }
+});
+canvas.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  const dx = e.clientX - prev[0], dy = e.clientY - prev[1];
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pointers.size === 1) {
+    cam.yaw -= dx * 0.005;
+    cam.pitch += dy * 0.004;
+  } else if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinch0 > 0) cam.dist *= pinch0 / d;
+    pinch0 = d;
+  }
+});
+const endPtr = e => { pointers.delete(e.pointerId); if (!pointers.size) canvas.classList.remove('dragging'); pinch0 = 0; };
+canvas.addEventListener('pointerup', endPtr);
+canvas.addEventListener('pointercancel', endPtr);
+canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist *= Math.exp(e.deltaY * 0.0012); }, { passive: false });
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, LOW ? 1.5 : 1.75);
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+
+/* ---------------------------------------------------------------- passes */
+function fullscreen() { gl.bindVertexArray(emptyVao); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+
+function buildSpectrum() {
+  const { wp, alpha } = spectrumParams();
+  const th = S.windDir * D2R;
+  const windAng = Math.atan2(Math.cos(th), -Math.sin(th)); // dalgaların ilerleme yönü (x, z)
+  gl.useProgram(P.init.p);
+  gl.viewport(0, 0, N, N);
+  for (const c of CASCADES) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, c.h0fb);
+    bindTex(P.init, 'uNoise', 0, c.noise);
+    gl.uniform1f(P.init.u.uN, N); gl.uniform1f(P.init.u.uL, c.L);
+    gl.uniform1f(P.init.u.uKmin, c.kmin); gl.uniform1f(P.init.u.uKmax, c.kmax);
+    gl.uniform1f(P.init.u.uWp, wp); gl.uniform1f(P.init.u.uAlpha, alpha);
+    gl.uniform1f(P.init.u.uU, S.wind); gl.uniform1f(P.init.u.uWindAng, windAng);
+    fullscreen();
+  }
+}
+
+function simulate(t, dt) {
+  gl.viewport(0, 0, N, N);
+  for (const c of CASCADES) {
+    gl.useProgram(P.time.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pp[0].fb);
+    bindTex(P.time, 'uH0', 0, c.h0);
+    gl.uniform1f(P.time.u.uN, N); gl.uniform1f(P.time.u.uL, c.L);
+    gl.uniform1f(P.time.u.uT, t); gl.uniform1f(P.time.u.uW0, 2 * Math.PI / LOOP_T);
+    fullscreen();
+
+    gl.useProgram(P.fft.p);
+    gl.uniform1f(P.fft.u.uN, N);
+    let src = 0;
+    for (const horiz of [1, 0]) {
+      gl.uniform1i(P.fft.u.uHoriz, horiz);
+      for (let s = 1; s <= LOGN; s++) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, pp[1 - src].fb);
+        bindTex(P.fft, 'uA', 0, pp[src].A);
+        bindTex(P.fft, 'uB', 1, pp[src].B);
+        gl.uniform1f(P.fft.u.uSub, 1 << s);
+        fullscreen();
+        src = 1 - src;
+      }
+    }
+
+    const next = 1 - c.cur;
+    gl.useProgram(P.fin.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, c.fin[next]);
+    bindTex(P.fin, 'uA', 0, pp[src].A);
+    bindTex(P.fin, 'uB', 1, pp[src].B);
+    bindTex(P.fin, 'uPrev', 2, c.disp[c.cur]);
+    gl.uniform1f(P.fin.u.uLambda, -S.chop);
+    gl.uniform1f(P.fin.u.uDt, dt);
+    gl.uniform1f(P.fin.u.uFoamBias, 0.35 + 0.75 * S.foam);
+    gl.uniform1f(P.fin.u.uFoamDecay, 0.45);
+    fullscreen();
+    c.cur = next;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    mipmap(c.disp[next]); mipmap(c.deriv);
+  }
+}
+
+function setCloudUniforms(Pr, time, sd, sc) {
+  const th = S.windDir * D2R;
+  gl.uniform1f(Pr.u.uCloud, S.cloud); gl.uniform1f(Pr.u.uTime, time);
+  gl.uniform3fv(Pr.u.uSunDir, sd); gl.uniform3fv(Pr.u.uSunCol, sc);
+  gl.uniform2f(Pr.u.uCloudV, -Math.sin(th) * (4 + S.wind), Math.cos(th) * (4 + S.wind));
+}
+
+function bindOceanTextures(Pr, start) {
+  let u = start;
+  CASCADES.forEach((c, i) => { bindTex(Pr, 'uD' + i, u++, c.disp[c.cur]); });
+  CASCADES.forEach((c, i) => { bindTex(Pr, 'uV' + i, u++, c.deriv); });
+  gl.uniform3f(Pr.u.uL, CASCADES[0].L, CASCADES[1].L, CASCADES[2].L);
+  return u;
+}
+
+/* ---------------------------------------------------------------- loop */
+let simT = 12, cloudT = 0, wall = 0, last = performance.now();
+updateReadout();
+
+function frame(now) {
+  const rdt = Math.min(0.05, (now - last) / 1000); last = now;
+  wall += rdt;
+  const dt = paused ? 0 : rdt * S.speed;
+  simT = (simT + dt) % LOOP_T;
+  cloudT += dt;
+
+  resize();
+  const W = canvas.width, H = canvas.height;
+
+  if (specDirty) { buildSpectrum(); specDirty = false; }
+  simulate(simT, dt);
+
+  const sd = sunDir(), sc = sunLight(), ex = exposure();
+
+  if (skyDirty) {
+    gl.useProgram(P.skyBase.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, skyBaseFb);
+    gl.viewport(0, 0, SKY_W, SKY_H);
+    gl.uniform3fv(P.skyBase.u.uSunDir, sd); gl.uniform2f(P.skyBase.u.uRes, SKY_W, SKY_H);
+    fullscreen();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    mipmap(skyBase);
+    skyDirty = false;
+  }
+  gl.useProgram(P.skyRefl.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, skyReflFb);
+  gl.viewport(0, 0, REFL_W, REFL_H);
+  bindTex(P.skyRefl, 'uSkyBase', 0, skyBase);
+  gl.uniform2f(P.skyRefl.u.uRes, REFL_W, REFL_H);
+  setCloudUniforms(P.skyRefl, cloudT, sd, sc);
+  fullscreen();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  mipmap(skyRefl);
+
+  // camera
+  if (cam.yawGoal !== null) {
+    let d = cam.yawGoal - cam.yaw; d = Math.atan2(Math.sin(d), Math.cos(d));
+    cam.yaw += d * Math.min(1, rdt * 2.5);
+    if (Math.abs(d) < 0.002) cam.yawGoal = null;
+  }
+  cam.dist = Math.min(600, Math.max(7, cam.dist));
+  const minH = 1.4 + 0.8 * HS;
+  const minPitch = Math.asin(Math.max(-1, Math.min(1, (minH - TARGET[1]) / cam.dist)));
+  cam.pitch = Math.min(1.35, Math.max(Math.max(minPitch, -0.2), cam.pitch));
+  const cp = Math.cos(cam.pitch);
+  const eye = [TARGET[0] + cam.dist * cp * Math.sin(cam.yaw), TARGET[1] + cam.dist * Math.sin(cam.pitch), TARGET[2] + cam.dist * cp * Math.cos(cam.yaw)];
+  const fov = 55 * D2R, asp = W / H;
+  const VP = mul4(perspective(fov, asp, 0.25, 30000), lookAt(eye, TARGET, [0, 1, 0]));
+  const F = norm3([TARGET[0] - eye[0], TARGET[1] - eye[1], TARGET[2] - eye[2]]);
+  const Rt = norm3(cross3(F, [0, 1, 0])), Up = cross3(Rt, F);
+  $('rose').setAttribute('transform', `rotate(${cam.yaw / D2R})`);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+
+  // sky
+  gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+  gl.useProgram(P.bg.p);
+  bindTex(P.bg, 'uSkyBase', 0, skyBase);
+  gl.uniform2f(P.bg.u.uRes, W, H);
+  gl.uniform3fv(P.bg.u.uF, F); gl.uniform3fv(P.bg.u.uR, Rt); gl.uniform3fv(P.bg.u.uU, Up);
+  gl.uniform1f(P.bg.u.uTan, Math.tan(fov / 2)); gl.uniform1f(P.bg.u.uAsp, asp); gl.uniform1f(P.bg.u.uExp, ex);
+  setCloudUniforms(P.bg, cloudT, sd, sc);
+  fullscreen();
+
+  // ocean
+  gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+  gl.useProgram(P.ocean.p);
+  let u = bindOceanTextures(P.ocean, 0);
+  bindTex(P.ocean, 'uSky', u, skyRefl);
+  gl.uniformMatrix4fv(P.ocean.u.uVP, false, VP);
+  gl.uniform1f(P.ocean.u.uR, GRID_R); gl.uniform1f(P.ocean.u.uDu, 2 / (GRID - 1)); gl.uniform1f(P.ocean.u.uN, N);
+  gl.uniform3fv(P.ocean.u.uCam, eye); gl.uniform3fv(P.ocean.u.uSunDir, sd); gl.uniform3fv(P.ocean.u.uSunCol, sc);
+  gl.uniform1f(P.ocean.u.uExp, ex); gl.uniform1f(P.ocean.u.uHs, HS); gl.uniform1f(P.ocean.u.uTime, simT);
+  gl.bindVertexArray(oceanVao);
+  gl.drawElements(gl.TRIANGLES, OCEAN_COUNT, gl.UNSIGNED_INT, 0);
+
+  // buoy — Mo(A): kısa-uzun, 10 saniyede bir
+  const ph = wall % 10;
+  const lampOn = (ph < 0.5 || (ph >= 1.0 && ph < 2.5)) ? 1 : 0;
+  gl.useProgram(P.buoy.p);
+  u = bindOceanTextures(P.buoy, 0);
+  bindTex(P.buoy, 'uSky', u, skyRefl);
+  gl.uniformMatrix4fv(P.buoy.u.uVP, false, VP);
+  gl.uniform3fv(P.buoy.u.uCam, eye); gl.uniform3fv(P.buoy.u.uSunDir, sd); gl.uniform3fv(P.buoy.u.uSunCol, sc);
+  gl.uniform1f(P.buoy.u.uExp, ex); gl.uniform1f(P.buoy.u.uLamp, lampOn);
+  gl.bindVertexArray(buoyVao);
+  gl.drawArrays(gl.TRIANGLES, 0, BUOY_COUNT);
+
+  if (lampOn) {
+    const night = Math.min(1, Math.max(0, (12 - S.sunEl) / 14));
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); gl.depthMask(false);
+    gl.useProgram(P.glow.p);
+    bindOceanTextures(P.glow, 0);
+    gl.uniformMatrix4fv(P.glow.u.uVP, false, VP);
+    gl.uniform3fv(P.glow.u.uRight, Rt); gl.uniform3fv(P.glow.u.uUp, Up); gl.uniform3fv(P.glow.u.uCam, eye);
+    gl.uniform1f(P.glow.u.uSize, 1.2 + 2.2 * night);
+    gl.uniform1f(P.glow.u.uGlow, 0.25 + 0.75 * night);
+    gl.bindVertexArray(emptyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.disable(gl.BLEND); gl.depthMask(true);
+  }
+  gl.bindVertexArray(null);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>

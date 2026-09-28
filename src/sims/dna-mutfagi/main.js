@@ -1,9 +1,12 @@
 // DNA Mutfağı — DNA tarifinden proteine: transkripsiyon, translasyon ve tek harflik mutasyonların etkisi.
-import { createSim, THREE, clamp, smoothstep, lerp, instanced, randInt, pick } from '@core';
+import { createSim, THREE, clamp, smoothstep, lerp, instanced, randInt, pick, mat, RoundedBoxGeometry, BufferGeometryUtils } from '@core';
+import { darkMedium, blobGeometry, loftTube, tissue, softDot } from './bio.js';
+import { buildCellEnv } from './cellEnv.js';
 import { AA, CLASS_NAME, COMP, RNA_COMP, aaName, aaShort, toRNA, translate, classify, randomGene } from './genetik.js';
 
 const D = 0.5;              // nükleotit aralığı
 const RAD = 0.85;           // sarmal yarıçapı
+const GROOVE = 0.62;        // iki zincir arasındaki açı kayması: büyük ve küçük oluk
 const TWIST = Math.PI / 5;  // 36°/baz çifti (≈10 bç/tur)
 const SUB = 4;              // omurga çizgisinde nükleotit başına ara nokta
 const YD = 5.4, YM = 0.6, YP = -1.5, YO = -3.0;
@@ -22,8 +25,8 @@ const GENES = {
 };
 
 const sim = createSim({
-  background: 0x0a0f1f,
-  camera: { position: [-0.6, 5.5, 21], target: [-0.6, 2.3, 0], fov: 45 },
+  studio: { mood: 'lab', color: 0x2a3050, warmth: 0.05, key: { el: 55, az: 200, power: 1.4 }, radius: 80, height: 40 },
+  camera: { position: [-3.5, 5.6, 19.5], target: [-0.3, 2.0, -0.5], fov: 45 },
   controls: { minDistance: 5, maxDistance: 50 },
   info: `
     <h3>Ne görüyorsun?</h3>
@@ -31,6 +34,10 @@ const sim = createSim({
     <b>kalıp zinciri</b> okuyarak bir <b>mRNA</b> kopyası (tarifin fotokopisi) yazar. mRNA, kodlayan zincirle aynıdır; yalnız T yerine
     <b>U</b> bulunur. Aşçı <b>ribozom</b> mRNA'yı üçer harf (<b>kodon</b>) okur; her kodona uyan <b>antikodonlu tRNA</b> doğru amino asidi getirir.
     AUG “başla”, UAA/UAG/UGA “dur” demektir. Amino asitler zincir hâlinde birleşip <b>protein</b>i (yemeği) oluşturur.</p>
+    <p>Sarmalda şeker-fosfat <b>omurgası</b> (tüp ve fosfat küreleri) dışta, bazlar içte yassı basamaklar hâlinde; iki zincir arasındaki
+    açı farkı <b>büyük</b> ve <b>küçük oluğu</b> oluşturur. Arkada <b>çekirdek zarı</b> (iki katlı zar) ve üzerindeki <b>por kompleksleri</b>,
+    çekirdek içinde boncuklu <b>kromatin</b> (histonlara sarılı DNA) ile <b>çekirdekçik</b>; zarın altında sitoplazmada
+    ribozomlu <b>ER</b> keseleri, serbest ribozomlar, uzakta <b>mitokondriler</b> ve kesecikler; sitoplazmayı <b>hücre iskeleti</b> (kalın mikrotübüller, ince aktin iplikleri) çaprazlar. Zarın ön kesitinde iki lipit çift katmanı ve porlar görünür. Çevrede süzülen renkli parıltılar serbest nükleotitlerdir.</p>
     <p>Boncuk renkleri amino asidin kimyasını gösterir: <span style="color:${CLASS_HEX.h}">hidrofobik</span>,
     <span style="color:${CLASS_HEX.p}">polar</span>, <span style="color:${CLASS_HEX.a}">asidik (−)</span>, <span style="color:${CLASS_HEX.b}">bazik (+)</span>.</p>
     <h3>Dene</h3>
@@ -53,13 +60,34 @@ const sim = createSim({
     Sarmal 10 baz çifti/tur çizildi (gerçekte ≈10,5).</small></p>`,
 });
 sim.formatTime = () => STAGE_SHORT[stage] || '';
-sim.scene.add(new THREE.AmbientLight(0x8090b0, 0.6));
+
+// --- Ortam: koyu çekirdek sıvısı, derinlik pusu, süzülen parçacıklar ---
+const LOWQ = new URLSearchParams(location.search).has('low') || matchMedia('(pointer: coarse)').matches;
+const medium = darkMedium(sim, {
+  top: 0x18285a, bottom: 0x1a1850, glow: 0x2a3f86, glowDir: [0.2, 0.3, -0.9], tint: 0x5a2a80,
+  fog: 0x070b1d, density: 0.012, motes: LOWQ ? 260 : 600, box: [44, 22, 26], center: [0, 2.5, -4],
+  moteColor: 0x9fb6ff, moteColor2: 0xffc6e8, moteSize: 0.07, moteOpacity: 0.5,
+});
 
 // --- Ortak geometri / yardımcılar ---
 const scene = sim.scene;
-const sphereGeo = new THREE.SphereGeometry(1, 14, 10);
-const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 8);
-const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.05, ...extra });
+const sphereGeo = new THREE.SphereGeometry(1, LOWQ ? 20 : 32, LOWQ ? 14 : 22);
+// Baz (basamak): sarmal eksenine dik, yassı halka düzlemi gibi ince levha (x: kalınlık, z: genişlik)
+const slabGeo = new RoundedBoxGeometry(1.1, 1, 3.4, 2, 0.34);
+/** Yüzeyin kendi renginden ışıma (örnek rengi dahil): moleküller karanlık ortamda hafifçe parlar, bloom alır. */
+function glowFrom(m, k) {
+  const prev = m.onBeforeCompile, pk = m.customProgramCacheKey?.bind(m);
+  m.onBeforeCompile = (sh, r) => {
+    prev?.call(m, sh, r);
+    sh.uniforms.uSelfGlow = m.userData.selfGlow;
+    sh.fragmentShader = sh.fragmentShader.replace('void main() {', 'uniform float uSelfGlow;\nvoid main() {')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * uSelfGlow;');
+  };
+  m.userData.selfGlow = { value: k };
+  m.customProgramCacheKey = () => (pk ? pk() : '') + '-selfglow';
+  return m;
+}
+const gloss = (color, k = 0.3, g = 0.9) => glowFrom(mat.plastic({ color, gloss: g }), k);
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _dir = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0), QI = new THREE.Quaternion();
@@ -82,13 +110,48 @@ function setSeg(mesh, i, a, b, r) {
   _m.compose(_p, _q, _s);
   mesh.setMatrixAt(i, _m);
 }
-function makeLine(color, n, opacity = 0.85) {
+/** Omurga: noktaları her güncellemede değişen, paralel taşımalı çerçeveli tüp (şeker-fosfat zinciri). */
+function makeTube(color, maxPts, radius, glowK = 0.35) {
+  const R = LOWQ ? 8 : 12, nv = maxPts * (R + 1);
+  const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), pts = new Float32Array(maxPts * 3);
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-  const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
-  l.frustumCulled = false;
-  scene.add(l);
-  return l;
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3).setUsage(THREE.DynamicDrawUsage));
+  const idx = [];
+  for (let i = 0; i < maxPts - 1; i++) for (let j = 0; j < R; j++) {
+    const a = i * (R + 1) + j, b = a + R + 1;
+    idx.push(a, a + 1, b, b, a + 1, b + 1);
+  }
+  g.setIndex(idx);
+  g.setDrawRange(0, 0);
+  const mesh = new THREE.Mesh(g, gloss(color, glowK, 0.8));
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  const T = new THREE.Vector3(), N = new THREE.Vector3(), B = new THREE.Vector3(), P = new THREE.Vector3(), Q = new THREE.Vector3();
+  mesh.userData.pts = pts;
+  mesh.userData.update = (n) => {
+    if (n < 2) { g.setDrawRange(0, 0); return; }
+    N.set(0, 1, 0);
+    for (let i = 0; i < n; i++) {
+      const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
+      T.set(pts[i1 * 3] - pts[i0 * 3], pts[i1 * 3 + 1] - pts[i0 * 3 + 1], pts[i1 * 3 + 2] - pts[i0 * 3 + 2]).normalize();
+      N.addScaledVector(T, -N.dot(T));
+      if (N.lengthSq() < 1e-6) N.set(0, 0, 1).addScaledVector(T, -T.z);
+      N.normalize();
+      B.crossVectors(T, N);
+      P.set(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+      for (let j = 0; j <= R; j++) {
+        const an = (j / R) * Math.PI * 2, c = Math.cos(an), s = Math.sin(an);
+        Q.set(N.x * c + B.x * s, N.y * c + B.y * s, N.z * c + B.z * s);
+        const o = (i * (R + 1) + j) * 3;
+        nor[o] = Q.x; nor[o + 1] = Q.y; nor[o + 2] = Q.z;
+        pos[o] = P.x + Q.x * radius; pos[o + 1] = P.y + Q.y * radius; pos[o + 2] = P.z + Q.z * radius;
+      }
+    }
+    g.setDrawRange(0, (n - 1) * R * 6);
+    g.attributes.position.needsUpdate = g.attributes.normal.needsUpdate = true;
+  };
+  return mesh;
 }
 function lbl(text, pos = [0, 0, 0], cls = 'plain', style, parent = scene) {
   const l = sim.label(text, { parent, position: pos, className: cls });
@@ -97,56 +160,80 @@ function lbl(text, pos = [0, 0, 0], cls = 'plain', style, parent = scene) {
 }
 
 // --- DNA ---
-const bbA = inst(sphereGeo, std(0xe2e8f0), MAX_NT), bbB = inst(sphereGeo, std(0x94a3b8), MAX_NT);
-const rungA = inst(cylGeo, std(0xffffff), MAX_NT), rungB = inst(cylGeo, std(0xffffff), MAX_NT);
-const lineA = makeLine(0xe2e8f0, (MAX_NT - 1) * SUB + 1), lineB = makeLine(0x94a3b8, (MAX_NT - 1) * SUB + 1);
-const pol = new THREE.Mesh(sphereGeo, std(0x2dd4bf, { transparent: true, opacity: 0.35, depthWrite: false }));
+// Şeker-fosfat omurgası: kalın tüp (deoksiriboz) + her nükleotitte fosfat küresi; bazlar yassı levhalar
+const bbA = inst(sphereGeo, gloss(0xf3cf9a, 0.22, 0.85), MAX_NT), bbB = inst(sphereGeo, gloss(0xe8b27e, 0.22, 0.85), MAX_NT);
+const rungA = inst(slabGeo, gloss(0xffffff, 0.5), MAX_NT), rungB = inst(slabGeo, gloss(0xffffff, 0.5), MAX_NT);
+const lineA = makeTube(0xdfe8f7, (MAX_NT - 1) * SUB + 1, 0.1, 0.22), lineB = makeTube(0x9fb8dc, (MAX_NT - 1) * SUB + 1, 0.1, 0.22);
+// RNA polimeraz: DNA'yı saran iri, yarı saydam protein kümesi
+const polMat = glowFrom(tissue({ color: 0x2dd4bf, veins: 0.15 }), 0.18);
+Object.assign(polMat, { transparent: true, opacity: 0.42, depthWrite: false, clearcoat: 0.8, roughness: 0.35 });
+const pol = new THREE.Mesh(blobGeometry(1, { detail: LOWQ ? 6 : 10, amp: 0.16, freq: 1.7, seed: 2 }), polMat);
 pol.scale.set(1.0, 1.35, 1.2);
+// Enzimin DNA'yı kavrayan çenesi (ikinci, daha küçük lob) ve RNA çıkış kanalı tarafındaki kabartı
+const polJaw = new THREE.Mesh(blobGeometry(0.6, { detail: LOWQ ? 5 : 8, amp: 0.24, freq: 2.1, seed: 6 }), polMat);
+polJaw.position.set(0.6, -0.55, 0.55);
+const polLobe = new THREE.Mesh(blobGeometry(0.45, { detail: LOWQ ? 4 : 7, amp: 0.25, freq: 2.4, seed: 8 }), polMat);
+polLobe.position.set(-0.55, 0.62, -0.5);
+polJaw.userData.noCast = polLobe.userData.noCast = true;
+pol.add(polJaw, polLobe);
+pol.userData.noCast = true;
 scene.add(pol);
-const selBox = new THREE.Mesh(new THREE.BoxGeometry(0.44, 2.4, 2.1), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1, depthWrite: false }));
-selBox.add(new THREE.LineSegments(new THREE.EdgesGeometry(selBox.geometry), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 })));
-scene.add(selBox);
-const selBoxM = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.95, 0.6), selBox.material);
-selBoxM.add(new THREE.LineSegments(new THREE.EdgesGeometry(selBoxM.geometry), selBox.children[0].material));
-scene.add(selBoxM);
+// Seçili konum göstergesi: sarmalı (ve mRNA'yı) saran, hafif ışıyan iki ince halka ve aralarında yumuşak bir ışık lekesi
+function selRing(R, t) {
+  const g = new THREE.Group();
+  const rm = Object.assign(mat.glow({ color: 0xbcd0ff, intensity: 1.1 }), { transparent: true, opacity: 0.75, depthWrite: false });
+  const tg = new THREE.TorusGeometry(R, t, 8, 48).rotateY(Math.PI / 2);
+  for (const dx of [-0.24, 0.24]) { const r = new THREE.Mesh(tg, rm); r.position.x = dx; r.userData.noCast = true; r.raycast = () => {}; g.add(r); }
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: softDot(), color: 0x8fb0ff, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending }));
+  halo.scale.setScalar(R * 2.6); halo.raycast = () => {};
+  g.add(halo);
+  scene.add(g);
+  return g;
+}
+const selBox = selRing(1.3, 0.03);
+const selBoxM = selRing(0.52, 0.022);
 
-// Çekirdek bölgesi ve çekirdek zarı
-const nuc = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0x6366f1, transparent: true, opacity: 0.08, depthWrite: false }));
-nuc.position.set(0, 5.75, -1.6);
-scene.add(nuc);
-const membrane = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-0.5, 0, 0), new THREE.Vector3(0.5, 0, 0)]),
-  new THREE.LineDashedMaterial({ color: 0x818cf8, dashSize: 0.02, gapSize: 0.015, transparent: true, opacity: 0.7 }));
-membrane.position.set(0, 2.85, -1.6);
-scene.add(membrane);
+// Hücre ortamı: çekirdek zarı (çift zar + por kompleksleri) zemin ve arka duvar olarak; kromatin, çekirdekçik, ER, ribozomlar
+const env = buildCellEnv(scene, { LOWQ });
 
 // --- mRNA ---
-const mBB = inst(sphereGeo, std(0xfde68a), MAX_NT), mStick = inst(cylGeo, std(0xffffff), MAX_NT);
-const lineM = makeLine(0xfde68a, MAX_NT);
+const mBB = inst(sphereGeo, gloss(0xfcd88a, 0.3), MAX_NT), mStick = inst(slabGeo, gloss(0xffffff, 0.5), MAX_NT);
+const lineM = makeTube(0xfcd88a, MAX_NT, 0.075, 0.3);
 
 // --- Ribozom, tRNA, salıverme faktörü ---
-const ribSmall = new THREE.Mesh(sphereGeo, std(0x7c3aed, { transparent: true, opacity: 0.55, depthWrite: false }));
+// Ribozom: iki alt birimli, yumrulu rRNA-protein kütlesi (yarı saydam: içinden mRNA ve tRNA görünür)
+const ribMat = (c, o) => {
+  const m = glowFrom(tissue({ color: c, veins: 0.25 }), 0.22);
+  return Object.assign(m, { transparent: true, opacity: o, depthWrite: false, clearcoat: 0.7 });
+};
+const ribSmall = new THREE.Mesh(blobGeometry(1, { detail: LOWQ ? 6 : 9, amp: 0.3, freq: 2.6, seed: 1, oct: 4 }), ribMat(0x8b5cf6, 0.7));
 ribSmall.scale.set(1.35, 0.42, 0.9);
-const ribLarge = new THREE.Mesh(sphereGeo, std(0xa78bfa, { transparent: true, opacity: 0.4, depthWrite: false }));
+const ribLarge = new THREE.Mesh(blobGeometry(1, { detail: LOWQ ? 6 : 9, amp: 0.3, freq: 2.4, seed: 3, oct: 4 }), ribMat(0xb39dfa, 0.55));
 ribLarge.scale.set(1.5, 0.9, 1.05);
+ribSmall.userData.noCast = ribLarge.userData.noCast = true;
 scene.add(ribSmall, ribLarge);
 const ribLbl = lbl('Ribozom', [0, 0, 0], 'plain', { color: '#c4b5fd', fontSize: '11px' });
 
-const stubGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.3, 8);
-const beadGeo = new THREE.SphereGeometry(0.21, 14, 10);
+const stubGeo = new THREE.CapsuleGeometry(0.075, 0.18, 4, 12);
+const beadGeo = new THREE.SphereGeometry(0.21, 28, 20);
+// tRNA'nın L biçimi: antikodon kolu (altta) → dirsek → alıcı kol (amino asit ucu üstte); ilmekler şişkin uçlarla
+const tArms = [
+  [[[-0.5, 0.33, 0], [0, 0.29, 0.03], [0.5, 0.33, 0]], (t) => 0.085 + 0.04 * Math.exp(-((t - 0.5) ** 2) / 0.02)],
+  [[[0, 0.33, 0], [0.06, 0.7, 0.05], [0.02, 1.05, 0], [0, 1.32, 0]], (t) => 0.085 + 0.02 * Math.sin(t * 9)],
+  [[[-0.45, 0.82, 0.02], [0, 0.87, 0], [0.42, 0.9, -0.03]], (t) => 0.07 + 0.05 * Math.exp(-(Math.min(t, 1 - t) ** 2) / 0.006)],
+].map(([p, r]) => loftTube(new THREE.CatmullRomCurve3(p.map((v) => new THREE.Vector3(...v))), r, { segs: 40, radial: 14, noiseAmp: 0.01, noiseFreq: 6 }));
 function makeTRNA() {
   const g = new THREE.Group();
-  const mat = std(0xf472b6);
-  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.0, 8), mat); stem.position.y = 0.8;
-  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.8, 8), mat); arm.rotation.z = Math.PI / 2; arm.position.y = 0.85;
-  const bar = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.12, 0.18), mat); bar.position.y = 0.33;
-  g.add(stem, arm, bar);
+  const mt = glowFrom(tissue({ color: 0xf472b6, veins: 0.2 }), 0.35);
+  mt.clearcoat = 0.8;
+  for (const geo of tArms) g.add(new THREE.Mesh(geo, mt));
   const stubs = [0, 1, 2].map((k) => {
-    const s = new THREE.Mesh(stubGeo, std(0xffffff));
+    const s = new THREE.Mesh(stubGeo, gloss(0xffffff, 1.1));
     s.position.set((k - 1) * D, 0.15, 0);
     g.add(s);
     return s;
   });
-  const bead = new THREE.Mesh(beadGeo, std(0xffffff));
+  const bead = new THREE.Mesh(beadGeo, gloss(0xffffff, 0.9));
   bead.position.y = 1.45;
   g.add(bead);
   const label = lbl('', [0.95, 1.2, 0], '', { ...MONO, fontSize: '11px' }, g);
@@ -155,15 +242,30 @@ function makeTRNA() {
   return { g, stubs, bead, label, k: -1 };
 }
 const trnas = [makeTRNA(), makeTRNA()];
-const rf = new THREE.Mesh(new THREE.OctahedronGeometry(0.42), std(0xf43f5e));
+// Salıverme faktörü: tRNA'yı taklit eden protein (DUR kodonuna oturur)
+const rf = new THREE.Mesh(blobGeometry(0.42, { detail: 6, amp: 0.18, freq: 2.4, seed: 7, stretch: [0.8, 1.25, 0.7] }), glowFrom(tissue({ color: 0xf43f5e, veins: 0.2 }), 0.5));
 rf.visible = false;
 scene.add(rf);
 const rfLbl = lbl('DUR → salıverme faktörü', [0.9, 0.7, 0], '', { fontSize: '11px', color: '#fda4af' }, rf);
 
 // --- Protein ---
-const chain = inst(sphereGeo, std(0xffffff), MAX_AA);
-const origBeads = inst(sphereGeo, std(0xffffff, { transparent: true, opacity: 0.5 }), MAX_AA);
-const rings = inst(new THREE.TorusGeometry(1, 0.1, 6, 24), new THREE.MeshBasicMaterial({ color: 0xffffff }), MAX_AA);
+// Amino asit: omurga atomu kümesi + yan zincir (R grubu) çıkıntısı; peptit bağları boncukları birleştiren tüp
+const aaGeo = BufferGeometryUtils.mergeGeometries([
+  blobGeometry(1, { detail: LOWQ ? 3 : 4, amp: 0.1, freq: 2.2, seed: 12 }),
+  blobGeometry(0.52, { detail: 2, amp: 0.12, freq: 2.6, seed: 13 }).translate(0.28, 0.92, 0.35),
+  blobGeometry(0.36, { detail: 2, amp: 0.1, freq: 2.6, seed: 14 }).translate(-0.62, 0.55, -0.4),
+]);
+const chain = inst(aaGeo, gloss(0xffffff, 0.45, 0.7), MAX_AA);
+const lineP = makeTube(0xe9dcc4, MAX_AA, 0.07, 0.2), lineO = makeTube(0xb8b0a0, MAX_AA, 0.05, 0.1);
+function syncPep(tube, mesh, n) {
+  const pts = tube.userData.pts;
+  for (let j = 0; j < n; j++) { mesh.getMatrixAt(j, _m); _p.setFromMatrixPosition(_m); pts[j * 3] = _p.x; pts[j * 3 + 1] = _p.y; pts[j * 3 + 2] = _p.z; }
+  tube.userData.update(n);
+}
+const origMat = gloss(0xffffff, 0.5);
+Object.assign(origMat, { transparent: true, opacity: 0.5 });
+const origBeads = inst(aaGeo, origMat, MAX_AA);
+const rings = inst(new THREE.TorusGeometry(1, 0.08, 10, 40), mat.glow({ color: 0xfff1d6, intensity: 3 }), MAX_AA);
 chain.count = origBeads.count = rings.count = 0;
 
 // --- Etiketler ---
@@ -261,10 +363,6 @@ function layoutStatic() {
   titles.cyt.position.set(x0 - 2.3, 2.55, 0);
   const endDefs = [["5'", x0 - 0.75, YD + 1.95], ["3'", x1 + 0.75, YD + 1.95], ["3'", x0 - 0.75, YD - 1.95], ["5'", x1 + 0.75, YD - 1.95], ["5'", x0 - 0.75, YM - 0.72], ["3'", x1 + 0.75, YM - 0.72]];
   endDefs.forEach(([t, x, y], i) => { ends[i].setText(t); ends[i].position.set(x, y, 0); });
-  const w = L * D + 7;
-  nuc.scale.set(w, 5.6, 1);
-  membrane.scale.set(w, 1, 1);
-  membrane.computeLineDistances();
 
   // Orijinal protein satırı (yalnız mutasyon varsa)
   const po = cls.po;
@@ -298,33 +396,33 @@ function layoutStatic() {
 function updateDNA() {
   dnaDirty = false;
   for (let i = 0; i < L; i++) {
-    const x = xOf(i), th = i * TWIST, o = open[i];
-    const cy = Math.cos(th) * RAD * (1 - o), sz = Math.sin(th) * RAD * (1 - o);
+    const x = xOf(i), th = i * TWIST, o = open[i], r = RAD * (1 - o);
+    const cy = Math.cos(th) * r, sz = Math.sin(th) * r, cyB = -Math.cos(th - GROOVE) * r, szB = -Math.sin(th - GROOVE) * r;
     _a.set(x, YD + cy + o * 0.95, sz);
-    _b.set(x, YD - cy - o * 0.95, -sz);
-    setBall(bbA, i, _a, 0.13);
-    setBall(bbB, i, _b, 0.13);
-    _c.set(x, YD + o * 0.42, 0); setSeg(rungA, i, _a, _c, 0.075);
-    _c.set(x, YD - o * 0.42, 0); setSeg(rungB, i, _b, _c, 0.075);
+    _b.set(x, YD + cyB - o * 0.95, szB);
+    setBall(bbA, i, _a, 0.15);
+    setBall(bbB, i, _b, 0.15);
+    const my = YD + (cy + cyB) / 2, mz = (sz + szB) / 2;
+    _c.set(x, my + o * 0.42, mz); setSeg(rungA, i, _a, _c, 0.075);
+    _c.set(x, my - o * 0.42, mz); setSeg(rungB, i, _b, _c, 0.075);
   }
   // Pürüzsüz omurga çizgileri
-  const pa = lineA.geometry.attributes.position.array, pb = lineB.geometry.attributes.position.array;
+  const pa = lineA.userData.pts, pb = lineB.userData.pts;
   const n = (L - 1) * SUB + 1;
   for (let q = 0; q < n; q++) {
     const t = q / SUB, i = Math.min(Math.floor(t), L - 2), f = t - i;
     const o = lerp(open[i], open[i + 1] ?? open[i], f), th = t * TWIST, x = (t - (L - 1) / 2) * D;
-    const cy = Math.cos(th) * RAD * (1 - o), sz = Math.sin(th) * RAD * (1 - o);
+    const r = RAD * (1 - o), cy = Math.cos(th) * r, sz = Math.sin(th) * r;
     pa[q * 3] = x; pa[q * 3 + 1] = YD + cy + o * 0.95; pa[q * 3 + 2] = sz;
-    pb[q * 3] = x; pb[q * 3 + 1] = YD - cy - o * 0.95; pb[q * 3 + 2] = -sz;
+    pb[q * 3] = x; pb[q * 3 + 1] = YD - Math.cos(th - GROOVE) * r - o * 0.95; pb[q * 3 + 2] = -Math.sin(th - GROOVE) * r;
   }
-  lineA.geometry.setDrawRange(0, n); lineB.geometry.setDrawRange(0, n);
-  lineA.geometry.attributes.position.needsUpdate = lineB.geometry.attributes.position.needsUpdate = true;
+  lineA.userData.update(n); lineB.userData.update(n);
   for (const m of [bbA, bbB, rungA, rungB]) { m.instanceMatrix.needsUpdate = true; m.boundingSphere = null; }
 }
 
 function updateMRNA() {
   mDirty = false;
-  const pm = lineM.geometry.attributes.position.array;
+  const pm = lineM.userData.pts;
   let formed = 0, contiguous = true;
   for (let i = 0; i < L; i++) {
     const t = mProg[i], x = xOf(i);
@@ -341,8 +439,7 @@ function updateMRNA() {
     setSeg(mStick, i, _a, _c, 0.07);
     if (contiguous && t >= 1) { pm[formed * 3] = x; pm[formed * 3 + 1] = YM; pm[formed * 3 + 2] = 0; formed++; } else contiguous = false;
   }
-  lineM.geometry.setDrawRange(0, formed);
-  lineM.geometry.attributes.position.needsUpdate = true;
+  lineM.userData.update(formed);
   for (const m of [mBB, mStick]) { m.instanceMatrix.needsUpdate = true; m.boundingSphere = null; }
 }
 
@@ -490,6 +587,7 @@ function chainPos(j, n, xr, out) {
   return out.set(xr - 0.4 - back * 0.42, YM + 2.1 + 0.14 * Math.sin(back * 1.3), 0.15);
 }
 
+sim.onRender((rdt) => env.update(Math.min(rdt || 0.016, 0.05)));
 sim.onRender(() => {
   if (dnaDirty) updateDNA();
   if (mDirty) updateMRNA();
@@ -516,8 +614,8 @@ sim.onRender(() => {
   }
   ribSmall.position.set(xr, YM - 0.2 - sep * 2.0, 0);
   ribLarge.position.set(xr, YM + 1.15 + sep * 2.5, 0);
-  ribSmall.material.opacity = 0.55 * fade;
-  ribLarge.material.opacity = 0.4 * fade;
+  ribSmall.material.opacity = 0.7 * fade;
+  ribLarge.material.opacity = 0.55 * fade;
   ribLbl.position.set(xr + 1.9, YM + 1.5 + sep * 2.5, 0);
 
   // tRNA'lar ve salıverme faktörü
@@ -562,6 +660,10 @@ sim.onRender(() => {
   chain.boundingSphere = null;
   meterUpdate();
 });
+sim.onRender(() => {
+  syncPep(lineP, chain, chain.visible ? chain.count : 0);
+  syncPep(lineO, origBeads, titles.orig.visible ? origBeads.count : 0);
+});
 
 function meterUpdate() {
   if (++meterTick % 6) return;
@@ -588,7 +690,8 @@ function applySequence(seq, { frame: doFrame = false, instant = false } = {}) {
 function frame() {
   const cam = sim.camera, t = Math.tan((cam.fov * Math.PI) / 360), aspect = cam.aspect || 1.3;
   const dist = Math.max(14.5 / (2 * t), (L * D + 7.5) / aspect / (2 * t));
-  sim.moveCamera([-0.3, 2.3 + dist * 0.16, dist], [-0.3, 2.3, 0]);
+  const d = dist * 0.94;
+  sim.moveCamera([-0.3 - d * 0.16, 2.2 + d * 0.16, d * 0.98], [-0.3, 2.0, -0.5]);
 }
 
 function loadGene(key) {

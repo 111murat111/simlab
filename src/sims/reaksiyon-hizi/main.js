@@ -1,5 +1,6 @@
 // Reaksiyon Hızı — A + B → C çarpışma kuramı: Maxwell–Boltzmann hızları, etkinleşme enerjisi, yönelim ve katalizör.
-import { createSim, THREE, fmt, clamp, rand, gauss, instanced, heatColor } from '@core';
+import { createSim, THREE, fmt, clamp, rand, gauss, instanced, smoothstep, mat, RoundedBoxGeometry } from '@core';
+import { labRoom, reagentBottle, retortStand, clamp3 } from './labkit.js';
 
 const R = 0.008314;                  // kJ/(mol·K)
 const MAXA = 150, MAXB = 150, N = MAXA + MAXB;
@@ -13,10 +14,13 @@ const P_ORIENT = (1 - ORIENT_COS) / 2;
 const H_MAX = 0.02;
 const COL = ['#f87171', '#60a5fa', '#c084fc'];
 
+// Gerçek ölçek: L0 = 12 birim = 1 L'lik küpün kenarı = 10 cm → U = 0,1/12 m. Parçacıklar büyütülmüş temsildir.
+const U = 0.1 / L0, BENCH = 0.9, PLATE_TOP = BENCH + 0.1;
 const sim = createSim({
-  background: 0x0a0f1c,
-  camera: { position: [15, 11, 19], target: [0, -0.5, 0], fov: 48 },
-  controls: { minDistance: 8, maxDistance: 60 },
+  studio: { color: 0xb9b4aa, mood: 'lab', warmth: 0.1, key: { el: 55, az: 150 }, radius: 20 },
+  look: { aoRadius: 0.012 },
+  camera: { position: [15 * U, PLATE_TOP + 0.05 + 11 * U, 19 * U], target: [0, PLATE_TOP + 0.05 - 0.5 * U, 0], fov: 48, near: 0.004, far: 100 },
+  controls: { minDistance: 8 * U, maxDistance: 1.2 },
   info: `
     <h3>Ne görüyorsun?</h3>
     <p>Kutuda kırmızı <b>A</b> ve mavi <b>B</b> parçacıkları rastgele hızlarla uçuşuyor (Maxwell–Boltzmann dağılımı).
@@ -45,25 +49,76 @@ const st = { T: 300, nA: 100, nB: 100, V: 1, Ea: 6, cat: false, orient: true, si
 const EaEff = () => (st.cat ? st.Ea * CAT : st.Ea);
 let L = L0;
 
-// --- Sahne: kutu, ısıtıcı plaka ---
+// --- Sahne: laboratuvar tezgâhı, ısıtıcı (hot plate), 1 L'lik cam reaksiyon hücresi ---
+labRoom(sim.scene, { width: 3.2, depth: 0.75, benchH: BENCH, style: 'lab', wallZ: -0.36 });
+// Isıtıcı: emaye gövde, cam-seramik üst plaka, ısıtma halkası (sıcaklıkla kızarır), düğmeler
+const hot = new THREE.Group();
+sim.scene.add(hot);
+{
+  const body = new THREE.Mesh(new RoundedBoxGeometry(0.2, 0.085, 0.26, 4, 0.012), mat.paintedMetal({ color: 0xe9ecee, wear: 0.04 }));
+  body.position.set(0, BENCH + 0.0425, 0.03); hot.add(body);
+  const top = new THREE.Mesh(new RoundedBoxGeometry(0.18, 0.012, 0.18, 3, 0.004), mat.ceramic({ color: 0xdfe2e2 }));
+  top.position.set(0, PLATE_TOP - 0.006, 0); hot.add(top);
+  const panel = new THREE.Mesh(new RoundedBoxGeometry(0.17, 0.05, 0.004, 2, 0.002), mat.plastic({ color: 0x24303a, gloss: 0.6 }));
+  panel.position.set(0, BENCH + 0.045, 0.161); panel.rotation.x = -0.2; hot.add(panel);
+  for (const x of [-0.05, 0.05]) {
+    const k = new THREE.Mesh(new THREE.CylinderGeometry(0.013, 0.015, 0.016, 32), mat.plastic({ color: 0x1b1f24, gloss: 0.4 }));
+    k.rotation.x = Math.PI / 2 - 0.2; k.position.set(x, BENCH + 0.046, 0.168); hot.add(k);
+    const tick = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.009, 0.002), mat.glow({ color: 0xffffff, intensity: 1.2 }));
+    tick.position.set(x, BENCH + 0.052, 0.177); tick.rotation.x = -0.2; hot.add(tick);
+  }
+  for (const [x, z] of [[-0.085, -0.1], [0.085, -0.1], [-0.085, 0.15], [0.085, 0.15]]) {
+    const f = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.009, 0.004, 16), mat.rubber());
+    f.position.set(x, BENCH + 0.002, z); hot.add(f);
+  }
+}
+const heatMat = mat.glow({ color: 0xff4a12, intensity: 0 });
+const heatRing = new THREE.Mesh(new THREE.RingGeometry(0.035, 0.07, 64).rotateX(-Math.PI / 2), heatMat);
+heatRing.position.y = PLATE_TOP + 0.0003; heatRing.userData.noShadow = true;
+hot.add(heatRing);
+const ledMat = mat.glow({ color: 0xff3b1f, intensity: 0 });
+const led = new THREE.Mesh(new THREE.SphereGeometry(0.003, 12, 8), ledMat);
+led.position.set(0, BENCH + 0.058, 0.165); hot.add(led);
+
+// Yan tarafta termometre sehpası ve reaktif şişeleri (bağlam)
+{
+  const stand = retortStand(0.42); stand.position.set(-0.22, BENCH, -0.02); sim.scene.add(stand);
+  const cl = clamp3(0.3, 0.07, 0.006); cl.position.copy(stand.position); sim.scene.add(cl);
+  const b1 = reagentBottle({ h: 0.15, r: 0.034, amber: true, liquid: 0x7a3a10, label: 'A', stripe: '#c43' });
+  b1.position.set(0.26, BENCH, -0.14); b1.rotation.y = -0.4; sim.scene.add(b1);
+  const b2 = reagentBottle({ h: 0.13, r: 0.03, liquid: 0xdfe9ff, label: 'B', stripe: '#27c' });
+  b2.position.set(0.35, BENCH, -0.05); b2.rotation.y = 0.3; sim.scene.add(b2);
+}
+
+// İçerik: 1 birim = U metre; küpün tabanı ısıtıcı plakasına oturur (layoutBox)
+const content = new THREE.Group();
+content.scale.setScalar(U);
+sim.scene.add(content);
 const box = new THREE.Group();
-sim.scene.add(box);
-const boxGeo = new THREE.BoxGeometry(1, 1, 1);
-box.add(new THREE.Mesh(boxGeo, new THREE.MeshStandardMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.07, side: THREE.BackSide, depthWrite: false })));
-box.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.55 })));
-const plateMat = new THREE.MeshStandardMaterial({ color: 0x334155, emissive: 0x000000, roughness: 0.6, metalness: 0.3 });
-const plate = new THREE.Mesh(new THREE.BoxGeometry(1.12, 0.05, 1.12), plateMat);
-box.add(plate);
-const catMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.9, roughness: 0.25, emissive: 0x0d9488, emissiveIntensity: 0.6 });
-const catMesh = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.012, 0.6), catMat);
+content.add(box);
+// Cam hücre: yuvarlatılmış kenarlı borosilikat küp (gerçek kırılma) + paslanmaz çelik kenar çerçevesi
+const cell = new THREE.Mesh(new RoundedBoxGeometry(1, 1, 1, 4, 0.02), mat.glass({ thickness: 0.02, rough: 0.015 }));
+cell.userData.noCast = true; cell.userData.noAO = true;
+box.add(cell);
+{
+  const steel = mat.brushedMetal({ color: 0xd2d5d9, rough: 0.25, scale: 0.1 });
+  const e = 0.018, h = 0.5 + e * 0.3;
+  const bar = new THREE.BoxGeometry(1 + e * 2, e, e);
+  for (const [a, b] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+    const x = new THREE.Mesh(bar, steel); x.position.set(0, a * h, b * h); box.add(x);
+    const y = new THREE.Mesh(bar, steel); y.rotation.z = Math.PI / 2; y.position.set(a * h, 0, b * h); box.add(y);
+    const z = new THREE.Mesh(bar, steel); z.rotation.y = Math.PI / 2; z.position.set(a * h, b * h, 0); box.add(z);
+  }
+}
+const catMesh = new THREE.Mesh(new RoundedBoxGeometry(0.6, 0.012, 0.6, 2, 0.004), mat.brushedMetal({ color: 0xb8c2c8, rough: 0.18, scale: 0.1 }));
 box.add(catMesh);
-const plateLabel = sim.label('', { parent: sim.scene, position: [0, 0, 0], className: 'plain' });
-const eqLabel = sim.label('A + B → C', { parent: sim.scene, position: [0, 0, 0], className: 'big' });
+const plateLabel = sim.label('', { parent: content, position: [0, 0, 0], className: 'plain' });
+const eqLabel = sim.label('A + B → C', { parent: content, position: [0, 0, 0], className: 'big' });
 
 function layoutBox() {
   box.scale.setScalar(L);
-  plate.position.y = -0.5 - 0.035;
-  catMesh.position.y = -0.5 + 0.007;
+  content.position.y = PLATE_TOP + (L / 2) * U + 0.001;
+  catMesh.position.y = -0.5 + 0.012;
   plateLabel.position.set(0, -L / 2 - 1.3, L / 2 + 0.4);
   eqLabel.position.set(0, L / 2 + 1.1, 0);
 }
@@ -71,23 +126,38 @@ function layoutBox() {
 // --- Parçacıklar ---
 const pos = new Float32Array(N * 3), vel = new Float32Array(N * 3), ori = new Float32Array(N * 3);
 const type = new Int8Array(N);   // 0 = A, 1 = B, 2 = C, −1 = yok
-const sphere = new THREE.SphereGeometry(1, 18, 12);
-const meshes = [0xef4444, 0x3b82f6, 0xa855f7].map((c, k) => {
-  const m = instanced(sphere, new THREE.MeshStandardMaterial({ color: c, roughness: 0.35, metalness: 0.1 }), k === 2 ? MAXA : k ? MAXB : MAXA);
+const sphere = new THREE.SphereGeometry(1, 24, 16);
+// Parçacıklar: parlak cilalı molekül modeli topları (klasik top-çubuk model plastiği)
+const meshes = [0xd9302c, 0x2463d6, 0x8a3fd1].map((c, k) => {
+  const m = instanced(sphere, mat.plastic({ color: c, gloss: 0.95, scale: 0.02 }), k === 2 ? MAXA : k ? MAXB : MAXA);
   m.frustumCulled = false;
-  sim.scene.add(m);
+  content.add(m);
   return m;
 });
-const siteMesh = instanced(new THREE.SphereGeometry(1, 10, 8), new THREE.MeshStandardMaterial({ color: 0xfde047, emissive: 0xca8a04, emissiveIntensity: 0.8 }), MAXA);
+const siteMesh = instanced(new THREE.SphereGeometry(1, 12, 8), mat.glow({ color: 0xffd23a, intensity: 1.6 }), MAXA);
 siteMesh.frustumCulled = false;
-sim.scene.add(siteMesh);
+content.add(siteMesh);
 
 // Tepkime parlamaları
 const FL = 24;
 const flash = { p: new Float32Array(FL * 3), age: new Float32Array(FL).fill(9), next: 0 };
-const flashMesh = instanced(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: 0xfff3b0, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }), FL);
+// Parlamalar: HDR yumuşak nokta sprite'ları (bloom ile ışıldar)
+const flashPos = new Float32Array(FL * 3), flashSize = new Float32Array(FL), flashA = new Float32Array(FL);
+const flashGeo = new THREE.BufferGeometry();
+flashGeo.setAttribute('position', new THREE.BufferAttribute(flashPos, 3).setUsage(THREE.DynamicDrawUsage));
+flashGeo.setAttribute('aSize', new THREE.BufferAttribute(flashSize, 1).setUsage(THREE.DynamicDrawUsage));
+flashGeo.setAttribute('aA', new THREE.BufferAttribute(flashA, 1).setUsage(THREE.DynamicDrawUsage));
+const flashMat = new THREE.ShaderMaterial({
+  uniforms: { uScale: { value: 400 }, uU: { value: U } },
+  vertexShader: `attribute float aSize; attribute float aA; uniform float uScale, uU; varying float vA;
+    void main(){ vA = aA; vec4 mv = modelViewMatrix*vec4(position, 1.0); gl_PointSize = aSize*uU*uScale/max(-mv.z, 0.001); gl_Position = projectionMatrix*mv; }`,
+  fragmentShader: `varying float vA; void main(){ float r = length(gl_PointCoord - 0.5)*2.0; if (r > 1.0) discard;
+    float g = exp(-r*r*5.0); gl_FragColor = vec4(vec3(1.0, 0.86, 0.5)*4.0*g*vA, g*vA); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+const flashMesh = new THREE.Points(flashGeo, flashMat);
 flashMesh.frustumCulled = false;
-sim.scene.add(flashMesh);
+content.add(flashMesh);
 
 function sigma(k) { return Math.sqrt((R * st.T) / MASS[k]); }
 
@@ -261,7 +331,7 @@ sim.onUpdate((dt) => {
 });
 
 // --- Çizim ---
-const tmpCol = new THREE.Color();
+const tmpV2 = new THREE.Vector2();
 sim.onRender((real) => {
   const cnt = [0, 0, 0];
   let sc = 0;
@@ -277,14 +347,20 @@ sim.onRender((real) => {
   }
   meshes.forEach((m, k) => { m.count = cnt[k]; m.instanceMatrix.needsUpdate = true; });
   siteMesh.count = sc; siteMesh.instanceMatrix.needsUpdate = true;
-  let fc = 0;
   for (let f = 0; f < FL; f++) {
     const a = flash.age[f];
-    if (a > 0.6) continue;
-    writeMatrix(flashMesh.instanceMatrix.array, fc++ * 16, flash.p[f * 3], flash.p[f * 3 + 1], flash.p[f * 3 + 2], 0.4 + a * 2.6);
+    flashPos[f * 3] = flash.p[f * 3]; flashPos[f * 3 + 1] = flash.p[f * 3 + 1]; flashPos[f * 3 + 2] = flash.p[f * 3 + 2];
+    flashSize[f] = 2 * (0.4 + a * 2.6);
+    flashA[f] = a > 0.6 ? 0 : 1 - a / 0.6;
   }
-  flashMesh.count = fc; flashMesh.instanceMatrix.needsUpdate = true;
-  plateMat.emissive.copy(heatColor(clamp((st.T - 200) / 800, 0, 1), tmpCol)).multiplyScalar(0.3);
+  flashGeo.attributes.position.needsUpdate = true; flashGeo.attributes.aSize.needsUpdate = true; flashGeo.attributes.aA.needsUpdate = true;
+  const vp = sim.renderer.getDrawingBufferSize(tmpV2);
+  flashMat.uniforms.uScale.value = vp.y / (2 * Math.tan(THREE.MathUtils.degToRad(sim.camera.fov / 2)));
+  // Isıtma halkası: Draper noktası (≈ 798 K) civarında koyu kırmızı akkor başlar, 1000 K’e doğru turuncuya döner
+  const glowK = smoothstep(760, 1000, st.T);
+  heatMat.emissive.setRGB(1, 0.18 + 0.3 * glowK, 0.04 + 0.08 * glowK);
+  heatMat.emissiveIntensity = 4 * glowK * glowK;
+  ledMat.emissiveIntensity = st.T > 305 ? 3 : 0;
   catMesh.visible = st.cat;
   uiTimer += real;
   if (uiTimer > 0.3) { uiTimer = 0; updateStats(); drawHist(); }
@@ -475,7 +551,10 @@ function setVolume(v) {
   for (let f = 0; f < FL * 3; f++) flash.p[f] *= s;
   st.V = v; L = Lnew;
   layoutBox();
-  sim.camera.position.multiplyScalar(s); // aynı açıdan, kutuyla orantılı uzaklık
+  // aynı açıdan, kutuyla orantılı uzaklık (hedef küpün merkezinde)
+  const tg = sim.controls.target, off = sim.camera.position.clone().sub(tg).multiplyScalar(s);
+  tg.y = content.position.y - 0.5 * U;
+  sim.camera.position.copy(tg).add(off);
 }
 
 function applyPreset(k) {
